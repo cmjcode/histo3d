@@ -1,0 +1,14 @@
+[package]
+name = "h3d-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+h3d-core = { workspace = true }
+h3d-i18n = { workspace = true }
+egui = { workspace = true }
+egui_icons = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,107 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Yulius Jayuda <yulius.jayuda@gmail.com>"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+h3d-core = { path = "crates/h3d-core" }
+h3d-slide = { path = "crates/h3d-slide" }
+h3d-imgproc = { path = "crates/h3d-imgproc" }
+h3d-register = { path = "crates/h3d-register" }
+h3d-segment = { path = "crates/h3d-segment" }
+h3d-volume = { path = "crates/h3d-volume" }
+h3d-io = { path = "crates/h3d-io" }
+h3d-engine = { path = "crates/h3d-engine" }
+h3d-render = { path = "crates/h3d-render" }
+h3d-ui = { path = "crates/h3d-ui" }
+h3d-i18n = { path = "crates/h3d-i18n" }
+
+# --- inti / data ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+ndarray = { version = "0.17", features = ["rayon"] }
+rayon = "1"
+glam = { version = "0.33", features = ["bytemuck", "serde"] }
+bytemuck = { version = "1", features = ["derive"] }
+lz4_flex = "0.14"
+rustfft = "6"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+tiff = "0.11"
+# 0.8 menuntut rustc 1.99; 0.6 adalah rilis terakhir untuk rustc 1.96 (stable saat ini).
+wsi-rs = "=0.6.0"
+fast-surface-nets = "0.2"
+ndshape = "0.3"
+baby_shark = "0.3"
+parry3d = "0.31"
+nifti = { version = "0.18", default-features = false }
+flate2 = "1"
+tract-onnx = "0.23"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# --- GUI (hanya h3d-render, h3d-ui, h3d-app) ---
+# Daftar fitur eframe = default DIKURANGI "glow" (glutin tidak bisa dikompilasi
+# untuk iOS; lihat catatan DUCAD). Backend render selalu wgpu.
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "persistence",
+    "wayland",
+    "web_screen_reader",
+    "x11",
+    "wgpu",
+] }
+egui = "0.36"
+egui_wgpu = { package = "egui-wgpu", version = "0.36" }
+egui_icons = "0.0.1"
+rfd = "0.17"
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = { version = "0.9", features = ["macros"] }
+
+# --- Apple ---
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSFileManager",
+    "NSPathUtilities",
+    "NSString",
+    "NSURL",
+    "NSArray",
+    "NSEnumerator",
+    "NSObject",
+    "NSDictionary",
+    "NSProcessInfo",
+] }
+
+# --- uji ---
+proptest = "1"
+criterion = "0.8"
+tempfile = "3"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+strip = "none"
+debug = "line-tables-only"

@@ -1,0 +1,53 @@
+# Konfigurasi cargo-deny (aturan 14 bagian 14 histo3d.md). Disalin dari DUCAD
+# dengan pengecualian OCCT dibuang: HISTO3D tidak memakai OCCT.
+
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+]
+
+[advisories]
+version = 2
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OFL-1.1",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Aturan keras 1 dan 11: tanpa OCCT/ITK/VTK/OpenCV dan tanpa HTTP.
+deny = [
+    { crate = "opencascade" },
+    { crate = "opencascade-sys" },
+    { crate = "occt-sys" },
+    { crate = "opencv" },
+    { crate = "vtk-rs" },
+    { crate = "openslide-rs" },
+    { crate = "ureq" },
+    { crate = "reqwest" },
+    { crate = "hyper" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,15 @@
+[package]
+name = "h3d-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+h3d-core = { workspace = true }
+egui_wgpu = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }

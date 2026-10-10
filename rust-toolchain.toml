@@ -1,0 +1,6 @@
+# rustfmt + clippy selalu tersedia agar gerbang mutu (bagian 10) bisa dijalankan
+# di mesin mana pun tanpa setup manual.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["aarch64-apple-ios", "aarch64-apple-ios-sim"]

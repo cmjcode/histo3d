@@ -1,0 +1,21 @@
+[package]
+name = "h3d-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+h3d-core = { workspace = true }
+h3d-slide = { workspace = true }
+h3d-segment = { workspace = true }
+h3d-volume = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+lz4_flex = { workspace = true }
+nifti = { workspace = true }
+flate2 = { workspace = true }
+image = { workspace = true }

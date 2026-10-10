@@ -1,0 +1,33 @@
+[package]
+name = "h3d-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+h3d-core = { workspace = true }
+h3d-engine = { workspace = true }
+h3d-render = { workspace = true }
+h3d-ui = { workspace = true }
+h3d-i18n = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+egui_wgpu = { workspace = true }
+egui_icons = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rfd = { workspace = true }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+
+[[bin]]
+name = "histo3d"
+path = "src/main.rs"

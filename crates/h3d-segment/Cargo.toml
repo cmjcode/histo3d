@@ -1,0 +1,19 @@
+[package]
+name = "h3d-segment"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+h3d-core = { workspace = true }
+h3d-imgproc = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+ndarray = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+lz4_flex = { workspace = true }
+tract-onnx = { workspace = true }

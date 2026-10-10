@@ -1,0 +1,20 @@
+[package]
+name = "h3d-volume"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+h3d-core = { workspace = true }
+h3d-imgproc = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+ndarray = { workspace = true }
+rayon = { workspace = true }
+fast-surface-nets = { workspace = true }
+ndshape = { workspace = true }
+baby_shark = { workspace = true }
+parry3d = { workspace = true }
+serde = { workspace = true }
