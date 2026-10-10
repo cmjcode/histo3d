@@ -13,3 +13,4 @@ glam = { workspace = true }
 bytemuck = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
+egui = { workspace = true }

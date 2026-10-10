@@ -6,11 +6,21 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+[features]
+# Backend `wsi-rs` (SVS, NDPI, DICOM WSI, dsb.). Dapat dimatikan bila target
+# tidak bisa mengompilasinya; `open_slide` lalu langsung mencoba TiffBackend.
+default = ["wsi"]
+wsi = ["dep:wsi-rs"]
+
 [dependencies]
 h3d-core = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 image = { workspace = true }
 tiff = { workspace = true }
-wsi-rs = { workspace = true }
+wsi-rs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
