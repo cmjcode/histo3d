@@ -22,6 +22,9 @@ env_logger = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# rfd tidak mendukung iOS; di iPad berkas diambil dari folder Documents (9.3).
+[target.'cfg(not(target_os = "ios"))'.dependencies]
 rfd = { workspace = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]

@@ -15,6 +15,13 @@ ndarray = { workspace = true }
 rayon = { workspace = true }
 fast-surface-nets = { workspace = true }
 ndshape = { workspace = true }
-baby_shark = { workspace = true }
 parry3d = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[[bench]]
+name = "surface_nets"
+harness = false

@@ -17,3 +17,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 lz4_flex = { workspace = true }
 tract-onnx = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+# Hanya untuk membangun model ONNX mungil di tes (tipe `tract_onnx::pb` memakai
+# prost; versi harus sama dengan yang dipakai tract-onnx).
+prost = "0.14"

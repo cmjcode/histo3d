@@ -41,7 +41,6 @@ tiff = "0.11"
 wsi-rs = "=0.6.0"
 fast-surface-nets = "0.2"
 ndshape = "0.3"
-baby_shark = "0.3"
 parry3d = "0.31"
 nifti = { version = "0.18", default-features = false }
 flate2 = "1"

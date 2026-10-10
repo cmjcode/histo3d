@@ -384,6 +384,10 @@ warn-mostly-interpolated = Sebagian besar bentuk berasal dari interpolasi
 warn-has-draft = Angka memuat anotasi yang belum ditinjau
 warn-z-resolution-coarse = Resolusi Z lebih kasar dari ambang margin
 warn-membrane-area-score = Skor { $name } dihitung per luas, bukan per sel
+warn-volume-mismatch = Volume mesh berbeda { $percent }% dari Cavalieri
+warn-sxy-raised = Resolusi kerja dinaikkan dari { $from } ke { $to } um agar muat di memori
+warn-gap-split = Objek diputus antara z { $from_z } dan { $to_z } um (celah { $gap } um)
+warn-nonuniform-z-resampled = Jarak irisan tidak seragam; volume diresampel ke { $dz } um
 
 # --- Galat ---
 err-mpp-missing = mpp tidak ada pada irisan { $name }; isi secara manual

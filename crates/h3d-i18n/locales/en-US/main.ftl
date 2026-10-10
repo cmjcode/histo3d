@@ -384,6 +384,10 @@ warn-mostly-interpolated = Most of the shape comes from interpolation
 warn-has-draft = Figures include unreviewed annotations
 warn-z-resolution-coarse = Z resolution is coarser than the margin threshold
 warn-membrane-area-score = Score { $name } is computed per area, not per cell
+warn-volume-mismatch = Mesh volume differs { $percent }% from Cavalieri
+warn-sxy-raised = Working resolution raised from { $from } to { $to } um to fit in memory
+warn-gap-split = Object split between z { $from_z } and { $to_z } um (gap { $gap } um)
+warn-nonuniform-z-resampled = Slice spacing is not uniform; volume resampled to { $dz } um
 
 # --- Errors ---
 err-mpp-missing = mpp missing on slide { $name }; enter it manually
