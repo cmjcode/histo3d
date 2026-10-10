@@ -2125,8 +2125,11 @@ dependencies = [
  "env_logger",
  "h3d-core",
  "h3d-engine",
+ "image",
  "log",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2154,6 +2157,8 @@ dependencies = [
  "h3d-volume",
  "image",
  "log",
+ "lz4_flex",
+ "ndarray",
  "rayon",
  "serde",
  "serde_json",
@@ -2194,12 +2199,14 @@ dependencies = [
  "h3d-segment",
  "h3d-slide",
  "h3d-volume",
- "image",
+ "libc",
  "log",
  "lz4_flex",
  "nifti",
+ "proptest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

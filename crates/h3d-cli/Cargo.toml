@@ -13,7 +13,13 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Hanya untuk membuat gambar uji kecil (kasus QC gagal).
+image = { workspace = true }
 
 [[bin]]
 name = "h3d"

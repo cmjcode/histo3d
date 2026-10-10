@@ -19,8 +19,10 @@ log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rayon = { workspace = true }
+ndarray = { workspace = true }
 image = { workspace = true }
 chrono = { workspace = true }
+lz4_flex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

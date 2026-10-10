@@ -14,8 +14,18 @@ h3d-volume = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `float_roundtrip`: f64 di project.json harus kembali persis (bolak-balik
+# byte-identik, aturan keras 9).
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 lz4_flex = { workspace = true }
-nifti = { workspace = true }
 flate2 = { workspace = true }
-image = { workspace = true }
+
+# Pemeriksaan ruang kosong sebelum menyalin slide (statvfs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+# Hanya untuk memverifikasi header NIfTI yang ditulis tangan secara independen.
+nifti = { workspace = true }
