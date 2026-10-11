@@ -1,0 +1,198 @@
+{
+  "analysis": {
+    "attr_stats": [],
+    "breslow": null,
+    "capsule": null,
+    "contacts": [
+      {
+        "kind": {
+          "vessel": "blood"
+        },
+        "label": 5,
+        "name": "Pembuluh darah",
+        "result": {
+          "any": true,
+          "area_mm2": 0.035972,
+          "area_voxel_faces_mm2": 0.048705,
+          "patches": [
+            {
+              "area_mm2": 0.018616,
+              "centroid_um": [865.460625, 993.156551, 210.362031],
+              "layers": [6, 7, 8, 9, 10, 11, 12, 13]
+            },
+            {
+              "area_mm2": 0.017355,
+              "centroid_um": [1030.992288, 1008.282684, 210.180019],
+              "layers": [6, 7, 8, 9, 10, 11, 12, 13]
+            }
+          ]
+        }
+      }
+    ],
+    "depth": null,
+    "foci": {
+      "distances_um": [
+        [
+          {
+            "plus_minus_um": 10.431906,
+            "value_um": 0.0,
+            "z_limited": false
+          },
+          {
+            "plus_minus_um": 10.431906,
+            "value_um": 112.996124,
+            "z_limited": false
+          }
+        ],
+        [
+          {
+            "plus_minus_um": 10.431906,
+            "value_um": 112.996124,
+            "z_limited": false
+          },
+          {
+            "plus_minus_um": 10.431906,
+            "value_um": 0.0,
+            "z_limited": false
+          }
+        ]
+      ],
+      "foci": [
+        {
+          "bbox_um": [
+            [1003.834166, 829.011541, 11.641263],
+            [1419.834166, 1245.011541, 407.444211]
+          ],
+          "centroid_um": [1210.951187, 1040.899839, 209.341492],
+          "layers": [1, 18],
+          "max_diameter_um": 425.95977,
+          "n_voxels": 6016,
+          "volume_um3": 35857325.64884
+        },
+        {
+          "bbox_um": [
+            [491.834166, 765.011541, 11.641263],
+            [891.834166, 1165.011541, 407.444211]
+          ],
+          "centroid_um": [685.074352, 960.822586, 209.449793],
+          "layers": [1, 18],
+          "max_diameter_um": 428.446828,
+          "n_voxels": 6012,
+          "volume_um3": 35833484.341893
+        }
+      ],
+      "n": 2
+    },
+    "fractions": {
+      "group_volumes": [
+        ["Tumor", 71690809.990737],
+        ["Pembuluh darah", 9107379.253895]
+      ],
+      "necrosis_percent": null,
+      "rows": [
+        {
+          "fraction_of_group": 1.0,
+          "group": "Tumor",
+          "kind": "tumor",
+          "label": 1,
+          "name": "Tumor",
+          "volume_um3": 71690809.990737
+        },
+        {
+          "fraction_of_group": 1.0,
+          "group": "Pembuluh darah",
+          "kind": {
+            "vessel": "blood"
+          },
+          "label": 5,
+          "name": "Pembuluh darah",
+          "volume_um3": 9107379.253895
+        }
+      ]
+    },
+    "grid": {
+      "nz": 21,
+      "resampled_z": true,
+      "s_xy_um": 16.0,
+      "s_z_um": 23.282526,
+      "size": [98, 81],
+      "uniform_z": false
+    },
+    "hypoxia": {
+      "fraction_beyond": 0.69995,
+      "histogram": [
+        [0.0, 138],
+        [25.0, 358],
+        [50.0, 517],
+        [75.0, 749],
+        [100.0, 810],
+        [125.0, 1037],
+        [150.0, 991],
+        [175.0, 1226],
+        [200.0, 1190],
+        [225.0, 1098],
+        [250.0, 1145],
+        [275.0, 874],
+        [300.0, 875],
+        [325.0, 522],
+        [350.0, 408],
+        [375.0, 89],
+        [400.0, 1]
+      ],
+      "threshold_um": 150.0
+    },
+    "margin": null,
+    "notes": ["Jarak irisan tidak seragam; kisi diresampel ke s_z median 23.3 µm untuk analisis spasial."],
+    "params": {
+      "hypoxia_um": 150.0,
+      "ihc_hetero_warn": 20.0,
+      "margin_close_um": 1000.0,
+      "min_focus_um3": null,
+      "peri_band_um": 500.0,
+      "vessel_hist_bin_um": 25.0
+    },
+    "size": {
+      "centroid_um": [948.100212, 1000.874528, 209.395624],
+      "max_diameter_um": {
+        "plus_minus_um": 10.431906,
+        "value_um": 944.199293,
+        "z_limited": false
+      },
+      "pca_axes_um": [
+        {
+          "plus_minus_um": 10.431906,
+          "value_um": 953.699939,
+          "z_limited": false
+        },
+        {
+          "plus_minus_um": 10.431906,
+          "value_um": 435.142781,
+          "z_limited": false
+        },
+        {
+          "plus_minus_um": 14.073169,
+          "value_um": 430.974062,
+          "z_limited": true
+        }
+      ],
+      "pca_directions": [
+        [0.988658, 0.150183, -0.000696],
+        [-0.144827, 0.952153, -0.269127],
+        [-0.039756, 0.266176, 0.963104]
+      ]
+    },
+    "tre_est_um": 2.431906,
+    "tumor_volume_um3": 71690809.990737,
+    "warnings": [
+      {
+        "dz": 23.282526,
+        "kind": "non_uniform_z_resampled"
+      }
+    ]
+  },
+  "app_version": "0.1.0",
+  "format": "h3d-analysis",
+  "input_key": "ea058f44d92ab777",
+  "notice": "Hanya untuk riset, bukan untuk diagnosis",
+  "version": 1
+}

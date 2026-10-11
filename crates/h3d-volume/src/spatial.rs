@@ -360,30 +360,106 @@ pub struct ContactResult {
     pub patches: Vec<Patch>,
 }
 
+/// Sigma pemulusan indikator struktur untuk normal kontak, dalam satuan
+/// `s_xy` (isotropik secara fisik; pada sumbu z dikonversi ke lapis).
+pub const CONTACT_NORMAL_SIGMA_VOXELS: f64 = 1.5;
+
+/// Pemulusan Gauss 3D separabel atas buffer `f32` berindeks
+/// `x + nx·(y + ny·z)`; `sigma` per sumbu dalam voxel (≤ 0 = sumbu dilewati),
+/// tepi direplikasi.
+fn gaussian_smooth_3d(data: &mut [f32], dims: [usize; 3], sigma: [f64; 3]) {
+    let [nx, ny, nz] = dims;
+    let strides = [1usize, nx, nx * ny];
+    for axis in 0..3 {
+        let sg = sigma[axis];
+        let n = dims[axis];
+        if sg.is_nan() || sg <= 0.0 || n < 2 {
+            continue;
+        }
+        let r = (3.0 * sg).ceil() as i64;
+        let kernel: Vec<f64> = (-r..=r)
+            .map(|i| (-(i * i) as f64 / (2.0 * sg * sg)).exp())
+            .collect();
+        let ksum: f64 = kernel.iter().sum();
+        let stride = strides[axis];
+        // Garis sepanjang `axis`: titik awal = semua indeks dengan koordinat
+        // sumbu itu nol.
+        let (na, nb) = match axis {
+            0 => (ny, nz),
+            1 => (nx, nz),
+            _ => (nx, ny),
+        };
+        let mut line = vec![0f64; n];
+        for b in 0..nb {
+            for a in 0..na {
+                let start = match axis {
+                    0 => nx * (a + ny * b),
+                    1 => a + nx * ny * b,
+                    _ => a + nx * b,
+                };
+                for (i, l) in line.iter_mut().enumerate() {
+                    *l = f64::from(data[start + i * stride]);
+                }
+                for i in 0..n {
+                    let mut acc = 0.0;
+                    for (j, w) in kernel.iter().enumerate() {
+                        let q = (i as i64 + j as i64 - r).clamp(0, n as i64 - 1) as usize;
+                        acc += w * line[q];
+                    }
+                    data[start + i * stride] = (acc / ksum) as f32;
+                }
+            }
+        }
+    }
+}
+
 /// Kontak via pasangan voxel bertetangga muka (6-konektivitas), satu tumor
 /// dan satu struktur. Luas muka `s_xy × s_xy` (muka ±Z) atau `s_xy × s_z`
 /// setempat (muka ±X/±Y). Luas dilaporkan dua kali: mentah (jumlah muka) dan
-/// terkoreksi, yakni tiap muka dibobot `|n_sumbu|` dengan `n` = gradien
-/// `edt3(struktur)` di voxel tumor — penaksir luas permukaan yang tak bias
+/// terkoreksi, yakni tiap muka dibobot `|n_sumbu|` dengan `n` = normal
+/// permukaan struktur **di muka itu** — penaksir luas permukaan yang tak bias
 /// untuk permukaan halus (Σ muka × |n·e| = ∫ (nx²+ny²+nz²) dA = ∫ dA).
+///
+/// Normal = gradien indikator struktur yang dipulus Gauss
+/// (σ = [`CONTACT_NORMAL_SIGMA_VOXELS`] × `s_xy`, isotropik secara fisik),
+/// rata-rata gradien di voxel tumor dan voxel struktur yang mengapit muka.
+/// Gradien `edt3(struktur)` tidak dipakai: arahnya terkuantisasi (menunjuk
+/// pusat voxel terdekat) dan derau arah itu selalu menaikkan `Σ|n_k|`,
+/// sehingga keliling cakram digital terukur +6…+10 % (jari-jari 3–16 voxel);
+/// dengan indikator terpulus biasnya ≤ 0,5 % ± 2 %.
 /// Tambalan = komponen 26-terhubung voxel tumor yang berkontak.
 pub fn contact(tumor: &VoxelMask, structure: &VoxelMask) -> Result<ContactResult, VolError> {
     check_same_grid(tumor, structure)?;
     let grid = &tumor.grid;
     let [nx, ny, nz] = grid.dims();
     let sp = spacing(grid);
-    let d2 = edt3_anisotropic(&structure.data, grid.dims(), sp)?;
-    let dist: Vec<f32> = d2.iter().map(|v| v.sqrt()).collect();
-    let dist_at = |x: i64, y: i64, z: i64| -> f64 {
+    let mut smooth: Vec<f32> = structure.data.iter().map(|&v| f32::from(v != 0)).collect();
+    let sg_xy = CONTACT_NORMAL_SIGMA_VOXELS;
+    let sg_z = if sp[2] > 0.0 {
+        CONTACT_NORMAL_SIGMA_VOXELS * sp[0] / sp[2]
+    } else {
+        0.0
+    };
+    gaussian_smooth_3d(&mut smooth, grid.dims(), [sg_xy, sg_xy, sg_z]);
+    let at = |x: i64, y: i64, z: i64| -> f64 {
         let xx = x.clamp(0, nx as i64 - 1) as usize;
         let yy = y.clamp(0, ny as i64 - 1) as usize;
         let zz = z.clamp(0, nz as i64 - 1) as usize;
-        let v = dist[grid.linear(xx, yy, zz)] as f64;
-        if v.is_finite() {
-            v
+        f64::from(smooth[grid.linear(xx, yy, zz)])
+    };
+    // Gradien fisik (per µm) indikator terpulus di voxel `(x, y, z)`.
+    let gradient = |x: i64, y: i64, z: i64| -> [f64; 3] {
+        let gx = (at(x + 1, y, z) - at(x - 1, y, z)) / (2.0 * grid.s_xy);
+        let gy = (at(x, y + 1, z) - at(x, y - 1, z)) / (2.0 * grid.s_xy);
+        let zu = (z + 1).min(nz as i64 - 1);
+        let zl = (z - 1).max(0);
+        let dzz = grid.z_um[zu as usize] - grid.z_um[zl as usize];
+        let gz = if dzz > 0.0 {
+            (at(x, y, zu) - at(x, y, zl)) / dzz
         } else {
             0.0
-        }
+        };
+        [gx, gy, gz]
     };
     let mut contact_mask = vec![0u8; tumor.data.len()];
     let mut raw_area = vec![0f64; tumor.data.len()];
@@ -402,7 +478,7 @@ pub fn contact(tumor: &VoxelMask, structure: &VoxelMask) -> Result<ContactResult
         }
         let [x, y, z] = grid.delinear(i);
         let (xi, yi, zi) = (x as i64, y as i64, z as i64);
-        let mut n: Option<[f64; 3]> = None;
+        let mut g_here: Option<[f64; 3]> = None;
         for (k, &(dx, dy, dz)) in DIRS.iter().enumerate() {
             let (xx, yy, zz) = (xi + dx, yi + dy, zi + dz);
             if xx < 0 || yy < 0 || zz < 0 || xx >= nx as i64 || yy >= ny as i64 || zz >= nz as i64 {
@@ -418,29 +494,12 @@ pub fn contact(tumor: &VoxelMask, structure: &VoxelMask) -> Result<ContactResult
             } else {
                 grid.s_xy * grid.s_xy
             };
-            let nrm = *n.get_or_insert_with(|| {
-                let gx = (dist_at(xi + 1, yi, zi) - dist_at(xi - 1, yi, zi)) / (2.0 * grid.s_xy);
-                let gy = (dist_at(xi, yi + 1, zi) - dist_at(xi, yi - 1, zi)) / (2.0 * grid.s_xy);
-                let zu = (zi + 1).min(nz as i64 - 1);
-                let zl = (zi - 1).max(0);
-                let dzz = grid.z_um[zu as usize] - grid.z_um[zl as usize];
-                let gz = if dzz > 0.0 {
-                    (dist_at(xi, yi, zu) - dist_at(xi, yi, zl)) / dzz
-                } else {
-                    0.0
-                };
-                let l = (gx * gx + gy * gy + gz * gz).sqrt();
-                if l > 1e-9 {
-                    [gx / l, gy / l, gz / l]
-                } else {
-                    [f64::NAN, 0.0, 0.0]
-                }
-            });
-            let w = if nrm[0].is_nan() {
-                1.0
-            } else {
-                nrm[k / 2].abs()
-            };
+            // Normal di muka = rata-rata gradien kedua voxel pengapitnya.
+            let ga = *g_here.get_or_insert_with(|| gradient(xi, yi, zi));
+            let gb = gradient(xx, yy, zz);
+            let g = [ga[0] + gb[0], ga[1] + gb[1], ga[2] + gb[2]];
+            let l = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
+            let w = if l > 1e-12 { g[k / 2].abs() / l } else { 1.0 };
             contact_mask[i] = 1;
             raw_area[i] += face;
             corr_area[i] += face * w;
@@ -1678,6 +1737,81 @@ mod tests {
         m.data[g.linear(1, 1, 1)] = 1; // diagonal: 26-terhubung, 6-terpisah
         assert_eq!(label_components_3d(&m.data, &g, true).1, 1);
         assert_eq!(label_components_3d(&m.data, &g, false).1, 2);
+    }
+
+    #[test]
+    fn contact_area_of_small_cylinders_is_unbiased() {
+        // Silinder struktur berjari-jari 3–12 voxel dengan pusat di luar
+        // kisi-simetri, dikelilingi tumor. Luas benar = 2πr × panjang.
+        // Normal dari gradien EDT (arah terkuantisasi) memberi +6…+10 %;
+        // jumlah muka mentah +27 % (= 4/π).
+        let s = 16.0;
+        let n = 40usize;
+        let dz = 24.0;
+        let g = StackGrid {
+            origin_um: [0.0, 0.0],
+            s_xy: s,
+            size: [n as u32, n as u32],
+            z_um: (0..12).map(|k| k as f64 * dz).collect(),
+        };
+        let length = 12.0 * dz;
+        for (r_vox, off) in [
+            (3.0, [0.3, 0.7]),
+            (5.12, [0.13, 0.41]),
+            (5.12, [0.5, 0.5]),
+            (7.3, [0.81, 0.27]),
+            (12.0, [0.37, 0.59]),
+        ] {
+            let c = [(20.0 + off[0]) * s, (20.0 + off[1]) * s];
+            let r = r_vox * s;
+            let inside = |p: [f64; 3]| (p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) <= r * r;
+            let vessel = mask_fn(&g, inside);
+            let tumor = mask_fn(&g, |p| !inside(p));
+            let res = contact(&tumor, &vessel).unwrap();
+            let truth = 2.0 * std::f64::consts::PI * r * length / 1e6;
+            let e = res.area_mm2 / truth - 1.0;
+            let e_raw = res.area_voxel_faces_mm2 / truth - 1.0;
+            println!(
+                "r = {r_vox} voxel: terkoreksi {:+.1} %, mentah {:+.1} %",
+                e * 100.0,
+                e_raw * 100.0
+            );
+            assert!(e.abs() <= 0.05, "r = {r_vox}: galat luas kontak {e}");
+            assert!(e_raw > 0.15, "r = {r_vox}: bias tangga mentah {e_raw}");
+            assert_eq!(res.patches.len(), 1);
+            assert_eq!(res.patches[0].layers.len(), 12);
+        }
+        // Bidang datar tegak lurus sumbu: kedua taksiran sama dan persis.
+        let wall = mask_fn(&g, |p| p[0] < 10.0 * s);
+        let rest = mask_fn(&g, |p| p[0] >= 10.0 * s);
+        let res = contact(&rest, &wall).unwrap();
+        let truth = n as f64 * s * length / 1e6;
+        assert!((res.area_voxel_faces_mm2 - truth).abs() < 1e-9);
+        assert!((res.area_mm2 - truth).abs() / truth < 1e-6);
+    }
+
+    #[test]
+    fn gaussian_smooth_3d_preserves_constants_and_mass() {
+        let dims = [7usize, 5, 4];
+        let mut c = vec![2.5f32; 7 * 5 * 4];
+        gaussian_smooth_3d(&mut c, dims, [1.5, 1.5, 0.8]);
+        assert!(c.iter().all(|v| (v - 2.5).abs() < 1e-6));
+        // Impuls di tengah: tersebar, simetris, dan jumlahnya tetap.
+        let mut d = vec![0f32; 21 * 21 * 21];
+        let mid = 10 + 21 * (10 + 21 * 10);
+        d[mid] = 1.0;
+        gaussian_smooth_3d(&mut d, [21, 21, 21], [1.5, 1.5, 1.5]);
+        let sum: f32 = d.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-4, "jumlah {sum}");
+        assert!(d[mid] < 1.0 && d[mid] > d[mid + 1]);
+        assert!((d[mid + 1] - d[mid - 1]).abs() < 1e-7);
+        assert!((d[mid + 1] - d[mid + 21]).abs() < 1e-7);
+        assert!((d[mid + 1] - d[mid + 21 * 21]).abs() < 1e-7);
+        // Sigma nol pada satu sumbu = sumbu itu tidak disentuh.
+        let mut e = vec![0f32; 3 * 3 * 3];
+        e[13] = 1.0;
+        gaussian_smooth_3d(&mut e, [3, 3, 3], [0.0, 0.0, 0.0]);
+        assert_eq!(e[13], 1.0);
     }
 
     #[test]

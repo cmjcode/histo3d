@@ -167,7 +167,7 @@ pub fn decode_mesh(bytes: &[u8], path: &Path) -> Result<LabelMesh, IoError> {
                 .and_then(|b| a.checked_add(b))
         })
         .ok_or_else(bad)?;
-    if payload.len() != need || h.n_indices % 3 != 0 {
+    if payload.len() != need || !h.n_indices.is_multiple_of(3) {
         return Err(bad());
     }
     let mut o = 0usize;

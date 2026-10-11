@@ -858,6 +858,13 @@ pub fn extract_mesh(
     }
     // Verteks tumpang yang tidak dipakai segitiga mana pun dibuang.
     mesh.compact();
+    // Sisi/verteks tak-manifold dari muka kisi "papan catur" (dua bagian yang
+    // hanya bersentuhan pada satu sisi atau titik) dipotong lalu dijahit agar
+    // permukaan tetap tertutup: tiap sisi dipakai tepat dua segitiga.
+    let added = mesh.repair_non_manifold();
+    if added > 0 {
+        log::debug!("surface nets: {added} verteks singular digandakan");
+    }
 
     // Langkah 8: ke µm.
     for p in &mut mesh.positions_um {
@@ -966,6 +973,90 @@ mod tests {
         let truth = 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
         assert!(v > 0.0);
         assert!(((v - truth) / truth).abs() < 0.03, "{v} vs {truth}");
+    }
+
+    /// SDF biner dari predikat voxel (−½ s di dalam, +½ s di luar).
+    struct VoxelSdf<F: Fn(usize, usize, usize) -> bool + Sync> {
+        grid: StackGrid,
+        inside: F,
+    }
+
+    impl<F: Fn(usize, usize, usize) -> bool + Sync> SdfProvider for VoxelSdf<F> {
+        fn grid(&self) -> &StackGrid {
+            &self.grid
+        }
+        fn fill_layer(&self, k: usize, out: &mut [f32]) {
+            let nx = self.grid.size[0] as usize;
+            let h = (self.grid.s_xy / 2.0) as f32;
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = if (self.inside)(i % nx, i / nx, k) {
+                    -h
+                } else {
+                    h
+                };
+            }
+        }
+    }
+
+    #[test]
+    fn parts_touching_along_an_edge_or_at_a_corner_still_give_a_closed_mesh() {
+        // Surface nets membuat sisi yang dipakai EMPAT segitiga di sepanjang
+        // garis sentuh dua balok (muka kisi papan catur). Kasus nyata: ujung
+        // ellipsoid fantom setelah registrasi rigid (satu sisi seperti itu).
+        let n = 16u32;
+        let s = 10.0;
+        let cfg = ReconConfig {
+            smooth_iterations: 0,
+            decimate_error_factor: 0.0,
+            ..Default::default()
+        };
+        let in_box = |p: [usize; 3], lo: [usize; 3], hi: [usize; 3]| {
+            (0..3).all(|a| p[a] >= lo[a] && p[a] < hi[a])
+        };
+        // (a) dua balok bersentuhan sepanjang sisi sejajar z.
+        let edge = VoxelSdf {
+            grid: sphere_grid(n, s),
+            inside: |x, y, z| {
+                in_box([x, y, z], [3, 3, 4], [8, 8, 12])
+                    || in_box([x, y, z], [8, 8, 4], [13, 13, 12])
+            },
+        };
+        // (b) dua balok bersentuhan hanya di satu pojok.
+        let corner = VoxelSdf {
+            grid: sphere_grid(n, s),
+            inside: |x, y, z| {
+                in_box([x, y, z], [3, 3, 3], [8, 8, 8])
+                    || in_box([x, y, z], [8, 8, 8], [13, 13, 13])
+            },
+        };
+        for (name, mesh) in [
+            (
+                "sisi",
+                extract_mesh(&edge, LabelId(1), &cfg, &NoProgress).unwrap(),
+            ),
+            (
+                "pojok",
+                extract_mesh(&corner, LabelId(1), &cfg, &NoProgress).unwrap(),
+            ),
+        ] {
+            assert!(mesh.is_closed(), "{name}: mesh tidak tertutup");
+            assert!(mesh.signed_volume_um3() > 0.0, "{name}");
+            // Tiap komponen bola topologis: χ = 2 per komponen.
+            assert_eq!(
+                mesh.euler_characteristic(),
+                2 * mesh.connected_components() as i64,
+                "{name}"
+            );
+            // Memperbaiki mesh yang sudah manifold tidak mengubah apa pun.
+            let mut again = mesh.clone();
+            assert_eq!(again.repair_non_manifold(), 0, "{name}");
+            assert_eq!(again, mesh, "{name}");
+            // Penghalusan dan decimate tetap menjaga ketertutupan.
+            let mut m2 = mesh.clone();
+            m2.taubin_smooth(0.5, -0.53, 5);
+            m2.decimate(5.0);
+            assert!(m2.is_closed(), "{name}: tidak tertutup setelah decimate");
+        }
     }
 
     #[test]

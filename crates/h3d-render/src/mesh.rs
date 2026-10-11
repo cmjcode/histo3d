@@ -170,7 +170,7 @@ pub fn upload_mesh(
     if positions_um.is_empty() {
         return Err(RenderError::InvalidMesh("tanpa verteks".into()));
     }
-    if indices.len() % 3 != 0 {
+    if !indices.len().is_multiple_of(3) {
         return Err(RenderError::InvalidMesh(format!(
             "jumlah indeks {} bukan kelipatan 3",
             indices.len()

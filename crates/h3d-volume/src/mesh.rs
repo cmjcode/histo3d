@@ -440,6 +440,207 @@ impl LabelMesh {
         };
     }
 
+    /// Jadikan mesh manifold dengan "potong lalu jahit" (Guéziec dkk. 2001).
+    ///
+    /// Surface nets menghasilkan sisi yang dipakai empat segitiga (dan
+    /// verteks tempat dua kerucut permukaan bertemu) bila sebuah muka kisi
+    /// bertanda papan catur — dua bagian benda yang hanya bersentuhan pada
+    /// satu sisi atau satu titik. Mesh seperti itu bukan permukaan tertutup
+    /// yang sah (8.6.3; tes "tiap sisi dipakai tepat dua segitiga").
+    ///
+    /// 1. **Potong**: tiap verteks digandakan menjadi satu salinan per kipas
+    ///    muka; dua muka sekipas bila terhubung lewat sisi manifold (tepat
+    ///    dua muka, arah berlawanan) yang memuat verteks itu.
+    /// 2. **Jahit**: sisi batas yang timbul dari pemotongan dipasangkan lagi
+    ///    (arah berlawanan, asal sisi sama); pasangan yang sudah berbagi satu
+    ///    ujung didahulukan sehingga jahitan hanya menutup celah dan tidak
+    ///    mengembalikan sisi tak-manifold.
+    ///
+    /// Posisi salinan sama dengan aslinya (volume dan luas tidak berubah).
+    /// Deterministik. Mengembalikan jumlah verteks yang ditambahkan; 0 bila
+    /// mesh sudah manifold. Normal dihitung ulang bila ada perubahan.
+    pub fn repair_non_manifold(&mut self) -> usize {
+        let nf = self.triangle_count();
+        let nv0 = self.positions_um.len();
+        if nf == 0 {
+            return 0;
+        }
+        // Sisi tak berarah → daftar (muka, searah lo→hi?).
+        let mut edge_faces: HashMap<(u32, u32), Vec<(u32, bool)>> =
+            HashMap::with_capacity(self.indices.len());
+        for (fi, t) in self.triangles().enumerate() {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                edge_faces
+                    .entry((a.min(b), a.max(b)))
+                    .or_default()
+                    .push((fi as u32, a < b));
+            }
+        }
+        let manifold_other = |a: u32, b: u32, f: u32| -> Option<u32> {
+            let v = edge_faces.get(&(a.min(b), a.max(b)))?;
+            if v.len() != 2 || v[0].1 == v[1].1 {
+                return None;
+            }
+            Some(if v[0].0 == f { v[1].0 } else { v[0].0 })
+        };
+        let mut vfaces: Vec<Vec<u32>> = vec![Vec::new(); nv0];
+        for (fi, t) in self.triangles().enumerate() {
+            for &v in &t {
+                vfaces[v as usize].push(fi as u32);
+            }
+        }
+        // Langkah 1: potong. `corner[3·f + k]` = indeks verteks baru.
+        let faces: Vec<[u32; 3]> = self.triangles().collect();
+        let mut corner: Vec<u32> = self.indices.clone();
+        let mut origin: Vec<u32> = (0..nv0 as u32).collect();
+        for v in 0..nv0 as u32 {
+            let inc = &vfaces[v as usize];
+            if inc.len() < 2 {
+                continue;
+            }
+            // Union-find lokal atas muka di sekitar `v`.
+            let mut parent: Vec<usize> = (0..inc.len()).collect();
+            fn find(p: &mut [usize], mut x: usize) -> usize {
+                while p[x] != x {
+                    p[x] = p[p[x]];
+                    x = p[x];
+                }
+                x
+            }
+            for (i, &f) in inc.iter().enumerate() {
+                for &w in &faces[f as usize] {
+                    if w == v {
+                        continue;
+                    }
+                    if let Some(g) = manifold_other(v, w, f) {
+                        if let Ok(j) = inc.binary_search(&g) {
+                            let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                            if ri != rj {
+                                parent[ri.max(rj)] = ri.min(rj);
+                            }
+                        }
+                    }
+                }
+            }
+            // Kipas pertama (memuat muka berindeks terkecil) memakai `v`.
+            let mut comp_vertex: HashMap<usize, u32> = HashMap::new();
+            for (i, &face) in inc.iter().enumerate() {
+                let r = find(&mut parent, i);
+                let next = if comp_vertex.is_empty() {
+                    v
+                } else {
+                    origin.len() as u32
+                };
+                let id = *comp_vertex.entry(r).or_insert(next);
+                if id == next && id != v {
+                    origin.push(v);
+                }
+                let f = face as usize;
+                for k in 0..3 {
+                    if faces[f][k] == v {
+                        corner[3 * f + k] = id;
+                    }
+                }
+            }
+        }
+        let n_cut = origin.len();
+        if n_cut == nv0 {
+            // Tidak ada verteks singular; sisi tak-manifold mustahil tersisa
+            // tanpa verteks singular, kecuali sisi batas (mesh terbuka).
+            return 0;
+        }
+        // Langkah 2: jahit sisi batas yang berasal dari sisi asli yang sama.
+        let mut directed: HashMap<(u32, u32), u32> = HashMap::with_capacity(corner.len());
+        for t in corner.chunks_exact(3) {
+            for k in 0..3 {
+                *directed.entry((t[k], t[(k + 1) % 3])).or_insert(0) += 1;
+            }
+        }
+        // (asal lo, asal hi, searah lo→hi?, x, y)
+        let mut boundary: Vec<(u32, u32, bool, u32, u32)> = Vec::new();
+        for t in corner.chunks_exact(3) {
+            for k in 0..3 {
+                let (x, y) = (t[k], t[(k + 1) % 3]);
+                if directed.get(&(y, x)).copied().unwrap_or(0) == 0 {
+                    let (ox, oy) = (origin[x as usize], origin[y as usize]);
+                    boundary.push((ox.min(oy), ox.max(oy), ox < oy, x, y));
+                }
+            }
+        }
+        boundary.sort_unstable();
+        boundary.dedup();
+        let mut merge: Vec<u32> = (0..n_cut as u32).collect();
+        fn root(m: &mut [u32], mut x: u32) -> u32 {
+            while m[x as usize] != x {
+                m[x as usize] = m[m[x as usize] as usize];
+                x = m[x as usize];
+            }
+            x
+        }
+        let mut i = 0;
+        while i < boundary.len() {
+            let mut j = i;
+            while j < boundary.len()
+                && (boundary[j].0, boundary[j].1) == (boundary[i].0, boundary[i].1)
+            {
+                j += 1;
+            }
+            let group = &boundary[i..j];
+            let fwd: Vec<(u32, u32)> = group.iter().filter(|e| e.2).map(|e| (e.3, e.4)).collect();
+            let bwd: Vec<(u32, u32)> = group.iter().filter(|e| !e.2).map(|e| (e.3, e.4)).collect();
+            let mut used = vec![false; bwd.len()];
+            // Dua putaran: pasangan yang sudah berbagi ujung, lalu sisanya.
+            for pass in 0..2 {
+                for &(x, y) in &fwd {
+                    // fwd: x→y (asal lo→hi); bwd: y2→x2 (asal hi→lo).
+                    let (rx, ry) = (root(&mut merge, x), root(&mut merge, y));
+                    let already = bwd.iter().enumerate().any(|(k, &(y2, x2))| {
+                        used[k] && root(&mut merge, x2) == rx && root(&mut merge, y2) == ry
+                    });
+                    if already {
+                        continue;
+                    }
+                    let pick = bwd.iter().enumerate().position(|(k, &(y2, x2))| {
+                        !used[k]
+                            && (pass == 1
+                                || root(&mut merge, x2) == rx
+                                || root(&mut merge, y2) == ry)
+                    });
+                    if let Some(k) = pick {
+                        used[k] = true;
+                        let (y2, x2) = bwd[k];
+                        for (p, q) in [(x, x2), (y, y2)] {
+                            let (rp, rq) = (root(&mut merge, p), root(&mut merge, q));
+                            if rp != rq {
+                                merge[rp.max(rq) as usize] = rp.min(rq);
+                            }
+                        }
+                    }
+                }
+            }
+            i = j;
+        }
+        for c in &mut corner {
+            *c = root(&mut merge, *c);
+        }
+        // Tulis balik: salinan mewarisi posisi dan skalar aslinya.
+        for &o in &origin[nv0..] {
+            self.positions_um.push(self.positions_um[o as usize]);
+        }
+        for sc in &mut self.scalars {
+            for &o in &origin[nv0..] {
+                let v = sc.values.get(o as usize).copied().unwrap_or(f32::NAN);
+                sc.values.push(v);
+            }
+        }
+        self.normals.clear();
+        self.indices = corner;
+        self.compact();
+        self.recompute_normals();
+        self.positions_um.len().saturating_sub(nv0)
+    }
+
     /// Decimate dengan metrik galat kuadrik (Garland–Heckbert), titik
     /// gabungan di tengah sisi, galat maksimum `max_error_um` (jarak ke
     /// bidang-bidang asal). Menolak kolaps yang merusak topologi (syarat

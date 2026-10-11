@@ -6,8 +6,22 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 
+# Seluruh logika ada di pustaka (bisa diuji tanpa jendela); `main.rs` tipis.
+[lib]
+name = "h3d_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "histo3d"
+path = "src/main.rs"
+
 [dependencies]
 h3d-core = { workspace = true }
+h3d-slide = { workspace = true }
+h3d-imgproc = { workspace = true }
+h3d-segment = { workspace = true }
+h3d-volume = { workspace = true }
+h3d-io = { workspace = true }
 h3d-engine = { workspace = true }
 h3d-render = { workspace = true }
 h3d-ui = { workspace = true }
@@ -22,6 +36,7 @@ env_logger = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+image = { workspace = true }
 
 # rfd tidak mendukung iOS; di iPad berkas diambil dari folder Documents (9.3).
 [target.'cfg(not(target_os = "ios"))'.dependencies]
@@ -29,8 +44,25 @@ rfd = { workspace = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = { workspace = true }
-objc2-foundation = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSNotification", "NSOperation"] }
 
-[[bin]]
-name = "histo3d"
-path = "src/main.rs"
+# Lem iPadOS (pola DUCAD `apple_ios.rs`): siklus hidup UIScene dan observer
+# peringatan memori. Versi sama dengan yang sudah ditarik winit.
+[target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.6"
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+objc2-ui-kit = { version = "0.3", features = [
+    "UIApplication",
+    "UIResponder",
+    "UIView",
+    "UIWindow",
+    "UIWindowScene",
+    "UIScene",
+    "UISceneSession",
+    "UISceneOptions",
+    "objc2-core-foundation",
+] }
+raw-window-handle = "0.6"
+
+[dev-dependencies]
+tempfile = { workspace = true }

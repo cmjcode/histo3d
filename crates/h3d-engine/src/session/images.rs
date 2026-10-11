@@ -1,10 +1,11 @@
 //! Akses piksel slide: pembukaan sumber, thumbnail, pembacaan pada resolusi
 //! kerja (dalam strip), dan gambar registrasi ber-cache (`cache/reg/`).
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, MutexGuard};
 
-use h3d_core::{Progress, SlideEntry, SlideId};
+use h3d_core::{Progress, SlideEntry, SlideId, SlideSourceRef};
 use h3d_io::{slide_stem, write_atomic};
 use h3d_register::RegImage;
 use h3d_slide::{FlatBackend, SlideSource};
@@ -100,6 +101,20 @@ pub(crate) fn read_at_mpp(
     target_mpp: f64,
     p: &dyn Progress,
 ) -> Result<Raster, EngineError> {
+    read_at_mpp_strips(src, mpp_l0, target_mpp, STRIP_BYTES, p)
+}
+
+/// [`read_at_mpp`] dengan batas memori strip eksplisit (`strip_bytes`, byte
+/// RGBA sumber per strip). Parameter ini internal: produksi selalu memakai
+/// [`STRIP_BYTES`]; tes menurunkannya agar jalur multi-strip teruji tanpa
+/// mengalokasikan gambar raksasa. Hasil tidak bergantung pada ukuran strip.
+pub(crate) fn read_at_mpp_strips(
+    src: &dyn SlideSource,
+    mpp_l0: [f64; 2],
+    target_mpp: f64,
+    strip_bytes: u64,
+    p: &dyn Progress,
+) -> Result<Raster, EngineError> {
     if !(target_mpp.is_finite() && target_mpp > 0.0) {
         return Err(EngineError::invalid("resolusi sasaran tidak sah"));
     }
@@ -122,7 +137,7 @@ pub(crate) fn read_at_mpp(
     let mut rgba = vec![255u8; ow * oh * 4];
 
     // Jumlah baris keluaran per strip agar strip sumber ≤ STRIP_BYTES.
-    let src_rows_budget = (STRIP_BYTES / (u64::from(lw) * 4)).max(1) as f64;
+    let src_rows_budget = (strip_bytes / (u64::from(lw) * 4)).max(1) as f64;
     let rows_per_strip = ((src_rows_budget / ry).floor() as usize).max(1);
     let mut oy = 0usize;
     while oy < oh {
@@ -311,25 +326,186 @@ impl Session {
             .collect()
     }
 
-    /// Sidik jari berkas slide saat ini (untuk kunci cache).
-    pub(crate) fn source_fingerprint(&self, entry: &SlideEntry) -> Result<u64, EngineError> {
+    /// Himpunan irisan berubah (racun kunci diabaikan: isinya tetap sah).
+    pub(crate) fn changed_set(&self) -> MutexGuard<'_, BTreeSet<SlideId>> {
+        self.changed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Irisan `External` yang berkasnya ada tetapi tidak lagi cocok dengan
+    /// ukuran + sidik jari saat impor, terurut id. Pikselnya ditolak dibaca
+    /// sampai [`Self::relink_slide`] atau [`Self::accept_changed_slide`].
+    pub fn changed_slides(&self) -> Vec<SlideId> {
+        self.changed_set().iter().copied().collect()
+    }
+
+    /// Periksa ulang semua berkas slide `External` terhadap sidik jari
+    /// tersimpan dan perbarui [`Self::changed_slides`]. Dipanggil saat proyek
+    /// dibuka; GUI boleh memanggilnya lagi (mis. saat aplikasi kembali aktif).
+    /// Berkas yang hilang atau tidak terbaca tidak dihitung "berubah".
+    pub fn recheck_slides(&self) -> Vec<SlideId> {
+        let mut found = BTreeSet::new();
+        for s in &self.project.slides {
+            let SlideSourceRef::External {
+                size_bytes,
+                fingerprint,
+                ..
+            } = &s.source
+            else {
+                continue;
+            };
+            let path = self.bundle.resolve_slide_path(&s.source);
+            if !path.is_file() {
+                continue;
+            }
+            match h3d_slide::fingerprint(&path) {
+                Ok(now) if now != (*size_bytes, *fingerprint) => {
+                    found.insert(s.id);
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("sidik jari {} tidak bisa dihitung: {e}", path.display()),
+            }
+        }
+        let list: Vec<SlideId> = found.iter().copied().collect();
+        *self.changed_set() = found;
+        list
+    }
+
+    /// Path dan sidik jari berkas slide **yang sudah diverifikasi**: berkas
+    /// harus ada, dan untuk `External` ukuran + sidik jarinya harus sama
+    /// dengan saat impor. Semua pembacaan piksel lewat sini, sehingga berkas
+    /// yang diganti setelah proyek dibuka pun tertangkap.
+    pub(crate) fn verified_source(
+        &self,
+        entry: &SlideEntry,
+    ) -> Result<(PathBuf, u64), EngineError> {
         let path = self.bundle.resolve_slide_path(&entry.source);
         if !path.is_file() {
             return Err(h3d_io::IoError::MissingFile(path).into());
         }
-        Ok(h3d_slide::fingerprint(&path)?.1)
+        let now = h3d_slide::fingerprint(&path)?;
+        if let SlideSourceRef::External {
+            size_bytes,
+            fingerprint,
+            ..
+        } = &entry.source
+        {
+            if now != (*size_bytes, *fingerprint) {
+                self.changed_set().insert(entry.id);
+                return Err(EngineError::SlideChanged {
+                    slide: entry.id,
+                    file: entry.source.file_name(),
+                });
+            }
+            self.changed_set().remove(&entry.id);
+        }
+        Ok((path, now.1))
+    }
+
+    /// Sidik jari berkas slide saat ini (untuk kunci cache); gagal bila
+    /// berkas hilang atau berubah.
+    pub(crate) fn source_fingerprint(&self, entry: &SlideEntry) -> Result<u64, EngineError> {
+        Ok(self.verified_source(entry)?.1)
+    }
+
+    /// Terima berkas slide yang berubah sebagai berkas irisan ini: ukuran dan
+    /// sidik jari tersimpan diganti dengan milik berkas saat ini, lalu
+    /// `project.json` disimpan. Ukuran piksel level 0 harus sama dengan saat
+    /// impor (label tersimpan dalam µm pada kisi irisan itu); bila berbeda,
+    /// irisan harus diimpor ulang. Label dan catatan registrasi tidak
+    /// disentuh — pengguna menyatakan bahwa ini irisan yang sama; cache
+    /// thumbnail/registrasi otomatis dibuat ulang karena berkunci sidik jari.
+    pub fn accept_changed_slide(&mut self, slide: SlideId) -> Result<(), EngineError> {
+        let entry = self.slide(slide)?.clone();
+        let SlideSourceRef::External { path: rel, .. } = &entry.source else {
+            return Err(EngineError::invalid(format!(
+                "irisan {slide} tersimpan di dalam proyek; tidak ada berkas luar untuk diterima"
+            )));
+        };
+        let path = self.bundle.resolve_slide_path(&entry.source);
+        if !path.is_file() {
+            return Err(h3d_io::IoError::MissingFile(path).into());
+        }
+        let src = h3d_slide::open_slide(&path)?;
+        let size_l0 = src.info().level0_size();
+        if size_l0 != entry.size_l0 {
+            return Err(EngineError::invalid(format!(
+                "berkas {} berukuran {}×{} px, sedangkan irisan {slide} diimpor dengan {}×{} px; \
+                 label tidak akan sejajar — impor ulang irisan ini",
+                entry.source.file_name(),
+                size_l0[0],
+                size_l0[1],
+                entry.size_l0[0],
+                entry.size_l0[1]
+            )));
+        }
+        let (size_bytes, fingerprint) = h3d_slide::fingerprint(&path)?;
+        let rel = rel.clone();
+        self.slide_mut(slide)?.source = SlideSourceRef::External {
+            path: rel,
+            size_bytes,
+            fingerprint,
+        };
+        self.changed_set().remove(&slide);
+        self.save_project()
+    }
+
+    /// Tautkan ulang irisan `External` ke `path` (berkas dipindah atau diganti
+    /// nama). Ukuran + sidik jari tersimpan **tidak** diubah: bila berkas
+    /// baru cocok, irisan langsung bisa dibaca dan fungsi mengembalikan
+    /// `true`; bila tidak cocok, tautan tetap diganti tetapi irisan masuk
+    /// [`Self::changed_slides`] dan fungsi mengembalikan `false` (pengguna
+    /// lalu memilih [`Self::accept_changed_slide`] atau menautkan berkas lain).
+    pub fn relink_slide(&mut self, slide: SlideId, path: &Path) -> Result<bool, EngineError> {
+        let entry = self.slide(slide)?.clone();
+        let SlideSourceRef::External {
+            size_bytes,
+            fingerprint,
+            ..
+        } = entry.source
+        else {
+            return Err(EngineError::invalid(format!(
+                "irisan {slide} tersimpan di dalam proyek; tidak bisa ditautkan ulang"
+            )));
+        };
+        if !path.is_file() {
+            return Err(h3d_io::IoError::MissingFile(path.to_path_buf()).into());
+        }
+        let now = h3d_slide::fingerprint(path)?;
+        let rel = self.bundle.make_relative(path);
+        let duplicate = self.project.slides.iter().any(|s| {
+            s.id != slide
+                && matches!(&s.source, SlideSourceRef::External { path: p, .. } if *p == rel)
+        });
+        if duplicate {
+            return Err(EngineError::invalid(format!(
+                "berkas {} sudah dipakai irisan lain di proyek ini",
+                path.display()
+            )));
+        }
+        self.slide_mut(slide)?.source = SlideSourceRef::External {
+            path: rel,
+            size_bytes,
+            fingerprint,
+        };
+        let matches = now == (size_bytes, fingerprint);
+        if matches {
+            self.changed_set().remove(&slide);
+        } else {
+            self.changed_set().insert(slide);
+        }
+        self.save_project()?;
+        Ok(matches)
     }
 
     /// Buka sumber piksel sebuah irisan. Gambar biasa (PNG/JPEG) memakai
-    /// cache piramida di `cache/pyramid/`.
+    /// cache piramida di `cache/pyramid/`. Berkas hilang →
+    /// `IoError::MissingFile`; berkas berubah → [`EngineError::SlideChanged`].
     pub fn open_source(&self, slide: SlideId) -> Result<Box<dyn SlideSource>, EngineError> {
         let entry = self.slide(slide)?;
-        let path = self.bundle.resolve_slide_path(&entry.source);
-        if !path.is_file() {
-            return Err(h3d_io::IoError::MissingFile(path).into());
-        }
+        let (path, fp) = self.verified_source(entry)?;
         if has_flat_extension(&path) {
-            let fp = h3d_slide::fingerprint(&path)?.1;
             let dir =
                 self.bundle
                     .cache_pyramid_dir()
@@ -449,6 +625,103 @@ mod tests {
         // Level 0 lebih kasar dari sasaran → dipakai apa adanya.
         let r = read_at_mpp(&src, [20.0, 20.0], 8.0, &NoProgress).unwrap();
         assert_eq!((r.w, r.h, r.mpp), (64, 48, 20.0));
+    }
+
+    /// Sumber pembungkus yang mencatat tiap `read_region` (untuk memastikan
+    /// pembacaan benar-benar terbagi menjadi banyak strip).
+    struct Counting<'a> {
+        inner: &'a FlatBackend,
+        calls: std::sync::Mutex<Vec<(i64, u32)>>,
+    }
+
+    impl SlideSource for Counting<'_> {
+        fn info(&self) -> &h3d_slide::SlideInfo {
+            self.inner.info()
+        }
+        fn read_region(
+            &self,
+            level: u32,
+            x: i64,
+            y: i64,
+            w: u32,
+            h: u32,
+        ) -> Result<RgbaImage, h3d_slide::SlideError> {
+            self.calls.lock().unwrap().push((y, h));
+            self.inner.read_region(level, x, y, w, h)
+        }
+    }
+
+    #[test]
+    fn multi_strip_read_equals_single_strip_read() {
+        // Gambar 97×131 px bertekstur tak periodik; rasio penurunan bulat
+        // (4×), pecahan (2,5×), dan 1× (level dipakai apa adanya).
+        let (w, h) = (97u32, 131u32);
+        let mut img = RgbaImage::new(w, h);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([
+                ((x * 7 + y * 13) % 251) as u8,
+                ((x * x + 3 * y) % 241) as u8,
+                ((x ^ y) % 239) as u8,
+                255,
+            ]);
+        }
+        let flat = FlatBackend::from_image(img).unwrap();
+        for target in [8.0, 5.0, 2.0] {
+            let whole = read_at_mpp(&flat, [2.0, 2.0], target, &NoProgress).unwrap();
+            // Satu strip bila batasnya 64 MB.
+            let one = Counting {
+                inner: &flat,
+                calls: Default::default(),
+            };
+            read_at_mpp(&one, [2.0, 2.0], target, &NoProgress).unwrap();
+            assert_eq!(one.calls.lock().unwrap().len(), 1, "sasaran {target}");
+            for rows in [1u64, 3, 7, 40] {
+                let src = Counting {
+                    inner: &flat,
+                    calls: Default::default(),
+                };
+                let strip_bytes = u64::from(w) * 4 * rows;
+                let r =
+                    read_at_mpp_strips(&src, [2.0, 2.0], target, strip_bytes, &NoProgress).unwrap();
+                let calls = src.calls.lock().unwrap().clone();
+                assert!(
+                    calls.len() > 1,
+                    "sasaran {target}, {rows} baris/strip: harus multi-strip"
+                );
+                assert_eq!(
+                    (r.w, r.h, r.mpp),
+                    (whole.w, whole.h, whole.mpp),
+                    "sasaran {target}, {rows} baris/strip"
+                );
+                assert!(
+                    r.rgba == whole.rgba,
+                    "sasaran {target}, {rows} baris/strip: piksel berbeda dari pembacaan satu strip"
+                );
+                // Strip berurutan, tidak melompati baris sumber, dan tiap
+                // strip tidak melebihi anggaran (kecuali satu baris keluaran
+                // yang memang butuh lebih banyak baris sumber).
+                let ry = (whole.mpp / 2.0).ceil() as u32;
+                let mut next = 0i64;
+                for (y, hh) in &calls {
+                    assert!(*y <= next, "celah sebelum baris {y}");
+                    assert!(*hh >= 1 && u64::from(*hh) <= rows.max(u64::from(ry) + 1));
+                    next = y + i64::from(*hh);
+                }
+                assert_eq!(next, i64::from(h), "strip terakhir sampai baris terakhir");
+            }
+        }
+        // Pembatalan di tengah strip.
+        struct Cancel;
+        impl Progress for Cancel {
+            fn set(&self, _f: f32, _s: &str) {}
+            fn is_cancelled(&self) -> bool {
+                true
+            }
+        }
+        assert!(matches!(
+            read_at_mpp_strips(&flat, [2.0, 2.0], 8.0, 400, &Cancel),
+            Err(EngineError::Cancelled)
+        ));
     }
 
     #[test]

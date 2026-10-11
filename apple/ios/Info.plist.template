@@ -26,6 +26,22 @@
         <string>UIInterfaceOrientationPortrait</string>
         <string>UIInterfaceOrientationPortraitUpsideDown</string>
     </array>
+    <!-- Siklus hidup UIScene (wajib untuk SDK iOS terbaru). Nama kelas harus
+         sama dengan h3d-app/src/apple_ios.rs::SCENE_DELEGATE_CLASS_NAME. -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key><false/>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>UIWindowSceneSessionRoleApplication</key>
+            <array>
+                <dict>
+                    <key>UISceneConfigurationName</key><string>Default</string>
+                    <key>UISceneDelegateClassName</key><string>Histo3dWindowSceneDelegate</string>
+                </dict>
+            </array>
+        </dict>
+    </dict>
     <!-- 9.3: folder Documents terbuka di aplikasi Files (AirDrop/kabel). -->
     <key>UIFileSharingEnabled</key><true/>
     <key>LSSupportsOpeningDocumentsInPlace</key><true/>

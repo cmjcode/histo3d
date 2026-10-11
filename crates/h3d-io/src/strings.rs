@@ -121,6 +121,33 @@ pub const NEAREST_TUMOR: &str = "Titik tumor terdekat (mm)";
 pub const NEAREST_MARGIN: &str = "Titik tepi terdekat (mm)";
 /// Kepala tabel margin per arah.
 pub const MARGIN_DIR_HEADER: [&str; 2] = ["Arah", "Jarak minimum"];
+/// Teks alternatif gambar margin.
+pub fn figure_alt(label: &str) -> String {
+    format!("Irisan terdekat ke titik tumor–tepi terdekat ({label})")
+}
+
+/// Keterangan gambar margin. Angka dicetak di sini karena gambar tidak
+/// memuat teks. Tidak ada kalimat rekomendasi (aturan keras 18).
+#[allow(clippy::too_many_arguments)]
+pub fn figure_caption(
+    label: &str,
+    slide: u32,
+    slide_file: &str,
+    slide_z_mm: &str,
+    d_min: &str,
+    in_plane_mm: &str,
+    dz_mm: &str,
+    um_per_px: f64,
+) -> String {
+    format!(
+        "Gambar: irisan {slide} ({slide_file}, z = {slide_z_mm} mm) pada ruangnya sendiri, \
+         dengan garis luar label. Titik magenta = titik tumor terdekat; titik biru = titik \
+         terdekat pada \"{label}\"; panah dari tumor ke tepi. Jarak minimum 3D {d_min}; \
+         pada bidang irisan ini kedua titik berjarak {in_plane_mm} mm dan selisih z-nya \
+         {dz_mm} mm. Skala: 1 piksel = {um_per_px:.1} µm."
+    )
+}
+
 /// Penanda resolusi Z.
 pub const Z_LIMITED: &str = "resolusi Z = jarak irisan";
 

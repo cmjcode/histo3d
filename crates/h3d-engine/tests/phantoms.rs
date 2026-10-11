@@ -99,6 +99,82 @@ fn ellipsoid_with_margin_plane() {
     let e = (v.volume_cavalieri_um3 - truth).abs() / truth;
     println!("ellipsoid: galat Cavalieri {:.2} %", e * 100.0);
     assert!(e <= 0.03);
+    // Gambar laporan (8.12.8 butir 3): irisan terdekat, garis luar label,
+    // kedua titik terdekat, dan panah; dirujuk dari Markdown.
+    let dir_a = r._tmp.path().join("laporan-a");
+    let dir_b = r._tmp.path().join("laporan-b");
+    let kind = h3d_engine::ExportKind::Report {
+        with_clinical: false,
+    };
+    let files = r.session.export_files(kind.clone(), &dir_a).unwrap();
+    r.session.export(kind, &dir_b).unwrap();
+    let png_path = dir_a.join("figures").join("margin_tepi_reseksi.png");
+    assert!(files.contains(&png_path), "berkas tertulis: {files:?}");
+    let png = std::fs::read(&png_path).expect("gambar margin ada");
+    assert_eq!(
+        png,
+        std::fs::read(dir_b.join("figures").join("margin_tepi_reseksi.png")).unwrap(),
+        "gambar harus byte-identik antar dua jalan"
+    );
+    let figs = r.session.margin_figures().unwrap();
+    assert_eq!(figs.len(), 1);
+    let f = &figs[0];
+    assert_eq!(f.meta.file, "figures/margin_tepi_reseksi.png");
+    assert_eq!(f.meta.label, "Tepi reseksi");
+    let img = image::load_from_memory(&png).unwrap().to_rgba8();
+    // Slide fantom 128 px → diperbesar bulat 6× = 768 px.
+    assert_eq!((img.width(), img.height()), (768, 768));
+    assert_eq!(f.meta.size_px, [768, 768]);
+    assert_eq!(img.as_raw(), &f.rgba, "PNG = buffer yang dirender");
+    assert!((f.meta.um_per_px[0] - 16.0 / 6.0).abs() < 1e-9);
+    let at = |p: [f64; 2]| img.get_pixel(p[0].floor() as u32, p[1].floor() as u32).0;
+    assert_eq!(at(f.meta.tumor_px), h3d_engine::figure::TUMOR_MARKER);
+    assert_eq!(at(f.meta.margin_px), h3d_engine::figure::MARGIN_MARKER);
+    // Kedua titik: tumor di kiri tepi (arah +X), berjarak ≈ d_min di bidang.
+    assert!(f.meta.margin_px[0] > f.meta.tumor_px[0]);
+    assert!(
+        (f.meta.in_plane_um - m.d_min.value_um).abs() <= 2.0 * 16.0,
+        "jarak pada bidang {} vs d_min {}",
+        f.meta.in_plane_um,
+        m.d_min.value_um
+    );
+    // Irisan yang digambar = irisan berlabel terdekat ke titik tumor.
+    let zs: Vec<f64> = r.session.slides().iter().map(|e| e.z_um).collect();
+    let nearest = zs
+        .iter()
+        .map(|z| (z - m.nearest_tumor_um[2]).abs())
+        .fold(f64::INFINITY, f64::min);
+    assert!((f.meta.slide_z_um - m.nearest_tumor_um[2]).abs() <= nearest + 1e-9);
+    // Panah: titik tengah antara kedua penanda berwarna panah.
+    let mid = [
+        (f.meta.tumor_px[0] + f.meta.margin_px[0]) / 2.0,
+        (f.meta.tumor_px[1] + f.meta.margin_px[1]) / 2.0,
+    ];
+    assert_eq!(at(mid), h3d_engine::figure::ARROW);
+    // Garis luar label: warna label Tumor dan Tepi reseksi muncul di gambar.
+    for name in ["Tumor", "Tepi reseksi"] {
+        let c = r
+            .session
+            .project()
+            .label_by_name(name)
+            .expect("label")
+            .color;
+        let n = img
+            .pixels()
+            .filter(|p| p.0 == [c[0], c[1], c[2], 255])
+            .count();
+        assert!(n > 50, "garis luar {name}: {n} piksel");
+    }
+    let md = std::fs::read_to_string(dir_a.join("report.md")).unwrap();
+    assert!(
+        md.contains("](figures/margin_tepi_reseksi.png)"),
+        "laporan merujuk gambar dengan tautan relatif"
+    );
+    assert!(md.contains("1 piksel = 2.7 µm"), "keterangan memuat skala");
+    let sec3 = md.find("## 3. Margin").unwrap();
+    let sec4 = md.find("## 4. Invasi").unwrap();
+    let link = md.find("](figures/margin_tepi_reseksi.png)").unwrap();
+    assert!(sec3 < link && link < sec4, "gambar ada di bagian 3");
     // Label tepi reseksi tidak dijadikan mesh dan tidak masuk grup.
     assert!(rep
         .labels
@@ -145,9 +221,12 @@ fn vessel_contact_and_capsule_breach() {
         "kontak pembuluh: {:.4} mm² (benar {truth:.4})",
         c.result.area_mm2
     );
+    // Sebelum normal kontak diambil dari indikator terpulus: 0,4331 mm²
+    // (+10,0 %) untuk pembuluh berjari-jari 5 voxel ini.
     assert!(
-        (c.result.area_mm2 - truth).abs() / truth <= 0.15,
-        "luas kontak"
+        (c.result.area_mm2 - truth).abs() / truth <= 0.07,
+        "luas kontak {} vs {truth}",
+        c.result.area_mm2
     );
     assert!(
         a.hypoxia.is_some(),

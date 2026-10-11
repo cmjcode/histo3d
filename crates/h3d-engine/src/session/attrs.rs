@@ -150,6 +150,17 @@ impl Plan {
         }
     }
 
+    /// Benar bila agregasi jendela dipisah per kompartemen (di dalam vs di
+    /// luar masker Tumor) saat masker itu tersedia: skor per inti dan
+    /// densitas. TPS/CPS sudah per kompartemen menurut definisinya; skor
+    /// berbasis luas dihitung per piksel.
+    fn compartment_aware(self) -> bool {
+        matches!(
+            self,
+            Plan::Nuclear(_) | Plan::NucleiDensity | Plan::TilDensity
+        )
+    }
+
     /// Kuantisasi `AttrStore` (nilai = raw × scale + offset).
     fn scale(self) -> f32 {
         match self {
@@ -216,6 +227,8 @@ struct Counts {
     cls: [Vec<f64>; 3],
     tumor_all: Vec<f64>,
     tumor_pos: Vec<f64>,
+    /// Kelas intensitas 1..=3 sel di dalam tumor.
+    tumor_cls: [Vec<f64>; 3],
     immune_pos: Vec<f64>,
 }
 
@@ -228,6 +241,7 @@ impl Counts {
             cls: [z(), z(), z()],
             tumor_all: z(),
             tumor_pos: z(),
+            tumor_cls: [z(), z(), z()],
             immune_pos: z(),
         }
     }
@@ -462,8 +476,20 @@ impl Session {
             self.attr_notes
                 .push("Skor berbasis luas, bukan per sel.".to_owned());
         }
+        // Agregasi per kompartemen (lihat `compute_slide_attr`) aktif bila
+        // ada masker Tumor untuk salah satu irisan; itu mengubah hasil,
+        // jadi ikut masuk hash (atribut lama tanpa masker tidak terpengaruh).
+        let mut compartments = false;
+        if plan.compartment_aware() {
+            for &sl in slides {
+                compartments |= self.region_lookup(sl)?.is_some();
+            }
+        }
         let mut h = Fnv1a64::new();
         h.u64(params.params_hash()).str(method).str(plan.unit());
+        if compartments {
+            h.str("kompartemen-tumor-v1");
+        }
         let source = AttrSource::Computed {
             method: method.to_owned(),
             params_hash: h.finish(),
@@ -571,7 +597,10 @@ impl Session {
         let [lmx, lmy] = lc.mpp;
         let m = (lmx + lmy) / 2.0;
         let reg = self.registration_image(slide)?;
-        let lookup = if matches!(plan, Plan::TumorImmune(_)) || params.restrict_label.is_some() {
+        let lookup = if matches!(plan, Plan::TumorImmune(_))
+            || plan.compartment_aware()
+            || params.restrict_label.is_some()
+        {
             self.region_lookup(slide)?
         } else {
             None
@@ -722,10 +751,10 @@ impl Session {
                             continue;
                         };
                         let positive = d > thr.t_d;
+                        let k = thr.intensity_class(d).clamp(1, 3) as usize;
                         c.all[idx] += 1.0;
                         if positive {
                             c.pos[idx] += 1.0;
-                            let k = thr.intensity_class(d).clamp(1, 3) as usize;
                             c.cls[k - 1][idx] += 1.0;
                         }
                         if let Some(lk) = &lookup {
@@ -734,6 +763,7 @@ impl Session {
                                     c.tumor_all[idx] += 1.0;
                                     if positive {
                                         c.tumor_pos[idx] += 1.0;
+                                        c.tumor_cls[k - 1][idx] += 1.0;
                                     }
                                 }
                                 Region::Stroma if positive => c.immune_pos[idx] += 1.0,
@@ -756,18 +786,65 @@ impl Session {
             })
             .collect();
 
+        // Agregasi jendela per kompartemen. Tanpa pemisahan, jendela 80 µm
+        // mencampur sel di kedua sisi batas tumor: pada fantom CD8 (10 %
+        // positif intratumoral, 60 % di pita peritumoral) densitas
+        // intratumoral terukur +38 % dan peritumoral −11 %. Dengan masker
+        // Tumor, tiap piksel hanya mengagregasi sel (dan luas jaringan)
+        // kompartemennya sendiri: di dalam tumor bila pusat piksel di dalam
+        // masker, di luar bila tidak.
         let r = params.window_px as usize;
-        let all = window_sum(&c.all, aw, ah, r);
-        let pos = window_sum(&c.pos, aw, ah, r);
+        let in_tumor: Option<Vec<bool>> = match &lookup {
+            Some(lk) if plan.compartment_aware() => Some(
+                (0..aw * ah)
+                    .map(|i| {
+                        let u = [
+                            ((i % aw) as f64 + 0.5) * mpp_attr,
+                            ((i / aw) as f64 + 0.5) * mpp_attr,
+                        ];
+                        lk.region_at(u) == Region::Tumor
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        // `pick(dalam, total)`: jumlah jendela kompartemen piksel itu.
+        let split = |inside: &[f64], total: &[f64]| -> Vec<f64> {
+            match &in_tumor {
+                None => window_sum(total, aw, ah, r),
+                Some(mask) => {
+                    let outside: Vec<f64> = total
+                        .iter()
+                        .zip(inside.iter())
+                        .map(|(t, i)| t - i)
+                        .collect();
+                    let wi = window_sum(inside, aw, ah, r);
+                    let wo = window_sum(&outside, aw, ah, r);
+                    (0..aw * ah)
+                        .map(|i| if mask[i] { wi[i] } else { wo[i] })
+                        .collect()
+                }
+            }
+        };
+        let tissue_inside: Vec<f64> = match &in_tumor {
+            Some(mask) => tissue
+                .iter()
+                .zip(mask.iter())
+                .map(|(t, m)| if *m { *t } else { 0.0 })
+                .collect(),
+            None => Vec::new(),
+        };
+        let all = split(&c.tumor_all, &c.all);
+        let pos = split(&c.tumor_pos, &c.pos);
         let cls = [
-            window_sum(&c.cls[0], aw, ah, r),
-            window_sum(&c.cls[1], aw, ah, r),
-            window_sum(&c.cls[2], aw, ah, r),
+            split(&c.tumor_cls[0], &c.cls[0]),
+            split(&c.tumor_cls[1], &c.cls[1]),
+            split(&c.tumor_cls[2], &c.cls[2]),
         ];
         let tumor_all = window_sum(&c.tumor_all, aw, ah, r);
         let tumor_pos = window_sum(&c.tumor_pos, aw, ah, r);
         let immune_pos = window_sum(&c.immune_pos, aw, ah, r);
-        let tissue_win = window_sum(&tissue, aw, ah, r);
+        let tissue_win = split(&tissue_inside, &tissue);
         let px_area_mm2 = mpp_attr * mpp_attr / 1.0e6;
 
         let score = |sc: IhcScoring, i: usize| -> Option<f32> {

@@ -26,6 +26,20 @@ pub enum EngineError {
     /// Irisan tidak ada di proyek.
     #[error("irisan {0} tidak ada di proyek")]
     SlideNotFound(SlideId),
+    /// Berkas slide `External` tidak lagi sama dengan saat diimpor (ukuran
+    /// atau sidik jari berbeda). Pikselnya tidak dibaca sampai pengguna
+    /// menautkan ulang berkas aslinya (`Session::relink_slide`) atau menerima
+    /// berkas baru (`Session::accept_changed_slide`).
+    #[error(
+        "berkas slide irisan {slide} ({file}) berubah sejak diimpor (ukuran atau sidik jari \
+         berbeda); tautkan ulang berkas aslinya atau terima berkas baru sebelum membacanya"
+    )]
+    SlideChanged {
+        /// Irisan.
+        slide: SlideId,
+        /// Nama berkas.
+        file: String,
+    },
     /// Label tidak ada di tabel label.
     #[error("label \"{0}\" tidak ada di tabel label")]
     LabelNotFound(String),

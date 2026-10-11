@@ -23,6 +23,8 @@ fn rec(fixed: u32, p: Affine2) -> RegRecord {
         area_ratio: 1.0,
         flagged: false,
         manual: false,
+        residual_um: None,
+        residual_fit_um: None,
     }
 }
 

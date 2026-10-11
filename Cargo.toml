@@ -7,20 +7,22 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Yulius Jayuda <yulius.jayuda@gmail.com>"]
-rust-version = "1.85"
+rust-version = "1.96"
 
 [workspace.dependencies]
-h3d-core = { path = "crates/h3d-core" }
-h3d-slide = { path = "crates/h3d-slide" }
-h3d-imgproc = { path = "crates/h3d-imgproc" }
-h3d-register = { path = "crates/h3d-register" }
-h3d-segment = { path = "crates/h3d-segment" }
-h3d-volume = { path = "crates/h3d-volume" }
-h3d-io = { path = "crates/h3d-io" }
-h3d-engine = { path = "crates/h3d-engine" }
-h3d-render = { path = "crates/h3d-render" }
-h3d-ui = { path = "crates/h3d-ui" }
-h3d-i18n = { path = "crates/h3d-i18n" }
+# `version` disertakan agar `cargo deny` (bans.wildcards = "deny") tidak
+# menganggap dependensi path ini sebagai wildcard.
+h3d-core = { path = "crates/h3d-core", version = "0.1.0" }
+h3d-slide = { path = "crates/h3d-slide", version = "0.1.0" }
+h3d-imgproc = { path = "crates/h3d-imgproc", version = "0.1.0" }
+h3d-register = { path = "crates/h3d-register", version = "0.1.0" }
+h3d-segment = { path = "crates/h3d-segment", version = "0.1.0" }
+h3d-volume = { path = "crates/h3d-volume", version = "0.1.0" }
+h3d-io = { path = "crates/h3d-io", version = "0.1.0" }
+h3d-engine = { path = "crates/h3d-engine", version = "0.1.0" }
+h3d-render = { path = "crates/h3d-render", version = "0.1.0" }
+h3d-ui = { path = "crates/h3d-ui", version = "0.1.0" }
+h3d-i18n = { path = "crates/h3d-i18n", version = "0.1.0" }
 
 # --- inti / data ---
 serde = { version = "1", features = ["derive"] }

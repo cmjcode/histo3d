@@ -31,8 +31,9 @@ pub enum ExportKind {
     Nifti,
     /// Satu `NNNN.geojson` per irisan berlabel.
     GeoJson,
-    /// `report.md` + `report.csv`. `with_clinical` juga menyalin
-    /// `clinical.json` dan mencetak konteks klinis lengkap.
+    /// `report.md` + `report.csv` + `figures/margin_<label>.png` (bila ada
+    /// hasil margin). `with_clinical` juga menyalin `clinical.json` dan
+    /// mencetak konteks klinis lengkap.
     Report {
         /// Sertakan data klinis.
         with_clinical: bool,
@@ -251,7 +252,13 @@ impl Session {
                 }
             }
             ExportKind::Report { with_clinical } => {
-                let report = self.measure()?;
+                let mut report = self.measure()?;
+                // Gambar margin (8.12.8 butir 3) ditulis di samping laporan
+                // dan dirujuk dengan tautan relatif.
+                for fig in self.margin_figures()? {
+                    put(&fig.meta.file, &fig.encode_png()?)?;
+                    report.figures.push(fig.meta);
+                }
                 let scope = match (&self.project.sample.clinical, with_clinical) {
                     (Some(c), true) => ClinicalScope::Full(c),
                     _ => ClinicalScope::Omit,

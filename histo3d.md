@@ -265,13 +265,13 @@ rilis terbaru saat H0, lalu kunci di `Cargo.lock`.
 | Paralel | `rayon` | MIT/Apache | Ya | Mapan; jalan di iOS |
 | Gambar biasa | `image` 0.25 | MIT/Apache | Ya | [TERVERIFIKASI] dipakai DUCAD |
 | TIFF / BigTIFF | `tiff` | MIT | Ya | Mapan; dukungan TIFF piramida bertile perlu diuji di H0 |
-| WSI (SVS, NDPI, …) | `wsi-rs` | perlu dicek | Ya (klaim) | **[BELUM DIVERIFIKASI]** |
+| WSI (SVS, NDPI, …) | `wsi-rs` 0.6.0 | MIT/Apache | **Tidak sepenuhnya**: menarik `zstd-sys` dan `libz-sys` (C) | Lulus kompilasi iOS (ADR 0001); belum diuji pada SVS/NDPI nyata |
 | FFT | `rustfft` | MIT/Apache | Ya | Mapan |
 | Registrasi (backend opsional) | `sitk` | perlu dicek | Ya (klaim) | **[BELUM DIVERIFIKASI]** |
 | Inferensi ONNX | `tract-onnx` | MIT/Apache | Ya | Mapan; cakupan operator per model perlu diuji |
 | Inferensi ONNX dipercepat | `ort` (fitur `coreml`) | MIT/Apache | Tidak (ONNX Runtime C++) | Opsional; build iOS perlu `ORT_LIB_PROFILE` |
 | Ekstraksi permukaan | `fast-surface-nets` (+ `ndshape`) | MIT/Apache | Ya | Mapan; API perlu dicek saat H5 |
-| Olah mesh | `baby_shark` | MIT | Ya | **[BELUM DIVERIFIKASI]** untuk build iOS |
+| Olah mesh | di dalam crate (`h3d-volume::mesh`), menggantikan `baby_shark` | — | Ya | Decimate QEM deterministik + perbaikan tak-manifold (ADR 0001) |
 | BVH, picking | `parry3d` | Apache-2.0 | Ya | Mapan |
 | Kompresi tile label | `lz4_flex` | MIT | Ya | Mapan |
 | Ekspor NIfTI | `nifti` | MIT/Apache | Ya | Mapan |
@@ -283,8 +283,10 @@ rilis terbaru saat H0, lalu kunci di `Cargo.lock`.
 | Apple | `objc2` 0.6, `objc2-foundation`, `objc2-ui-kit` | MIT | Ya | [TERVERIFIKASI] |
 | Uji | `proptest`, `criterion` | MIT/Apache | Ya | [TERVERIFIKASI] |
 
-Satu-satunya komponen non-Rust yang direncanakan adalah `ort`, dan itu di
-balik fitur Cargo yang mati secara bawaan.
+Satu-satunya komponen non-Rust yang **direncanakan** adalah `ort`, dan itu di
+balik fitur Cargo yang mati secara bawaan. Kenyataan setelah H0: `wsi-rs` 0.6
+membawa `zstd-sys` (libzstd) dan `libz-sys` (zlib) yang dikompilasi dari C;
+keduanya hilang bila fitur `wsi` di `h3d-slide` dimatikan.
 
 ### 6.2 Yang sengaja tidak dipakai
 
@@ -295,7 +297,7 @@ balik fitur Cargo yang mati secara bawaan.
 | VTK / `vtk-rs` | iOS bergantung pada OpenGL ES; `vtk-rs` menyatakan dirinya belum siap pakai. |
 | OpenSlide (`openslide-rs`) | LGPL-2.1 + pustaka C; tautan statis di iOS bermasalah. Cadangan **desktop saja** bila `wsi-rs` gagal. |
 | OpenCV | Dependensi C++ besar; yang dibutuhkan darinya (ECC, korelasi fase) cukup kecil untuk ditulis sendiri. |
-| `zstd` | Pembungkus pustaka C; `lz4_flex` cukup. |
+| `zstd` | Pembungkus pustaka C; `lz4_flex` cukup. Tidak dipakai langsung, tetapi ikut masuk secara transitif lewat `wsi-rs` (ADR 0001). |
 
 ### 6.3 Sumber
 
@@ -614,7 +616,7 @@ pub enum RegModel { Rigid, Similarity, Affine }
 pub enum RegMetric { Ncc, MutualInformation }
 
 pub struct RegOptions {
-    pub model: RegModel,             // bawaan Affine
+    pub model: RegModel,             // bawaan Affine ("rigid dulu", lihat R3)
     pub metric: RegMetric,           // bawaan Ncc
     pub allow_flip: bool,            // bawaan true
     pub levels_um: Vec<f64>,         // bawaan [64.0, 32.0, 16.0]
@@ -669,6 +671,13 @@ implementasinya `findTransformECC` di OpenCV.
 - Hanya piksel dengan masker 1 pada **kedua** gambar yang dihitung.
 - Berhenti bila perubahan parameter < `convergence_eps` atau iterasi habis.
 - Bila koefisien korelasi turun dibanding awal → kembalikan hasil R2.
+- **Rigid dulu.** Dengan metrik NCC, model `Similarity`/`Affine` dijalankan
+  setelah penghalusan rigid (mulai dari hasil rigid) dan hanya diterima bila
+  skor = NCC bermasker × Dice masker naik ≥ 0,01 **dan** ≥ 25 % dari
+  `1 − skor_rigid`; bila tidak, hasil rigid yang dipakai. Tanpa aturan ini
+  perubahan bentuk penampang antar irisan diserap sebagai skala yang menumpuk
+  di sepanjang rantai (fantom: `|det T_i|` sampai 1,11, volume mesh +2,8 %).
+  Alasan, pengukuran, dan batasannya ada di `docs/adr/0002-registrasi.md`.
 
 **Beda pewarnaan.** Bila `metric = MutualInformation`: R1 dan R2 sama, R3
 diganti Nelder–Mead atas informasi mutual Mattes (32 bin histogram).
@@ -715,6 +724,15 @@ Irisan bertanda tampil di daftar "perlu diperiksa" dan pengguna bisa:
 
 Setelah satu irisan dikoreksi, `T` semua irisan **setelahnya di rantai**
 dihitung ulang dari `pairwise` yang tersimpan, tanpa registrasi ulang.
+
+**Sisa galat terukur.** Tiap `RegRecord` juga menyimpan dua angka yang diukur
+setelah penjajaran dari geseran sisa blok lokal 32 px (korelasi
+ternormalisasi ± 4 px, sub-piksel parabola) pada resolusi registrasi:
+`residual_um` (median besar geseran; galat lokal) dan `residual_fit_um` (RMS
+medan gerak rigid yang dicocokkan ke geseran itu; galat transformasi, yang
+menumpuk di rantai). Keduanya opsional di `project.json` (proyek lama tetap
+terbuka) dan menjadi dasar `TRE_est` di 8.12.6. Laporan mencatat bila skala
+luas kumulatif rantai `|det T_i|` menyimpang > 5 % dari 1.
 
 #### 8.4.6 Batasan yang harus ditulis di dokumentasi pengguna
 
@@ -1038,6 +1056,12 @@ Aturan tulis:
 - `format_version` dinaikkan pada perubahan tak kompatibel; pembaca menolak
   versi lebih baru dengan pesan jelas dan memigrasikan versi lebih lama.
 - Path `External` disimpan relatif terhadap folder proyek bila bisa.
+- **Sidik jari `External` ditegakkan.** Saat proyek dibuka dan tiap kali
+  piksel dibaca, ukuran + sidik jari berkas dibandingkan dengan yang tersimpan
+  saat impor. Ketidakcocokan tidak menggagalkan pembukaan proyek: irisannya
+  masuk daftar "berubah" dan pikselnya ditolak dibaca sampai pengguna
+  menautkan ulang berkas aslinya atau menerima berkas baru (ukuran piksel
+  level 0 harus sama). Berkas yang hilang dilaporkan terpisah.
 
 #### 8.7.2 Format `.lbl` (little-endian)
 
@@ -1097,7 +1121,7 @@ impl Session {
     pub fn interpolate_labels(&mut self, label: LabelId, p: &dyn Progress)
         -> Result<(), EngineError>;
     pub fn reconstruct(&mut self, p: &dyn Progress)
-        -> Result<Vec<LabelMesh>, EngineError>;
+        -> Result<Vec<LabelMesh>, EngineError>;   // juga menulis out/volume/labels.nii.gz
     pub fn measure(&self) -> Result<Report, EngineError>;
     pub fn export(&self, what: ExportKind, out: &Path) -> Result<(), EngineError>;
 
@@ -1109,6 +1133,16 @@ impl Session {
         -> Result<SpatialAnalysis, EngineError>;   // juga mengisi LabelMesh.scalars
     pub fn mark_reviewed(&mut self, slide: SlideId, label: LabelId, by: &str)
         -> Result<(), EngineError>;
+
+    // berkas slide External (8.7.1)
+    pub fn missing_slides(&self) -> Vec<SlideId>;
+    pub fn changed_slides(&self) -> Vec<SlideId>;
+    pub fn recheck_slides(&self) -> Vec<SlideId>;
+    pub fn relink_slide(&mut self, slide: SlideId, path: &Path) -> Result<bool, EngineError>;
+    pub fn accept_changed_slide(&mut self, slide: SlideId) -> Result<(), EngineError>;
+
+    // gambar laporan (8.12.8 butir 3)
+    pub fn margin_figures(&self) -> Result<Vec<MarginFigure>, EngineError>;
 }
 ```
 
@@ -1148,7 +1182,7 @@ h3d qc PROYEK.h3d                       # tabel NCC/Dice/rasio luas per irisan
 h3d labels import PROYEK.h3d --slide N --geojson ANOT.geojson
 h3d segment PROYEK.h3d --model DIR [--slides 1,5,9]
 h3d interpolate PROYEK.h3d --label Tumor
-h3d reconstruct PROYEK.h3d [--sxy 16] [--smooth 10] [--decimate 0.5]
+h3d reconstruct PROYEK.h3d [--sxy 16] [--smooth 10] [--decimate 0.5]   # + out/mesh/mesh.glb, out/volume/labels.nii.gz
 h3d measure PROYEK.h3d [--json]
 h3d export PROYEK.h3d --format glb|stl|obj|nifti|geojson|report|analysis --out DIR [--scalar NAMA] [--with-clinical]
 h3d clinical set PROYEK.h3d --json KLINIS.json      # tulis clinical.json (8.12.2)
@@ -1156,8 +1190,14 @@ h3d clinical strip PROYEK.h3d                       # hapus clinical.json
 h3d attrs compute PROYEK.h3d --kind ihc|nuclei|til --slides 3,4 [--t-d 0.15] [--name "Ki-67 % positif"]
 h3d analyze PROYEK.h3d [--json]                     # analisis spasial 8.12.6 → out/analysis.json
 h3d review PROYEK.h3d --slide N --label Tumor --by "YJ"   # tandai sudah ditinjau (8.12.7)
+h3d relink PROYEK.h3d --slide N [--path BERKAS] [--accept]  # tautkan ulang / terima berkas slide yang berubah (8.7.1)
 h3d phantom --shape ellipsoid|torus|branch --out DIR [--slices 60] [--seed 1] [--shuffle]
 ```
+
+Saat membuka proyek, tiap perintah mencetak satu baris `peringatan:` di stderr
+per irisan yang berkas slidenya berubah sejak impor atau tidak ditemukan;
+perintah yang tidak membaca piksel irisan itu tetap berjalan (kode keluar 0).
+Ekspor `report` juga menulis `figures/margin_<label>.png` di folder keluaran.
 
 `h3d phantom` membuat data uji sintetis (bagian 11.1) dan ikut dirilis
 karena berguna untuk demo dan validasi oleh pengguna. Opsi `--margin D`,
@@ -1481,6 +1521,13 @@ masker jaringan dan, bila ada, masker label yang diminta.
    Hanya diaktifkan bila `mpp_label ≤ 2 µm`; pada 4 µm sebuah tunas 20 µm
    hanya 5 piksel dan tidak dapat diandalkan.
 
+**Agregasi per kompartemen.** Nilai tiap piksel `AttrStore` diagregasi dari
+jendela 5 × 5 piksel (80 µm). Bila masker `Tumor` tersedia, skor per inti dan
+densitas hanya mengagregasi sel (dan luas jaringan) dari kompartemen piksel
+itu sendiri — di dalam atau di luar tumor — agar jendela tidak mencampur
+kedua sisi batas tumor (tanpa ini densitas TIL intratumoral fantom terukur
++38 %, peritumoral −11 %). TPS/CPS sudah per kompartemen menurut definisinya.
+
 Semua parameter (`t_D`, ambang intensitas, σ, `peri_band_um`) tersimpan di
 `AttrDef.source.params_hash` dan dicetak di laporan. Mengubah parameter =
 atribut baru, bukan menimpa diam-diam.
@@ -1503,12 +1550,14 @@ untuk satu medan, sudah masuk anggaran 8.6.5.
 **Ketidakpastian jarak.** Tiap jarak dilaporkan dengan
 `± (½ ukuran voxel pada sumbu dominan + TRE_est)`, `TRE_est` = median TRE
 QC registrasi (8.4.5) irisan yang terlibat; bila QC tidak ada, dipakai
-`s_xy`. Jarak pada arah Z juga ditandai "resolusi Z = jarak irisan".
+`s_xy`. TRE per irisan = `sqrt(Σ_k residual_fit_k² + residual_i²)` atas
+pasangan di jalur irisan itu ke acuan (sisa galat terukur, 8.4.5); catatan
+lama tanpa sisa galat memakai proksi dari Dice masker. Jarak pada arah Z juga ditandai "resolusi Z = jarak irisan".
 
 | Analisis | Prasyarat `kind` | Metode | Keluaran |
 |---|---|---|---|
 | **Margin** | `Tumor` + `Margin` | `d_M = edt3(Margin)`; `d_min = min d_M` atas voxel tumor; arah = vektor voxel tumor → voxel margin terdekat (diambil dari argmin EDT yang disimpan sebagai indeks), diklasifikasi ke sumbu dominan ±X/±Y/±Z lalu dinamai lewat `SpecimenOrientation`; dihitung per arah (6 nilai) dan global | `d_min` ± u, per arah; status `Involved` (d_min ≤ ½ s_xy), `Close` (< `margin_close_um`, bawaan 1000), `Clear`; titik terdekat (µm); **peta jarak per verteks** mesh tumor |
-| **Kontak / invasi struktur** | `Tumor` + `Vessel`/`Nerve`/`Capsule` | Pasangan voxel bertetangga muka (6-konektivitas) dengan satu tumor dan satu struktur; luas kontak = Σ luas muka (`s_xy × s_xy` atau `s_xy × s_z`); tambalan kontak = komponen terhubung pasangan tersebut | per struktur: ada/tidak, luas kontak mm², daftar tambalan (centroid µm, luas, irisan yang terlibat) |
+| **Kontak / invasi struktur** | `Tumor` + `Vessel`/`Nerve`/`Capsule` | Pasangan voxel bertetangga muka (6-konektivitas) dengan satu tumor dan satu struktur; luas kontak = Σ luas muka (`s_xy × s_xy` atau `s_xy × s_z`), dilaporkan mentah dan terkoreksi (tiap muka dibobot `\|n·e\|`, `n` = gradien indikator struktur terpulus Gauss 1,5 voxel di muka itu; menghapus bias tangga +27 %); tambalan kontak = komponen terhubung pasangan tersebut | per struktur: ada/tidak, luas kontak mm², daftar tambalan (centroid µm, luas, irisan yang terlibat) |
 | **Penetrasi kapsul** | `Tumor` + `Capsule` | `inside` = flood-fill 6-konektivitas dari batas kisi atas voxel bukan-kapsul → `outside`; sisanya `inside`. Komponen tumor yang memuat voxel `inside` **dan** `outside` = menembus | ya/tidak per komponen; volume tumor di luar kapsul |
 | **Multifokalitas** | `Tumor` | Komponen terhubung 26-konektivitas atas gabungan grup `Tumor`; buang komponen < `min_focus_um3` (bawaan (3 × s_xy)³); per komponen: Cavalieri per irisan (8.6.4), centroid, kotak pembatas, diameter maks; jarak antar fokus = min `edt3(fokus A)` atas voxel fokus B | jumlah fokus, tabel per fokus terurut volume, matriks jarak |
 | **Kedalaman invasi** | `Tumor` + `Surface` | `d_S = edt3(Surface)`; kedalaman = max `d_S` atas voxel tumor; titik terdalam | kedalaman ± u, titik terdalam, irisan |
@@ -1571,7 +1620,11 @@ Laporan (8.7.3) mendapat bagian baru, urutannya tetap:
 1. Konteks sampel (dari `ClinicalMeta`, bila ada) dan orientasi.
 2. Komponen tumor: tabel grup/anggota, volume, fraksi, jumlah fokus.
 3. Margin: tabel per arah, status, titik terdekat; gambar irisan terdekat
-   dengan panah (PNG di `out/figures/`).
+   dengan panah (PNG di `out/figures/`): `figures/margin_<label>.png` di
+   samping `report.md`, berisi thumbnail irisan berlabel yang `z`-nya terdekat
+   ke titik tumor terdekat (pada ruangnya sendiri), garis luar label, kedua
+   titik terdekat, dan panah tumor → tepi. Gambar tidak memuat teks; angkanya
+   ada di keterangan Markdown.
 4. Invasi: per struktur ada/tidak, luas kontak, daftar tambalan.
 5. Ukuran staging: diameter maks, tiga sumbu PCA, kedalaman/Breslow.
 6. Atribut: per atribut, statistik per region, heterogenitas, tabel per
@@ -2013,7 +2066,7 @@ Sumber kebenaran utama, karena data nyata tidak punya jawaban benar.
 |---|---|
 | Unit | Tiap fungsi `imgproc`, `Affine2`, `LabelStore`, format berkas. |
 | Properti (`proptest`) | Aljabar transformasi, bolak-balik berkas, undo. |
-| Emas | Keluaran CLI atas fantom berbenih dibandingkan dengan berkas tersimpan. |
+| Emas | Keluaran CLI atas fantom berbenih dibandingkan dengan berkas tersimpan (`testdata/golden/`, tes `golden_files_match_cli_output_of_seeded_phantoms`; segarkan dengan `H3D_UPDATE_GOLDEN=1`, lihat `testdata/README.md`). |
 | Ketahanan | Berkas rusak/terpotong/kosong → error, tidak pernah panik. |
 | Bench (`criterion`) | EDT 2D dan 3D, registrasi satu pasang, surface nets, cat kuas, deteksi inti satu tile. |
 | Arsitektur | `engine_has_no_gui_dependency`; tidak ada `opencascade` di pohon dependensi. |

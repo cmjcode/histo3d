@@ -100,6 +100,17 @@ pub struct RegRecord {
     pub flagged: bool,
     /// Hasil koreksi manual.
     pub manual: bool,
+    /// Sisa galat **lokal** pasangan ini, µm: median besar geseran sisa
+    /// antar blok lokal setelah penjajaran (korelasi ternormalisasi per blok
+    /// pada resolusi registrasi). `None` pada proyek lama atau bila tidak bisa
+    /// diukur (jaringan terlalu kecil, registrasi gagal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual_um: Option<f64>,
+    /// Sisa galat **transformasi** pasangan ini, µm: RMS medan gerak rigid
+    /// (translasi + rotasi kecil) yang dicocokkan ke geseran sisa blok. Bagian inilah yang menumpuk di
+    /// sepanjang rantai. `None` seperti `residual_um`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual_fit_um: Option<f64>,
 }
 
 /// Metadata pra-analitik per irisan (8.12.3).

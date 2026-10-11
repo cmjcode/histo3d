@@ -382,6 +382,49 @@ pub fn synthetic_ihc(
     (conc_to_rgba(&conc, &m, &mut rng, 2), truth)
 }
 
+/// Inti kebenaran dasar fantom IHC terkendali: `(x_um, y_um, konsentrasi DAB)`;
+/// konsentrasi 0 = inti negatif.
+pub type TruthNucleusDab = (f64, f64, f32);
+
+/// Citra IHC sintetis dengan kromogen **terkendali per inti**: posisi inti
+/// ditebar seperti [`synthetic_ihc`], lalu `dab_of(x_um, y_um, rng)`
+/// menentukan konsentrasi DAB inti itu (≤ 0 = negatif: inti biru-ungu tanpa
+/// DAB; > 0 = positif: counterstain tipis + DAB sebesar itu). Dipakai untuk
+/// fantom yang positivitas dan intensitasnya bergantung pada region (TPS/CPS,
+/// TIL intra/peritumoral, Allred). Mengembalikan RGBA dan daftar inti.
+pub fn synthetic_ihc_with(
+    mask: &Array2<u8>,
+    seed: u64,
+    mpp: f64,
+    dab_of: &dyn Fn(f64, f64, &mut Rng) -> f32,
+) -> (Vec<u8>, Vec<TruthNucleusDab>) {
+    let (h, w) = mask.dim();
+    let mut rng = Rng::new(seed ^ 0x5EED_1AC0_FFEE_D00D);
+    let m = StainMatrix::h_dab();
+    let mut conc = vec![[0.0f32; 3]; w * h];
+    for (c, &mv) in conc.iter_mut().zip(mask.iter()) {
+        if mv != 0 {
+            *c = [0.06 + rng.range(-0.015, 0.015) as f32, 0.0, 0.0];
+        }
+    }
+    let area_um2 = mask.iter().filter(|v| **v != 0).count() as f64 * mpp * mpp;
+    let target = (area_um2 / 220.0) as usize;
+    let pts = scatter_points(mask, &mut rng, mpp, 9.0, target);
+    let mut truth = Vec::with_capacity(pts.len());
+    for &(ux, uy) in &pts {
+        let dab = dab_of(ux, uy, &mut rng).max(0.0);
+        let r_um = rng.range(2.6, 3.4);
+        let c = if dab > 0.0 {
+            [0.45 + rng.range(-0.05, 0.05) as f32, dab, 0.0]
+        } else {
+            [0.95 + rng.range(-0.1, 0.1) as f32, 0.0, 0.0]
+        };
+        paint_disc(&mut conc, w, h, ux / mpp, uy / mpp, r_um / mpp, c);
+        truth.push((ux, uy, dab));
+    }
+    (conc_to_rgba(&conc, &m, &mut rng, 2), truth)
+}
+
 /// Pencocokan titik deteksi vs kebenaran dalam toleransi `tol_um`
 /// (serakah menurut jarak; tiap titik kebenaran dipakai sekali).
 /// Mengembalikan `(tp, fp, fn)`.
@@ -490,6 +533,30 @@ mod tests {
         assert!(!truth.is_empty());
         let npos = truth.iter().filter(|t| t.2).count();
         assert_eq!(npos, (0.3 * truth.len() as f64).round() as usize);
+    }
+
+    #[test]
+    fn controlled_ihc_follows_the_callback() {
+        let m = ellipsoid_mask([160, 120], [80.0, 60.0], [70.0, 50.0]);
+        // Kiri positif kuat, kanan negatif.
+        let f = |x: f64, _y: f64, _r: &mut Rng| if x < 80.0 { 0.8 } else { 0.0 };
+        let (a, truth) = synthetic_ihc_with(&m, 4, 1.0, &f);
+        let (b, truth_b) = synthetic_ihc_with(&m, 4, 1.0, &f);
+        assert_eq!(a, b);
+        assert_eq!(truth, truth_b);
+        assert_eq!(a.len(), 160 * 120 * 4);
+        assert!(truth.len() > 20);
+        assert!(truth.iter().all(|t| (t.2 > 0.0) == (t.0 < 80.0)));
+        assert!(truth.iter().any(|t| t.2 > 0.0) && truth.iter().any(|t| t.2 == 0.0));
+        // Inti positif berwarna cokelat (R > B), inti negatif biru (B > R).
+        let px = |t: &TruthNucleusDab| {
+            let i = (t.1 as usize * 160 + t.0 as usize) * 4;
+            (a[i] as i32, a[i + 2] as i32)
+        };
+        let pos = truth.iter().find(|t| t.2 > 0.0).unwrap();
+        let neg = truth.iter().find(|t| t.2 == 0.0).unwrap();
+        assert!(px(pos).0 > px(pos).1, "positif cokelat: {:?}", px(pos));
+        assert!(px(neg).1 > px(neg).0, "negatif biru: {:?}", px(neg));
     }
 
     #[test]

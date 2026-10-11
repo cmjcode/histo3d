@@ -299,6 +299,44 @@ mod tests {
     }
 
     #[test]
+    fn reg_record_without_residual_fields_loads() {
+        // Bentuk `reg` di `project.json` buatan versi sebelum
+        // `residual_um`/`residual_fit_um`: delapan field, tanpa keduanya.
+        let reg_json = r#"{
+            "fixed": 2, "method": "builtin-ecc",
+            "pairwise": { "m": [1.0, 0.0, 5.0, 0.0, 1.0, -2.0] },
+            "ncc": 0.9, "mask_dice": 0.95, "area_ratio": 1.0,
+            "flagged": false, "manual": false
+        }"#;
+        let mut p = Project::new("lama");
+        p.slides.push(SlideEntry {
+            id: SlideId(3),
+            mpp: [0.25, 0.25],
+            size_l0: [1000, 800],
+            ..Default::default()
+        });
+        let mut v = serde_json::to_value(&p).unwrap();
+        v["slides"][0]["reg"] = serde_json::from_str(reg_json).unwrap();
+        let old: Project = serde_json::from_value(v).expect("proyek lama harus terbuka");
+        let reg = old.slides[0].reg.as_ref().expect("catatan registrasi");
+        assert_eq!(reg.fixed, SlideId(2));
+        assert_eq!(reg.pairwise.apply([0.0, 0.0]), [5.0, -2.0]);
+        assert_eq!(reg.residual_um, None);
+        assert_eq!(reg.residual_fit_um, None);
+        // Field kosong tidak ditulis ulang (berkas lama tetap sama bentuknya).
+        let out = serde_json::to_string(&old).unwrap();
+        assert!(!out.contains("residual"));
+        // Dengan nilai: bolak-balik persis.
+        let mut q = old.clone();
+        if let Some(r) = q.slides[0].reg.as_mut() {
+            r.residual_um = Some(4.25);
+            r.residual_fit_um = Some(0.5);
+        }
+        let back: Project = serde_json::from_str(&serde_json::to_string(&q).unwrap()).unwrap();
+        assert_eq!(back, q);
+    }
+
+    #[test]
     fn newer_version_rejected() {
         let p = Project {
             format_version: FORMAT_VERSION + 1,

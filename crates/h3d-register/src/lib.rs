@@ -42,5 +42,5 @@ pub use chain::{compose_chain, neighbor_toward_reference, register_stack, RegInp
 pub use error::RegError;
 pub use landmarks::{from_landmarks, tre};
 pub use order::{suggest_order, OrderSuggestion, UNCERTAIN_THRESHOLD};
-pub use qc::{flag, record_from_result, QcThresholds};
+pub use qc::{flag, pair_residual, record_from_result, PairResidual, QcThresholds};
 pub use types::{RegImage, RegMetric, RegModel, RegOptions, RegResult, Registrar};

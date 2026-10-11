@@ -570,7 +570,7 @@ mod tests {
         let dims = [70, 66, 3];
         let n = dims[0] * dims[1] * dims[2];
         let mask: Vec<u8> = (0..n)
-            .map(|_| u8::from(rng(&mut seed) % 400 == 0))
+            .map(|_| u8::from(rng(&mut seed).is_multiple_of(400)))
             .collect();
         let sp = [1.0, 1.0, 2.0];
         let (want_d, want_a) = brute_3d(&mask, dims, sp);

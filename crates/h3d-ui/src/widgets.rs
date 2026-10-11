@@ -115,14 +115,50 @@ pub fn labeled_slider_f64(
     .inner
 }
 
+/// Ukuran teks di sebelah ikon (sama dengan gaya tombol bawaan egui).
+pub const ICON_TEXT_SIZE: f32 = 12.5;
+
+/// Teks "ikon + label" sebagai dua ruas tata letak: ikon memakai font ikon,
+/// label memakai font proporsional. Label **tidak boleh** ikut memakai font
+/// ikon: Material Symbols berligatur, sehingga potongan kata seperti "men",
+/// "lan", atau "3d" berubah menjadi ikon. Warna mengikuti widget.
+pub fn icon_text(icon: MaterialIcon, text: &str) -> egui::WidgetText {
+    icon_text_colored(icon, text, Color32::PLACEHOLDER)
+}
+
+/// Seperti [`icon_text`] dengan warna tetap.
+pub fn icon_text_colored(icon: MaterialIcon, text: &str, color: Color32) -> egui::WidgetText {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        icon.codepoint,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(theme::ICON_SIZE_DEFAULT - 3.0, icon.font_family()),
+            color,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    job.append(
+        text,
+        6.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(ICON_TEXT_SIZE),
+            color,
+            valign: egui::Align::Center,
+            ..Default::default()
+        },
+    );
+    egui::WidgetText::LayoutJob(std::sync::Arc::new(job))
+}
+
 /// Bilah pemilih mode (ikon + nama); `true` bila mode berubah.
 pub fn mode_bar(ui: &mut Ui, mode: &mut AppMode) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         for m in AppMode::ALL {
             let selected = *mode == m;
-            let text = format!("{} {}", m.icon().codepoint, t!(m.i18n_key()));
-            let label = RichText::new(text).family(m.icon().font_family());
+            let label = icon_text(m.icon(), &t!(m.i18n_key()));
             if ui.selectable_label(selected, label).clicked() && !selected {
                 *mode = m;
                 changed = true;

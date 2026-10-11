@@ -45,7 +45,7 @@ pub fn normal_to_gltf(n: [f32; 3]) -> [f32; 3] {
 /// Periksa konsistensi mesh sebelum ditulis: jumlah indeks kelipatan tiga
 /// dan semua indeks menunjuk verteks yang ada.
 pub fn validate_mesh(mesh: &LabelMesh) -> Result<(), IoError> {
-    if mesh.indices.len() % 3 != 0 {
+    if !mesh.indices.len().is_multiple_of(3) {
         return Err(IoError::InvalidArgument(format!(
             "jumlah indeks mesh label {} bukan kelipatan tiga",
             mesh.label

@@ -142,36 +142,8 @@ fn named_icons_render() {
     let mut warmup = ctx.run_ui(Default::default(), |_| {});
     warmup.textures_delta.clear();
 
-    let icons = [
-        h3d_ui::icons::CLOSE,
-        h3d_ui::icons::OPEN_FOLDER,
-        h3d_ui::icons::SAVE,
-        h3d_ui::icons::IMPORT,
-        h3d_ui::icons::EXPORT,
-        h3d_ui::icons::UNDO,
-        h3d_ui::icons::REDO,
-        h3d_ui::icons::PLAY,
-        h3d_ui::icons::SETTINGS,
-        h3d_ui::icons::WARNING,
-        h3d_ui::icons::CHECK,
-        h3d_ui::icons::BRUSH,
-        h3d_ui::icons::ERASER,
-        h3d_ui::icons::LASSO,
-        h3d_ui::icons::POLYGON,
-        h3d_ui::icons::ZOOM_IN,
-        h3d_ui::icons::ZOOM_OUT,
-        h3d_ui::icons::VISIBILITY_ON,
-        h3d_ui::icons::VISIBILITY_OFF,
-        h3d_ui::icons::LAYERS,
-        h3d_ui::icons::CUBE,
-        h3d_ui::icons::REPORT,
-        h3d_ui::icons::GRID,
-        h3d_ui::icons::COMPARE,
-        h3d_ui::icons::DRAW,
-        h3d_ui::icons::FLIP,
-        h3d_ui::icons::ROTATE,
-        h3d_ui::icons::INFO,
-    ];
+    // Semua ikon bernama, termasuk yang ditambahkan untuk h3d-app.
+    let icons = h3d_ui::icons::ALL;
     let mut bad = Vec::new();
     for icon in icons {
         let font = egui::FontId::new(16.0, icon.font_family());

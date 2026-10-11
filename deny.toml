@@ -12,7 +12,15 @@ targets = [
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+ignore = [
+    # `encoding` 0.2.33 tidak dipelihara (bukan kerentanan). Masuk hanya lewat
+    # wsi-rs 0.6 → dicom-object/dicom-parser → dicom-encoding 0.9.1 untuk
+    # mendekode teks DICOM; tidak ada versi dicom-rs tanpa crate ini dan
+    # wsi-rs tidak punya fitur untuk mematikan DICOM. Tinjau ulang saat
+    # wsi-rs/dicom-rs dinaikkan (pengecualian hulu wsi-rs sendiri berakhir
+    # 2026-10-01, lihat SUPPLY_CHAIN.md mereka).
+    { id = "RUSTSEC-2021-0153", reason = "transitif lewat wsi-rs → dicom-encoding; tidak dipelihara, bukan kerentanan" },
+]
 
 [licenses]
 version = 2
@@ -29,6 +37,10 @@ allow = [
     "CC0-1.0",
     "BSL-1.0",
     "OFL-1.1",
+    # Ubuntu Font Licence 1.0: font Ubuntu-Light yang dibundel
+    # `epaint_default_fonts` (font bawaan egui; hanya crate GUI). Mengizinkan
+    # penyematan dan redistribusi font tanpa modifikasi.
+    "Ubuntu-font-1.0",
 ]
 confidence-threshold = 0.9
 

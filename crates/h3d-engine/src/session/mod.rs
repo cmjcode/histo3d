@@ -1,9 +1,9 @@
 //! `Session`: proyek terbuka + bundel + cache + undo (8.8).
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use h3d_core::{
     Budgets, ClinicalMeta, IhcPanel, PreanalyticMeta, Project, ReconConfig, SlideEntry, SlideId,
@@ -18,6 +18,7 @@ use crate::error::EngineError;
 
 mod attrs;
 mod export;
+mod figures;
 mod images;
 mod import;
 mod labels;
@@ -27,6 +28,7 @@ mod spatial;
 
 pub use attrs::AttrParams;
 pub use export::ExportKind;
+pub use figures::{MarginFigure, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE};
 pub use images::REG_IMAGE_MPP;
 pub use import::ImportOptions;
 pub use labels::PendingProposal;
@@ -66,6 +68,10 @@ pub struct Session {
     pub(crate) analysis: Option<(u64, SpatialAnalysis)>,
     pub(crate) attr_notes: Vec<String>,
     pub(crate) project_dirty: bool,
+    /// Irisan `External` yang berkasnya tidak cocok dengan sidik jari saat
+    /// impor (diisi saat proyek dibuka dan tiap kali pembacaan mendapati
+    /// ketidakcocokan). `Mutex` karena pembacaan piksel berjalan lewat `&self`.
+    pub(crate) changed: Mutex<BTreeSet<SlideId>>,
 }
 
 // Jaminan waktu-kompilasi bahwa sesi boleh dipindah ke thread job.
@@ -87,6 +93,7 @@ impl Session {
             analysis: None,
             attr_notes: Vec::new(),
             project_dirty: false,
+            changed: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -105,13 +112,22 @@ impl Session {
 
     /// Buka proyek yang sudah ada. Berkas rusak atau versi terlalu baru →
     /// galat. `clinical.json` dimuat bila ada.
+    ///
+    /// Sidik jari tiap berkas slide `External` dibandingkan dengan yang
+    /// tersimpan saat impor. Ketidakcocokan **tidak** menggagalkan pembukaan
+    /// proyek: irisannya masuk [`Self::changed_slides`] dan pikselnya ditolak
+    /// dibaca ([`EngineError::SlideChanged`]) sampai pengguna menautkan ulang
+    /// atau menerima berkas itu. Berkas yang hilang ada di
+    /// [`Self::missing_slides`].
     pub fn open(path: &Path) -> Result<Self, EngineError> {
         let bundle = ProjectBundle::open(path)?;
         let project = bundle.load_project()?;
         if let Some(o) = &project.sample.orientation {
             o.validate()?;
         }
-        Ok(Self::with(bundle, project))
+        let s = Self::with(bundle, project);
+        s.recheck_slides();
+        Ok(s)
     }
 
     /// Simpan `project.json` dan semua label yang berubah (atomik).
@@ -445,6 +461,7 @@ impl Session {
         }
         self.labels.remove(&slide);
         self.pending.remove(&slide);
+        self.changed_set().remove(&slide);
         h3d_io::remove_if_exists(&self.bundle.label_path(slide))?;
         for a in &self.project.attrs {
             self.bundle.remove_attr(slide, &a.file_stem())?;

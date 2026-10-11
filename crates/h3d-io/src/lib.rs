@@ -38,7 +38,7 @@ pub use nifti::{decode_nifti, encode_f32_nifti, encode_label_nifti, gunzip, Nift
 pub use obj::encode_obj;
 pub use report::{
     render_csv, render_markdown, AttrReport, AttrSlideRow, ClinicalScope, GridInfo, GroupMember,
-    GroupReport, LabelReport, ProvenanceReport, Report, SlideSummary,
+    GroupReport, LabelReport, ProvenanceReport, Report, ReportFigure, SlideSummary,
 };
 pub use stl::{decode_stl, encode_stl, stl_file_name};
 pub use vox_cache::{decode_mesh, decode_vox, encode_mesh, encode_vox};

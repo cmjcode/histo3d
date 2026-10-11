@@ -7,8 +7,8 @@ use std::sync::Arc;
 use h3d_core::{Affine2, OrderSource, Progress, RegRecord, SlideId, SlideStatus, SlideTransform};
 use h3d_imgproc::{dice, ncc_masked, warp_affine_f32, warp_affine_u8, Interp};
 use h3d_register::{
-    compose_chain, from_landmarks, neighbor_toward_reference, record_from_result, BuiltinRegistrar,
-    OrderSuggestion, QcThresholds, RegImage, RegInput, RegOptions, Registrar,
+    compose_chain, from_landmarks, neighbor_toward_reference, pair_residual, record_from_result,
+    BuiltinRegistrar, OrderSuggestion, QcThresholds, RegImage, RegInput, RegOptions, Registrar,
 };
 use ndarray::Array2;
 use rayon::prelude::*;
@@ -307,7 +307,14 @@ impl Session {
                         return Err(EngineError::invalid("gambar registrasi hilang"));
                     };
                     let rec = match registrar.register(fi, mi, init, &run.options, &cancel) {
-                        Ok(res) => record_from_result(f, registrar.name(), &res, &run.qc, false),
+                        Ok(res) => {
+                            let mut rec =
+                                record_from_result(f, registrar.name(), &res, &run.qc, false);
+                            let residual = pair_residual(fi, mi, &res.transform);
+                            rec.residual_um = residual.map(|r| r.local_um);
+                            rec.residual_fit_um = residual.map(|r| r.fit_um);
+                            rec
+                        }
                         Err(h3d_register::RegError::Cancelled) => {
                             return Err(EngineError::Cancelled)
                         }
@@ -325,6 +332,8 @@ impl Session {
                                 area_ratio: 1.0,
                                 flagged: true,
                                 manual: false,
+                                residual_um: None,
+                                residual_fit_um: None,
                             }
                         }
                     };
@@ -478,12 +487,15 @@ impl Session {
         }
         // Metrik QC dihitung ulang bila gambar tersedia; bila tidak, nilai
         // lama dipertahankan agar tabel QC tidak berisi angka karangan.
-        let metrics = match (
+        let (metrics, residual) = match (
             self.registration_image(fixed),
             self.registration_image(slide),
         ) {
-            (Ok(f), Ok(m)) => pair_metrics(&f, &m, &pairwise),
-            _ => None,
+            (Ok(f), Ok(m)) => (
+                pair_metrics(&f, &m, &pairwise),
+                pair_residual(&f, &m, &pairwise),
+            ),
+            _ => (None, None),
         };
         let old = self.slide(slide)?.reg.clone();
         let (ncc, mask_dice) = metrics
@@ -498,6 +510,8 @@ impl Session {
             area_ratio: pairwise.determinant().abs() as f32,
             flagged: false,
             manual: true,
+            residual_um: residual.map(|r| r.local_um),
+            residual_fit_um: residual.map(|r| r.fit_um),
         });
         self.recompose_chain();
         self.save_project()
@@ -580,27 +594,98 @@ impl Session {
             .collect()
     }
 
-    /// Taksiran galat registrasi (µm) dari QC, untuk ketidakpastian jarak
-    /// (8.12.6). Per pasangan: pergeseran yang menjelaskan kekurangan Dice
-    /// masker pada cakram berluas sama, `(1 − Dice) × π × R / 2` — batas atas
-    /// yang hati-hati karena perubahan bentuk antar irisan ikut terhitung —
-    /// dengan batas bawah setengah piksel registrasi. Mengembalikan median;
-    /// `None` bila belum ada registrasi (pemanggil lalu memakai `s_xy`).
-    pub fn tre_estimate_um(&self) -> Option<f64> {
-        let mut est: Vec<f64> = Vec::new();
-        for s in self.project.usable_slides_ordered() {
+    /// Taksiran galat satu pasangan dari Dice masker (cadangan untuk catatan
+    /// lama tanpa `residual_um`): pergeseran yang menjelaskan kekurangan Dice
+    /// pada cakram berluas sama, `(1 − Dice) × π × R / 2` — batas atas yang
+    /// hati-hati karena perubahan bentuk antar irisan ikut terhitung —
+    /// dengan batas bawah setengah piksel registrasi.
+    fn dice_proxy_um(&self, slide: SlideId, mask_dice: f32) -> Option<f64> {
+        let img = self.registration_image(slide).ok()?;
+        let area = img.mask.iter().filter(|v| **v != 0).count() as f64 * img.mpp * img.mpp;
+        if area <= 0.0 {
+            return None;
+        }
+        let r = (area / std::f64::consts::PI).sqrt();
+        let d = f64::from(mask_dice).clamp(0.0, 1.0);
+        Some(((1.0 - d) * std::f64::consts::PI * r / 2.0).max(img.mpp / 2.0))
+    }
+
+    /// Taksiran galat registrasi per irisan di ruang W (µm), terurut tumpukan.
+    ///
+    /// `T_i` adalah komposisi pasangan menuju acuan, sehingga galat
+    /// **transformasi** tiap pasangan (`RegRecord::residual_fit_um`) menumpuk
+    /// — secara kuadrat karena pasangan diregistrasi saling bebas — sedangkan
+    /// galat **lokal** (`RegRecord::residual_um`: tekstur dan deformasi lokal
+    /// irisan itu sendiri) tidak:
+    /// `e_i = sqrt(Σ_k fit_k² + lokal_i²)`, `k` = pasangan di jalur `i` →
+    /// acuan. Keduanya diukur dari citra setelah penjajaran
+    /// (`h3d_register::pair_residual`).
+    ///
+    /// Catatan lama tanpa field itu memakai cadangan berbasis Dice untuk
+    /// `e_i` (dan menyumbang nol ke irisan sesudahnya). Irisan acuan (galat
+    /// nol menurut definisi W) dan irisan yang rantainya putus tidak ikut.
+    pub fn tre_per_slide_um(&self) -> Vec<(SlideId, f64)> {
+        let Some(reference) = self.project.effective_reference() else {
+            return Vec::new();
+        };
+        let ok = |v: Option<f64>| v.filter(|r| r.is_finite() && *r >= 0.0);
+        let usable = self.project.usable_slides_ordered();
+        // Per irisan: (tetangga, fit², lokal).
+        let mut link: HashMap<SlideId, (SlideId, f64, Option<f64>)> = HashMap::new();
+        for s in &usable {
             let Some(rec) = &s.reg else { continue };
-            let Ok(img) = self.registration_image(s.id) else {
+            let fit = ok(rec.residual_fit_um).unwrap_or(0.0);
+            link.insert(s.id, (rec.fixed, fit * fit, ok(rec.residual_um)));
+        }
+        let mut out = Vec::new();
+        for s in &usable {
+            let Some((_, _, local)) = link.get(&s.id).copied() else {
                 continue;
             };
-            let area = img.mask.iter().filter(|v| **v != 0).count() as f64 * img.mpp * img.mpp;
-            if area <= 0.0 {
+            if s.id == reference {
                 continue;
             }
-            let r = (area / std::f64::consts::PI).sqrt();
-            let d = f64::from(rec.mask_dice).clamp(0.0, 1.0);
-            est.push(((1.0 - d) * std::f64::consts::PI * r / 2.0).max(img.mpp / 2.0));
+            let mut sum = 0.0;
+            let mut cur = s.id;
+            let mut reached = false;
+            // Jalur paling panjang = jumlah irisan (pengaman terhadap siklus).
+            for _ in 0..=usable.len() {
+                if cur == reference {
+                    reached = true;
+                    break;
+                }
+                let Some((next, fit2, _)) = link.get(&cur) else {
+                    break;
+                };
+                sum += fit2;
+                cur = *next;
+            }
+            if !reached {
+                continue;
+            }
+            let e = match local {
+                Some(l) => Some((sum + l * l).sqrt()),
+                None => s
+                    .reg
+                    .as_ref()
+                    .and_then(|r| self.dice_proxy_um(s.id, r.mask_dice)),
+            };
+            if let Some(e) = e {
+                out.push((s.id, e));
+            }
         }
+        out
+    }
+
+    /// Taksiran galat registrasi (µm) untuk ketidakpastian jarak (8.12.6):
+    /// median [`Self::tre_per_slide_um`] atas irisan yang terlibat. `None`
+    /// bila belum ada registrasi (pemanggil lalu memakai `s_xy`).
+    pub fn tre_estimate_um(&self) -> Option<f64> {
+        let mut est: Vec<f64> = self
+            .tre_per_slide_um()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect();
         if est.is_empty() {
             return None;
         }

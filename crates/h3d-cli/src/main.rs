@@ -217,6 +217,20 @@ enum Command {
         #[arg(long)]
         by: String,
     },
+    /// Tautkan ulang berkas slide yang dipindah, atau terima berkas yang berubah.
+    Relink {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Id irisan.
+        #[arg(long)]
+        slide: u32,
+        /// Lokasi baru berkas slide.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Terima berkas yang sidik jarinya berbeda dari saat impor.
+        #[arg(long)]
+        accept: bool,
+    },
     /// Buat data uji sintetis dengan kebenaran dasar.
     Phantom(PhantomArgs),
 }
@@ -425,7 +439,33 @@ fn open(project: &Path) -> Result<Session> {
     let mut s = Session::open(project)
         .with_context(|| format!("tidak bisa membuka proyek {}", project.display()))?;
     s.set_clock(clock_from_env());
+    warn_about_slide_files(&s);
     Ok(s)
+}
+
+/// Satu baris peringatan di stderr per irisan yang berkas slidenya berubah
+/// sejak impor atau tidak ditemukan. Proyek tetap terbuka; perintah yang
+/// tidak membaca piksel irisan itu tetap berjalan.
+fn warn_about_slide_files(s: &Session) {
+    let name = |id: SlideId| {
+        s.slide(id)
+            .map(|e| e.source.file_name())
+            .unwrap_or_default()
+    };
+    for id in s.changed_slides() {
+        eprintln!(
+            "peringatan: berkas slide irisan {id} ({}) berubah sejak diimpor; pikselnya tidak \
+             dibaca sampai ditautkan ulang atau diterima (h3d relink)",
+            name(id)
+        );
+    }
+    for id in s.missing_slides() {
+        eprintln!(
+            "peringatan: berkas slide irisan {id} ({}) tidak ditemukan; tautkan ulang dengan \
+             h3d relink --path",
+            name(id)
+        );
+    }
 }
 
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
@@ -731,6 +771,9 @@ fn run(cli: Cli) -> Result<Outcome> {
                 );
             }
             println!("Mesh ditulis ke {}", out.join("mesh.glb").display());
+            // 8.7.1: volume label di kisi tumpukan untuk validasi silang.
+            let nii = s.write_label_volume()?;
+            println!("Volume label ditulis ke {}", nii.display());
         }
         Command::Measure { project, json } => {
             let s = open(&project)?;
@@ -980,6 +1023,40 @@ fn run(cli: Cli) -> Result<Outcome> {
             let id = s.label_by_name(&label)?;
             s.mark_reviewed(SlideId(slide), id, &by)?;
             println!("Anotasi \"{label}\" pada irisan {slide} ditandai sudah ditinjau.");
+        }
+        Command::Relink {
+            project,
+            slide,
+            path,
+            accept,
+        } => {
+            if path.is_none() && !accept {
+                bail!("relink butuh --path BERKAS dan/atau --accept");
+            }
+            let mut s = open(&project)?;
+            let id = SlideId(slide);
+            let mut matches = true;
+            if let Some(p) = &path {
+                matches = s.relink_slide(id, p)?;
+                println!(
+                    "Irisan {slide} ditautkan ke {}{}",
+                    p.display(),
+                    if matches {
+                        " (sidik jari cocok dengan saat impor)"
+                    } else {
+                        " (sidik jari BERBEDA dari saat impor)"
+                    }
+                );
+            }
+            if accept {
+                s.accept_changed_slide(id)?;
+                println!("Berkas irisan {slide} diterima; sidik jari tersimpan diperbarui.");
+            } else if !matches {
+                println!(
+                    "Piksel irisan {slide} belum dibaca: jalankan lagi dengan --accept bila ini \
+                     memang berkas irisan tersebut."
+                );
+            }
         }
         Command::Phantom(a) => {
             let foci = match (a.foci, a.gap) {

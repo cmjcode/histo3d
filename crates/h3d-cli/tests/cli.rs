@@ -113,6 +113,11 @@ fn pipeline(root: &Path, run_name: &str) -> PathBuf {
     }
     let out = ok(&cwd, &["reconstruct", "p.h3d", "--smooth", "10"]);
     assert!(out.contains("Rekonstruksi selesai"), "{out}");
+    // 8.7.1: `reconstruct` juga menulis volume label NIfTI ke bundel.
+    assert!(out.contains("Volume label ditulis ke"), "{out}");
+    let nii = cwd.join("p.h3d/out/volume/labels.nii.gz");
+    let gz = std::fs::read(&nii).expect("out/volume/labels.nii.gz");
+    assert_eq!(&gz[..2], &[0x1f, 0x8b], "gzip");
     cwd
 }
 
@@ -714,4 +719,287 @@ fn clinical_set_report_and_strip() {
         2,
     );
     assert!(!root.join("k.h3d/clinical.json").exists());
+}
+
+#[test]
+fn changed_and_missing_slide_files_warn_on_stderr_and_relink_recovers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for (i, cx) in [(0, 60.0), (1, 64.0), (2, 68.0)] {
+        write_disc_png(
+            &root.join(format!("s{i}.png")),
+            128,
+            (cx, 64.0),
+            40.0,
+            [150, 90, 170],
+        );
+    }
+    ok(root, &["new", "p.h3d"]);
+    ok(
+        root,
+        &[
+            "import", "p.h3d", "s0.png", "s1.png", "s2.png", "--mpp", "16",
+        ],
+    );
+    // Tidak berubah: stderr kosong.
+    let o = run(root, &["qc", "p.h3d"]);
+    assert_eq!(code(&o), 0);
+    assert_eq!(stderr(&o), "", "tanpa peringatan bila berkas utuh");
+
+    // Berubah: isi s1.png diganti. Proyek tetap terbuka (kode 0) dengan satu
+    // baris peringatan; perintah yang butuh pikselnya gagal dengan kode 2.
+    write_disc_png(&root.join("s1.png"), 128, (30.0, 30.0), 20.0, [90, 60, 200]);
+    let o = run(root, &["qc", "p.h3d"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let err = stderr(&o);
+    assert_eq!(err.trim_end().lines().count(), 1, "{err:?}");
+    assert!(
+        err.starts_with("peringatan: berkas slide irisan 1 (s1.png) berubah sejak diimpor"),
+        "{err:?}"
+    );
+    let o = run(root, &["register", "p.h3d"]);
+    assert_eq!(code(&o), 2, "{}", stderr(&o));
+    let err = stderr(&o);
+    let last = err.trim_end().lines().last().unwrap_or_default().to_owned();
+    assert!(
+        last.starts_with("galat: ") && last.contains("berubah sejak diimpor"),
+        "{err:?}"
+    );
+
+    // Hilang: s2.png dipindah → peringatan kedua, berbeda bunyinya.
+    std::fs::rename(root.join("s2.png"), root.join("pindah.png")).unwrap();
+    let o = run(root, &["qc", "p.h3d"]);
+    assert_eq!(code(&o), 0);
+    let err = stderr(&o);
+    assert_eq!(err.trim_end().lines().count(), 2, "{err:?}");
+    assert!(
+        err.contains("peringatan: berkas slide irisan 2 (s2.png) tidak ditemukan"),
+        "{err:?}"
+    );
+
+    // Pemulihan: tautkan ulang yang pindah, terima yang berubah.
+    fails_with_warnings(root, &["relink", "p.h3d", "--slide", "2"], 2);
+    let out = ok(
+        root,
+        &["relink", "p.h3d", "--slide", "2", "--path", "pindah.png"],
+    );
+    assert!(out.contains("sidik jari cocok"), "{out}");
+    let out = ok(root, &["relink", "p.h3d", "--slide", "1", "--accept"]);
+    assert!(out.contains("diterima"), "{out}");
+    let o = run(root, &["qc", "p.h3d"]);
+    assert_eq!((code(&o), stderr(&o).as_str()), (0, ""));
+    // Menautkan ke berkas yang tidak cocok tanpa --accept: tetap ditolak baca.
+    write_disc_png(
+        &root.join("lain.png"),
+        128,
+        (90.0, 90.0),
+        25.0,
+        [60, 60, 210],
+    );
+    let out = ok(
+        root,
+        &["relink", "p.h3d", "--slide", "0", "--path", "lain.png"],
+    );
+    assert!(out.contains("sidik jari BERBEDA"), "{out}");
+    // Berkas milik irisan lain ditolak.
+    fails_with_warnings(
+        root,
+        &["relink", "p.h3d", "--slide", "0", "--path", "s1.png"],
+        2,
+    );
+    let o = run(root, &["qc", "p.h3d"]);
+    assert!(stderr(&o).contains("irisan 0"), "{}", stderr(&o));
+}
+
+/// Seperti `fails`, tetapi mengizinkan baris peringatan sebelum baris galat.
+fn fails_with_warnings(cwd: &Path, args: &[&str], expected: i32) -> String {
+    let o = run(cwd, args);
+    let err = stderr(&o);
+    assert_eq!(code(&o), expected, "h3d {args:?}: stderr {err}");
+    let last = err.trim_end().lines().last().unwrap_or_default().to_owned();
+    assert!(last.starts_with("galat: "), "{err:?}");
+    assert!(
+        err.trim_end()
+            .lines()
+            .rev()
+            .skip(1)
+            .all(|l| l.starts_with("peringatan: ")),
+        "{err:?}"
+    );
+    last
+}
+
+// ------------------------------------------------------------ berkas emas
+
+/// `testdata/golden/` di akar workspace.
+fn golden_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("testdata")
+        .join("golden")
+}
+
+/// Platform pembuat berkas emas, mis. `aarch64-macos`.
+fn platform() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// Jalankan pipeline lengkap atas fantom berbenih dan kembalikan
+/// `(measure --json, out/analysis.json)`.
+fn golden_outputs(phantom_args: &[&str]) -> (String, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let mut args = vec!["phantom", "--shape", "ellipsoid", "--out", "ph"];
+    args.extend_from_slice(phantom_args);
+    ok(root, &args);
+    let cwd = pipeline(root, "emas");
+    ok(&cwd, &["analyze", "p.h3d"]);
+    let measure = ok(&cwd, &["measure", "p.h3d", "--json"]);
+    let analysis = std::fs::read_to_string(cwd.join("p.h3d/out/analysis.json")).unwrap();
+    (measure, analysis)
+}
+
+/// Bandingkan dua nilai JSON: struktur dan teks harus sama; bilangan boleh
+/// berbeda `tol` relatif (dipakai hanya di platform selain pembuat berkas
+/// emas, tempat FFT/libm bisa berbeda pada bit terakhir).
+fn json_close(a: &Value, b: &Value, tol: f64, path: &str) -> Result<(), String> {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            let (x, y) = (
+                x.as_f64().unwrap_or(f64::NAN),
+                y.as_f64().unwrap_or(f64::NAN),
+            );
+            if (x - y).abs() <= tol * x.abs().max(y.abs()).max(1.0) {
+                Ok(())
+            } else {
+                Err(format!("{path}: {x} ≠ {y}"))
+            }
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            if x.len() != y.len() {
+                return Err(format!("{path}: panjang {} ≠ {}", x.len(), y.len()));
+            }
+            x.iter()
+                .zip(y)
+                .enumerate()
+                .try_for_each(|(i, (p, q))| json_close(p, q, tol, &format!("{path}[{i}]")))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            if x.len() != y.len() || x.keys().any(|k| !y.contains_key(k)) {
+                return Err(format!("{path}: kunci berbeda"));
+            }
+            x.iter()
+                .try_for_each(|(k, p)| json_close(p, &y[k], tol, &format!("{path}.{k}")))
+        }
+        // Kunci hash masukan bergantung pada bit transformasi; hanya
+        // dibandingkan persis di platform pembuat.
+        (Value::String(_), Value::String(_)) if path.ends_with(".input_key") => Ok(()),
+        _ if a == b => Ok(()),
+        _ => Err(format!("{path}: {a} ≠ {b}")),
+    }
+}
+
+/// Baris pertama yang berbeda, untuk pesan galat yang berguna.
+fn first_diff(want: &str, got: &str) -> String {
+    for (i, (w, g)) in want.lines().zip(got.lines()).enumerate() {
+        if w != g {
+            return format!("baris {}:\n  emas : {w}\n  kini : {g}", i + 1);
+        }
+    }
+    format!(
+        "jumlah baris berbeda: emas {}, kini {}",
+        want.lines().count(),
+        got.lines().count()
+    )
+}
+
+/// Tes emas (11.2): keluaran CLI atas dua fantom berbenih dibandingkan byte
+/// demi byte dengan berkas tersimpan di `testdata/golden/`. Selisih berarti
+/// PERILAKU berubah; bila memang disengaja, segarkan dengan
+/// `H3D_UPDATE_GOLDEN=1 cargo test -p h3d-cli golden` dan tinjau diff-nya
+/// (lihat `testdata/README.md`).
+#[test]
+fn golden_files_match_cli_output_of_seeded_phantoms() {
+    let dir = golden_dir();
+    let update = std::env::var_os("H3D_UPDATE_GOLDEN").is_some_and(|v| v == "1");
+    let cases: [(&str, &[&str]); 2] = [
+        (
+            "ellipsoid_margin",
+            &[
+                "--slices", "20", "--seed", "5", "--size", "128", "--margin", "240",
+            ],
+        ),
+        (
+            "two_foci_vessel",
+            &[
+                "--slices", "20", "--seed", "6", "--size", "128", "--foci", "2", "--gap", "120",
+                "--vessel",
+            ],
+        ),
+    ];
+    if update {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("PLATFORM"), format!("{}\n", platform())).unwrap();
+    }
+    let made_on = std::fs::read_to_string(dir.join("PLATFORM"))
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+    for (name, args) in cases {
+        let (measure, analysis) = golden_outputs(args);
+        // Jaminan isi: fantom memang menguji hal yang dimaksud.
+        let v: Value = serde_json::from_str(&analysis).unwrap();
+        if name == "ellipsoid_margin" {
+            assert!(v["analysis"]["margin"]["d_min"]["value_um"]
+                .as_f64()
+                .is_some());
+        } else {
+            assert_eq!(v["analysis"]["foci"]["n"], 2, "dua fokus");
+            assert_eq!(v["analysis"]["contacts"][0]["result"]["any"], true);
+        }
+        for (suffix, got) in [("measure.json", &measure), ("analysis.json", &analysis)] {
+            let path = dir.join(format!("{name}.{suffix}"));
+            if update {
+                std::fs::write(&path, got).unwrap();
+                continue;
+            }
+            let want = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!(
+                    "berkas emas {} tidak terbaca ({e}); buat dengan H3D_UPDATE_GOLDEN=1",
+                    path.display()
+                )
+            });
+            if made_on == platform() {
+                assert!(
+                    want == *got,
+                    "{name}.{suffix} berbeda dari berkas emas — perilaku berubah. {}\n\
+                     Bila disengaja: H3D_UPDATE_GOLDEN=1 cargo test -p h3d-cli golden",
+                    first_diff(&want, got)
+                );
+            } else {
+                // Platform lain: struktur sama, bilangan dalam 0,1 %.
+                let a: Value = serde_json::from_str(&want).unwrap();
+                let b: Value = serde_json::from_str(got).unwrap();
+                if let Err(e) = json_close(&a, &b, 1e-3, name) {
+                    panic!(
+                        "{name}.{suffix} menyimpang dari berkas emas (dibuat di {made_on}, kini {}): {e}",
+                        platform()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn json_close_tolerates_only_small_numeric_differences() {
+    let a: Value = serde_json::json!({"x": [1.0, 2.0], "s": "a", "input_key": "aa"});
+    let b: Value = serde_json::json!({"x": [1.0005, 2.0], "s": "a", "input_key": "bb"});
+    assert!(json_close(&a, &b, 1e-3, "r").is_ok());
+    assert!(json_close(&a, &b, 1e-5, "r").is_err());
+    let c: Value = serde_json::json!({"x": [1.0, 2.0], "s": "b", "input_key": "aa"});
+    assert!(json_close(&a, &c, 1e-3, "r").is_err());
+    let d: Value = serde_json::json!({"x": [1.0], "s": "a", "input_key": "aa"});
+    assert!(json_close(&a, &d, 1e-3, "r").is_err());
+    assert!(first_diff("a\nb\n", "a\nc\n").contains("baris 2"));
 }

@@ -1,0 +1,278 @@
+{
+  "analysis": {
+    "attr_stats": [],
+    "breslow": null,
+    "capsule": null,
+    "contacts": [],
+    "depth": null,
+    "foci": {
+      "distances_um": [],
+      "foci": [
+        {
+          "bbox_um": [
+            [487.129284, 564.556577, 44.2368],
+            [1623.129284, 1460.556577, 796.2624]
+          ],
+          "centroid_um": [1048.962618, 1015.496742, 420.279678],
+          "layers": [3, 37],
+          "max_diameter_um": 1158.718643,
+          "n_voxels": 73536,
+          "volume_um3": 416383657.574803
+        }
+      ],
+      "n": 1
+    },
+    "fractions": {
+      "group_volumes": [
+        ["Tumor", 416383657.5744],
+        ["Tepi reseksi", 309173472.4608]
+      ],
+      "necrosis_percent": null,
+      "rows": [
+        {
+          "fraction_of_group": 1.0,
+          "group": "Tumor",
+          "kind": "tumor",
+          "label": 1,
+          "name": "Tumor",
+          "volume_um3": 416383657.5744
+        },
+        {
+          "fraction_of_group": 1.0,
+          "group": "Tepi reseksi",
+          "kind": "margin",
+          "label": 8,
+          "name": "Tepi reseksi",
+          "volume_um3": 309173472.4608
+        }
+      ]
+    },
+    "grid": {
+      "nz": 41,
+      "resampled_z": false,
+      "s_xy_um": 16.0,
+      "s_z_um": 22.1184,
+      "size": [159, 167],
+      "uniform_z": true
+    },
+    "hypoxia": null,
+    "margin": {
+      "d_min": {
+        "plus_minus_um": 15.70516,
+        "value_um": 216.963516,
+        "z_limited": false
+      },
+      "direction": "PosX",
+      "direction_name": null,
+      "nearest_margin_um": [1847.129284, 1188.556577, 398.1312],
+      "nearest_tumor_um": [1623.129284, 1124.556577, 398.1312],
+      "per_direction": [
+        {
+          "plus_minus_um": 15.70516,
+          "value_um": 216.963516,
+          "z_limited": false
+        },
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "status": "close"
+    },
+    "notes": [],
+    "params": {
+      "hypoxia_um": 150.0,
+      "ihc_hetero_warn": 20.0,
+      "margin_close_um": 1000.0,
+      "min_focus_um3": null,
+      "peri_band_um": 500.0,
+      "vessel_hist_bin_um": 25.0
+    },
+    "size": {
+      "centroid_um": [1048.962618, 1015.496742, 420.279678],
+      "max_diameter_um": {
+        "plus_minus_um": 15.70516,
+        "value_um": 1158.718643,
+        "z_limited": false
+      },
+      "pca_axes_um": [
+        {
+          "plus_minus_um": 15.70516,
+          "value_um": 1173.447333,
+          "z_limited": false
+        },
+        {
+          "plus_minus_um": 15.70516,
+          "value_um": 925.122034,
+          "z_limited": false
+        },
+        {
+          "plus_minus_um": 18.76436,
+          "value_um": 786.233239,
+          "z_limited": true
+        }
+      ],
+      "pca_directions": [
+        [0.985135, 0.171754, 0.003137],
+        [-0.171234, 0.983285, -0.061876],
+        [-0.013712, 0.060419, 0.998079]
+      ]
+    },
+    "tre_est_um": 7.70516,
+    "tumor_volume_um3": 416383657.5744,
+    "warnings": [
+      {
+        "dir": "+X",
+        "kind": "margin_close"
+      }
+    ]
+  },
+  "app_version": "0.1.0",
+  "attrs": [],
+  "dimension_uncertainty_um": 18.76436,
+  "figures": [],
+  "grid": {
+    "nz": 41,
+    "s_xy_um": 16.0,
+    "s_z_um": 22.1184,
+    "size": [159, 167]
+  },
+  "groups": [
+    {
+      "group": "Tumor",
+      "members": [
+        {
+          "fraction": 1.0,
+          "name": "Tumor",
+          "volume_um3": 421434438.4512
+        }
+      ],
+      "volume_um3": 421434438.4512
+    }
+  ],
+  "labels": [
+    {
+      "bbox_um": [
+        [479.066855, 558.905885, 35.207998],
+        [1629.481765, 1468.444792, 805.404288]
+      ],
+      "group": "Tumor",
+      "kind": "tumor",
+      "label": 1,
+      "max_diameter_um": 1161.082188,
+      "n_components": 1,
+      "n_slices_annotated": 18,
+      "n_slices_interpolated": 0,
+      "n_slices_reviewed": 0,
+      "name": "Tumor",
+      "surface_area_um2": 2800303.954715,
+      "volume_cavalieri_um3": 421434438.4512,
+      "volume_corrected_um3": null,
+      "volume_mesh_um3": 416893232.2036,
+      "volume_reviewed_um3": null
+    },
+    {
+      "bbox_um": null,
+      "group": "Tepi reseksi",
+      "kind": "margin",
+      "label": 8,
+      "max_diameter_um": null,
+      "n_components": null,
+      "n_slices_annotated": 20,
+      "n_slices_interpolated": 0,
+      "n_slices_reviewed": 0,
+      "name": "Tepi reseksi",
+      "surface_area_um2": null,
+      "volume_cavalieri_um3": 324257867.3664,
+      "volume_corrected_um3": null,
+      "volume_mesh_um3": null,
+      "volume_reviewed_um3": null
+    }
+  ],
+  "notes": [],
+  "notice": "Hanya untuk riset, bukan untuk diagnosis",
+  "orientation": null,
+  "provenance": {
+    "by_source": [
+      ["imported", 38]
+    ],
+    "drafts": [
+      [0, "Tepi reseksi"],
+      [1, "Tumor"],
+      [1, "Tepi reseksi"],
+      [2, "Tumor"],
+      [2, "Tepi reseksi"],
+      [3, "Tumor"],
+      [3, "Tepi reseksi"],
+      [4, "Tumor"],
+      [4, "Tepi reseksi"],
+      [5, "Tumor"],
+      [5, "Tepi reseksi"],
+      [6, "Tumor"],
+      [6, "Tepi reseksi"],
+      [7, "Tumor"],
+      [7, "Tepi reseksi"],
+      [8, "Tumor"],
+      [8, "Tepi reseksi"],
+      [9, "Tumor"],
+      [9, "Tepi reseksi"],
+      [10, "Tumor"],
+      [10, "Tepi reseksi"],
+      [11, "Tumor"],
+      [11, "Tepi reseksi"],
+      [12, "Tumor"],
+      [12, "Tepi reseksi"],
+      [13, "Tumor"],
+      [13, "Tepi reseksi"],
+      [14, "Tumor"],
+      [14, "Tepi reseksi"],
+      [15, "Tumor"],
+      [15, "Tepi reseksi"],
+      [16, "Tumor"],
+      [16, "Tepi reseksi"],
+      [17, "Tumor"],
+      [17, "Tepi reseksi"],
+      [18, "Tumor"],
+      [18, "Tepi reseksi"],
+      [19, "Tepi reseksi"]
+    ],
+    "reviewed": 0,
+    "total": 38
+  },
+  "recon": {
+    "band_px": 8.0,
+    "decimate_error_factor": 0.5,
+    "default_spacing_um": 44.2368,
+    "max_gap_um": null,
+    "mpp_label": 4.0,
+    "s_xy_um": 16.0,
+    "smooth_iterations": 10,
+    "z_factor_max": 2.0
+  },
+  "sample_name": "p",
+  "sample_notes": "",
+  "shrinkage_linear": null,
+  "slides": {
+    "flagged": [],
+    "median_spacing_um": 44.2368,
+    "order_suggested": false,
+    "reference": 10,
+    "registered": 20,
+    "total": 20,
+    "usable": 20
+  },
+  "spatial": {
+    "hypoxia_um": 150.0,
+    "ihc_hetero_warn": 20.0,
+    "margin_close_um": 1000.0,
+    "min_focus_um3": null,
+    "peri_band_um": 500.0,
+    "vessel_hist_bin_um": 25.0
+  },
+  "warnings": [
+    {
+      "kind": "has_draft"
+    }
+  ]
+}

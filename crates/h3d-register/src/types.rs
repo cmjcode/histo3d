@@ -247,7 +247,10 @@ pub enum RegMetric {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct RegOptions {
-    /// Model transformasi. Bawaan `Affine`.
+    /// Model transformasi. Bawaan `Affine`. Dengan metrik NCC, `Similarity`
+    /// dan `Affine` bersifat "rigid dulu": model bebas hanya dipakai pada
+    /// pasangan yang skornya membaik nyata dibanding rigid (lihat
+    /// [`crate::builtin::free_model_justified`]).
     pub model: RegModel,
     /// Metrik. Bawaan `Ncc`.
     pub metric: RegMetric,

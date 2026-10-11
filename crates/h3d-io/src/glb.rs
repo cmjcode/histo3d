@@ -87,7 +87,7 @@ impl BinBuilder {
 
     /// Tambahkan bufferView rata 4 byte; kembalikan indeksnya.
     fn push_view(&mut self, bytes: &[u8], target: u32) -> usize {
-        while self.bin.len() % 4 != 0 {
+        while !self.bin.len().is_multiple_of(4) {
             self.bin.push(0);
         }
         let offset = self.bin.len();
@@ -335,7 +335,7 @@ pub fn encode_glb(
             "tidak ada mesh berisi untuk ditulis ke GLB".into(),
         ));
     }
-    while b.bin.len() % 4 != 0 {
+    while !b.bin.len().is_multiple_of(4) {
         b.bin.push(0);
     }
     if u32::try_from(b.bin.len()).is_err() {
@@ -405,7 +405,7 @@ pub fn parse_glb(bytes: &[u8]) -> Result<(Value, Vec<u8>), IoError> {
         return Err(IoError::invalid(p, "panjang total tidak cocok"));
     }
     let json_len = u32_at(12)? as usize;
-    if u32_at(16)? != CHUNK_JSON || json_len % 4 != 0 {
+    if u32_at(16)? != CHUNK_JSON || !json_len.is_multiple_of(4) {
         return Err(IoError::invalid(p, "chunk JSON tidak sah"));
     }
     let json_end = 20usize
@@ -418,7 +418,7 @@ pub fn parse_glb(bytes: &[u8]) -> Result<(Value, Vec<u8>), IoError> {
         return Ok((doc, Vec::new()));
     }
     let bin_len = u32_at(json_end)? as usize;
-    if u32_at(json_end + 4)? != CHUNK_BIN || bin_len % 4 != 0 {
+    if u32_at(json_end + 4)? != CHUNK_BIN || !bin_len.is_multiple_of(4) {
         return Err(IoError::invalid(p, "chunk BIN tidak sah"));
     }
     let bin_start = json_end + 8;

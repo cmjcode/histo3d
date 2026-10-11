@@ -20,6 +20,10 @@ use super::{ReconState, Session, APP_VERSION};
 use crate::error::EngineError;
 use crate::hash::{json_bytes, Fnv1a64};
 
+/// Simpangan `|det T_i|` dari 1 yang membuat laporan mencatat hanyutan skala
+/// rantai registrasi.
+const CHAIN_SCALE_DRIFT_NOTE: f64 = 0.05;
+
 /// Adaptor `LabelStore` → [`LabelSampler`] milik `h3d-volume`.
 pub(crate) struct StoreSampler<'a>(pub &'a LabelStore);
 
@@ -230,7 +234,8 @@ impl Session {
     /// spasial tidak terpotong); mesh hanya dibuat untuk label ber-
     /// `reconstruct`. Masker voxel dan mesh disimpan di `cache/vox/` dengan
     /// kunci hash label + transformasi + `ReconConfig`; pemanggilan ulang
-    /// tanpa perubahan memakai cache.
+    /// tanpa perubahan memakai cache. Volume label juga ditulis ke
+    /// `out/volume/labels.nii.gz` ([`Self::write_label_volume`]).
     pub fn reconstruct(&mut self, p: &dyn Progress) -> Result<Vec<LabelMesh>, EngineError> {
         let (state, fresh) = {
             let data = self.slice_data()?;
@@ -283,6 +288,9 @@ impl Session {
             p.set(1.0, "rekonstruksi (dari cache)");
             let meshes = state.meshes.clone();
             self.recon = Some(state);
+            if !self.label_volume_path().is_file() {
+                self.write_label_volume_logged();
+            }
             return Ok(meshes);
         }
         // Cache gagal ditulis bukan galat rekonstruksi.
@@ -292,8 +300,49 @@ impl Session {
         let meshes = state.meshes.clone();
         self.recon = Some(state);
         self.analysis = None;
+        self.write_label_volume_logged();
         p.set(1.0, "rekonstruksi selesai");
         Ok(meshes)
+    }
+
+    /// `out/volume/labels.nii.gz` (8.7.1).
+    pub fn label_volume_path(&self) -> PathBuf {
+        self.bundle.out_volume_dir().join("labels.nii.gz")
+    }
+
+    /// Tulis volume label `u8` hasil rekonstruksi yang masih sah ke
+    /// `out/volume/labels.nii.gz` (8.7.1; `pixdim` = `s_xy`, `s_xy`, `s_z`
+    /// dalam mm, 8.7.3) dan kembalikan path-nya. [`Self::reconstruct`]
+    /// memanggilnya sendiri; berguna pula untuk menulis ulang berkas yang
+    /// terhapus. Galat bila belum ada rekonstruksi untuk keadaan saat ini.
+    pub fn write_label_volume(&self) -> Result<PathBuf, EngineError> {
+        let data = self.slice_data()?;
+        let recon = if data.is_empty() {
+            None
+        } else {
+            self.recon_for_key(self.recon_key(&data)?)
+        };
+        let recon = recon.ok_or_else(|| {
+            EngineError::invalid(
+                "belum ada volume untuk keadaan proyek saat ini; jalankan rekonstruksi dulu",
+            )
+        })?;
+        let masks: Vec<(u8, &VoxelMask)> = recon.masks.iter().map(|(l, m)| (l.0, m)).collect();
+        let out = h3d_io::encode_label_nifti(&masks)?;
+        for n in &out.notes {
+            log::info!("labels.nii.gz: {n}");
+        }
+        let path = self.label_volume_path();
+        write_atomic(&path, &out.gz)?;
+        Ok(path)
+    }
+
+    /// Gagal menulis keluaran turunan bukan galat rekonstruksi (mis. bundel
+    /// hanya-baca); hasilnya tetap ada di memori.
+    fn write_label_volume_logged(&self) {
+        if let Err(e) = self.write_label_volume() {
+            log::warn!("gagal menulis out/volume/labels.nii.gz: {e}");
+        }
     }
 
     /// Mesh hasil rekonstruksi terakhir yang masih sah (memori atau cache);
@@ -503,7 +552,7 @@ impl Session {
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v))
             .collect();
-        if !prov.drafts.is_empty() {
+        if !prov.drafts.is_empty() && !report.warnings.contains(&Warning::HasDraft) {
             report.warnings.push(Warning::HasDraft);
         }
         let n_interp = project
@@ -511,7 +560,10 @@ impl Session {
             .iter()
             .filter(|a| a.source.is_interpolated())
             .count();
-        if prov.total > 0 && n_interp * 2 > prov.total {
+        if prov.total > 0
+            && n_interp * 2 > prov.total
+            && !report.warnings.contains(&Warning::MostlyInterpolated)
+        {
             report.warnings.push(Warning::MostlyInterpolated);
         }
         report.provenance = prov;
@@ -549,6 +601,21 @@ impl Session {
                  ketidakpastian memakai s_xy sebagai penggantinya."
                     .to_owned(),
             );
+        }
+        // Hanyutan skala rantai (ADR 0002): model bebas yang diterima pada
+        // banyak pasangan bisa menumpuk skala searah; volume mesh/voxel ikut
+        // bergeser sebesar itu, sedangkan Cavalieri (ruang irisan) tidak.
+        let drift = usable
+            .iter()
+            .filter(|s| s.transform.is_registered())
+            .map(|s| (s.transform.affine().determinant().abs() - 1.0).abs())
+            .fold(0.0f64, f64::max);
+        if drift > CHAIN_SCALE_DRIFT_NOTE {
+            report.notes.push(format!(
+                "Skala luas kumulatif rantai registrasi menyimpang hingga {:.1} % dari 1; \
+                 volume mesh dan jarak 3D pada irisan itu ikut terpengaruh (volume Cavalieri tidak).",
+                drift * 100.0
+            ));
         }
         if !project.z_is_monotonic() {
             report

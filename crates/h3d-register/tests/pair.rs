@@ -231,3 +231,137 @@ fn cancellation_returns_cancelled() {
     let r = BuiltinRegistrar.register(&fixed, &moving, None, &RegOptions::default(), &p);
     assert_eq!(r, Err(RegError::Cancelled));
 }
+
+/// Citra dengan garis luar jaringan tetap dan "tumor" (cakram lebih gelap)
+/// berjari-jari `tumor_r_um`: meniru dua irisan bertetangga yang penampang
+/// tumornya berubah TANPA deformasi jaringan.
+fn shape_change_image(tumor_r_um: f64, seed: u64) -> RegImage {
+    let mpp = 16.0;
+    let n = 192usize;
+    let mask = slice_ellipsoid([1100.0, 900.0, 600.0], 0.0, mpp, [n, n]);
+    let field = Field3::new(seed, 1100.0, 300.0, 40);
+    let c = n as f64 * mpp / 2.0;
+    let gray = ndarray::Array2::from_shape_fn((n, n), |(y, x)| {
+        if mask[[y, x]] == 0 {
+            return 0.0f32;
+        }
+        let ux = (x as f64 + 0.5) * mpp - c;
+        let uy = (y as f64 + 0.5) * mpp - c;
+        let tex = 0.35 + 0.2 * field.at(ux, uy, 0.0).clamp(-1.0, 1.0);
+        let boost = if (ux * ux + uy * uy).sqrt() <= tumor_r_um {
+            0.25
+        } else {
+            0.0
+        };
+        (tex + boost) as f32
+    });
+    RegImage::new(gray, mask, mpp, [0.0, 0.0]).unwrap()
+}
+
+#[test]
+fn shape_change_between_sections_is_not_absorbed_as_scale() {
+    // Penampang tumor mengecil 7 % antar irisan; jaringan tidak berdeformasi.
+    // Affine/similarity tanpa pengaman "menjelaskan" perubahan bentuk itu
+    // dengan skala > 1 yang lalu menumpuk di sepanjang rantai (volume mesh
+    // membengkak). Model bebas hanya boleh diterima bila NCC membaik nyata.
+    let fixed = shape_change_image(620.0, 11);
+    let moving = shape_change_image(575.0, 11);
+    for model in [RegModel::Affine, RegModel::Similarity] {
+        let opts = RegOptions {
+            model,
+            ..Default::default()
+        };
+        let res = BuiltinRegistrar
+            .register(&fixed, &moving, None, &opts, &NoProgress)
+            .unwrap();
+        eprintln!("{model:?}: area_ratio {:.5}", res.area_ratio);
+        assert!(
+            (res.area_ratio - 1.0).abs() < 1e-4,
+            "{model:?}: perubahan bentuk diserap sebagai skala (|det| = {})",
+            res.area_ratio
+        );
+        let tre_px = tre_um(&moving, &res.transform, &Affine2::IDENTITY, 2) / 16.0;
+        assert!(tre_px <= 0.5, "{model:?}: TRE {tre_px:.3} px");
+    }
+    // Deformasi sungguhan (skala 4 %) tetap ditangkap affine.
+    let c = [192.0 * 16.0 / 2.0; 2];
+    let g = Affine2::translation(c[0] + 20.0, c[1] - 12.0)
+        .compose(&Affine2::scale(1.04, 1.04))
+        .compose(&Affine2::translation(-c[0], -c[1]));
+    let deformed = warp_image(&fixed, &g, [192, 192], 16.0, [0.0, 0.0]);
+    let res = BuiltinRegistrar
+        .register(&fixed, &deformed, None, &RegOptions::default(), &NoProgress)
+        .unwrap();
+    let want = 1.0 / (1.04f32 * 1.04);
+    assert!(
+        (res.area_ratio - want).abs() < 0.01,
+        "deformasi nyata harus diterima: |det| {} vs {want}",
+        res.area_ratio
+    );
+    let tre_px = tre_um(&deformed, &res.transform, &g.inverse().unwrap(), 2) / 16.0;
+    assert!(tre_px <= 0.5, "TRE {tre_px:.3} px");
+}
+
+#[test]
+fn free_model_guard_thresholds() {
+    use h3d_register::builtin::free_model_justified;
+    assert!(!free_model_justified(0.95, 0.957), "selisih kecil");
+    assert!(!free_model_justified(0.9374, 0.9211), "skor turun");
+    assert!(!free_model_justified(0.60, 0.65), "< 25 % residu");
+    assert!(free_model_justified(0.82, 0.93));
+    assert!(!free_model_justified(f32::NAN, 0.9));
+}
+
+#[test]
+fn pair_residual_measures_known_misregistration() {
+    use h3d_register::pair_residual;
+    let mpp = 16.0;
+    let n = 192;
+    let fixed = phantom(mpp, n, 9, 0.6);
+    // moving(u) = fixed(P_true u), P_true = geser (24, −16) µm = (1,5, −1) px.
+    let p_true = Affine2::translation(24.0, -16.0);
+    let moving = warp_image(&fixed, &p_true.inverse().unwrap(), [n, n], mpp, [0.0, 0.0]);
+    let want = (24.0f64 * 24.0 + 16.0 * 16.0).sqrt();
+
+    // Penjajaran benar → sisa di bawah 0,15 piksel.
+    let good = pair_residual(&fixed, &moving, &p_true).expect("blok cukup");
+    eprintln!("benar: {good:?}");
+    assert!(good.n_blocks >= 20);
+    assert!(good.local_um <= 0.15 * mpp, "lokal {}", good.local_um);
+    assert!(good.fit_um <= 0.15 * mpp, "fit {}", good.fit_um);
+
+    // Penjajaran identitas (salah 28,8 µm) → kedua ukuran melaporkannya.
+    let bad = pair_residual(&fixed, &moving, &Affine2::IDENTITY).expect("blok cukup");
+    eprintln!("salah geser: {bad:?} (benar {want:.1})");
+    assert!(
+        (bad.local_um - want).abs() <= 0.2 * want,
+        "lokal {}",
+        bad.local_um
+    );
+    assert!(
+        (bad.fit_um - want).abs() <= 0.2 * want,
+        "fit {}",
+        bad.fit_um
+    );
+
+    // Salah rotasi 0,4° di sekitar pusat: medan rigid ω·r.
+    let c = [n as f64 * mpp / 2.0; 2];
+    let rot = Affine2::rotation_about(0.4f64.to_radians(), c).compose(&p_true);
+    let r = pair_residual(&fixed, &moving, &rot).expect("blok cukup");
+    let truth = tre_um(&moving, &rot, &p_true, 4);
+    eprintln!("salah rotasi: {r:?} (TRE benar {truth:.1})");
+    assert!(
+        r.fit_um >= truth / 2.0 && r.fit_um <= truth * 2.0,
+        "fit {} vs TRE {truth}",
+        r.fit_um
+    );
+
+    // Tidak bisa diukur → None, bukan angka karangan.
+    let other = phantom(32.0, 96, 9, 0.6);
+    assert!(pair_residual(&fixed, &other, &Affine2::IDENTITY).is_none());
+    let tiny = phantom(mpp, 24, 9, 0.6);
+    assert!(pair_residual(&tiny, &tiny, &Affine2::IDENTITY).is_none());
+    assert!(pair_residual(&fixed, &moving, &Affine2::scale(0.0, 0.0)).is_none());
+    // Deterministik.
+    assert_eq!(pair_residual(&fixed, &moving, &rot), Some(r));
+}

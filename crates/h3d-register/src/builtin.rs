@@ -10,6 +10,14 @@
 //!   citra fixed, skala = setengah diagonal); parameter ECC hidup di sini.
 //! - Keluaran [`RegResult::transform`] = `P_{moving→fixed}` µm → µm:
 //!   `px_to_um_fixed ∘ P_px ∘ um_to_px_moving`.
+//!
+//! # Rigid dulu (pengaman model bebas)
+//! Dengan metrik NCC, model `Similarity`/`Affine` dijalankan **setelah**
+//! penghalusan rigid dan hanya diterima bila skornya membaik nyata
+//! ([`free_model_justified`]); bila tidak, hasil rigid yang dikembalikan.
+//! Tanpa pengaman ini perubahan bentuk antar irisan diserap sebagai skala
+//! yang menumpuk di sepanjang rantai (ADR 0002). Metrik informasi mutual
+//! tidak memakai pengaman (NCC tidak bermakna antar pewarnaan).
 
 use std::f64::consts::PI;
 
@@ -789,6 +797,74 @@ fn mi_level(
     Ok((frame.p_px_from_phi_n(&phi_n)?, iterations))
 }
 
+/// Pengaman model bebas (8.4.2, ADR 0002). Skor = NCC bermasker × Dice
+/// masker (sama dengan skor kandidat R2). Model `Similarity`/`Affine` hanya
+/// diterima bila bagian skor yang **belum** dijelaskan rigid, `1 − skor_rigid`,
+/// berkurang setidaknya sebesar fraksi ini.
+///
+/// Alasannya: penampang tumor berubah dari irisan ke irisan. Affine tanpa
+/// pengaman "menjelaskan" perubahan bentuk itu dengan skala/geser kecil
+/// (≈ 0,5–1,5 % per pasangan) yang searah dan menumpuk di sepanjang rantai,
+/// sehingga volume mesh membengkak. Pada fantom, perubahan bentuk murni
+/// memberi fraksi ≤ 0,20; deformasi sungguhan ≥ 2,5 % memberi ≥ 0,63.
+pub const AFFINE_MIN_RESIDUAL_GAIN: f32 = 0.25;
+/// Selisih skor mutlak minimum (menahan pasangan yang sudah nyaris sempurna
+/// agar derau interpolasi tidak membenarkan skala/geser).
+pub const AFFINE_MIN_SCORE_GAIN: f32 = 0.01;
+
+/// Benar bila skor model bebas (`score_free`) cukup lebih baik daripada skor
+/// rigid (`score_rigid`) untuk diterima; skor = NCC bermasker × Dice masker.
+pub fn free_model_justified(score_rigid: f32, score_free: f32) -> bool {
+    if !(score_rigid.is_finite() && score_free.is_finite()) {
+        return false;
+    }
+    let gain = score_free - score_rigid;
+    gain >= AFFINE_MIN_SCORE_GAIN && gain >= AFFINE_MIN_RESIDUAL_GAIN * (1.0 - score_rigid)
+}
+
+/// Penghalusan berjenjang (R3) dari `p_um0` (`P_{moving→fixed}`, µm → µm)
+/// atas semua `levels` (kasar → halus) dengan model `opts.model`.
+/// `coarse` = citra pada `levels[0]`. Mengembalikan `(P, iterasi, citra
+/// fixed dan moving pada level terhalus)`; `P` tetap µm → µm.
+#[allow(clippy::too_many_arguments)]
+fn refine_pyramid(
+    fixed: &RegImage,
+    moving: &RegImage,
+    levels: &[f64],
+    coarse: (RegImage, RegImage),
+    p_um0: Affine2,
+    opts: &RegOptions,
+    progress: &dyn Progress,
+    span: (f32, f32),
+) -> Result<(Affine2, u32, RegImage, RegImage)> {
+    let n_lv = levels.len() as f32;
+    let mut p_um = p_um0;
+    let mut iterations = 0u32;
+    let (mut f_lv, mut m_lv) = coarse;
+    for (li, &lvl) in levels.iter().enumerate() {
+        if progress.is_cancelled() {
+            return Err(RegError::Cancelled);
+        }
+        let frac = (li as f32 + 0.5) / (n_lv + 0.5);
+        progress.set(
+            span.0 + (span.1 - span.0) * frac,
+            &format!("penghalusan {lvl:.0} µm"),
+        );
+        if li > 0 {
+            f_lv = fixed.downsample_to(lvl);
+            m_lv = moving.downsample_to(lvl);
+        }
+        let p_px = p_um_to_px(&f_lv, &m_lv, &p_um);
+        let (p_px_new, it) = match opts.metric {
+            RegMetric::Ncc => ecc_level(&f_lv, &m_lv, &p_px, opts)?,
+            RegMetric::MutualInformation => mi_level(&f_lv, &m_lv, &p_px, opts)?,
+        };
+        iterations += it;
+        p_um = p_px_to_um(&f_lv, &m_lv, &p_px_new);
+    }
+    Ok((p_um, iterations, f_lv, m_lv))
+}
+
 impl Registrar for BuiltinRegistrar {
     fn name(&self) -> &'static str {
         "builtin-ecc"
@@ -812,7 +888,6 @@ impl Registrar for BuiltinRegistrar {
             }
         }
         let levels = effective_levels(opts, fixed.mpp.max(moving.mpp));
-        let n_lv = levels.len() as f32;
         progress.set(0.0, "kandidat awal (momen + korelasi fase)");
         let f0 = fixed.downsample_to(levels[0]);
         let m0 = moving.downsample_to(levels[0]);
@@ -821,29 +896,61 @@ impl Registrar for BuiltinRegistrar {
             return Err(RegError::Cancelled);
         }
 
-        let mut p_um = coarse.p_um;
-        let mut iterations = 0u32;
-        let mut f_lv = f0;
-        let mut m_lv = m0;
-        for (li, &lvl) in levels.iter().enumerate() {
-            if progress.is_cancelled() {
-                return Err(RegError::Cancelled);
-            }
-            progress.set(
-                (li as f32 + 0.5) / (n_lv + 0.5),
-                &format!("penghalusan {lvl:.0} µm"),
-            );
-            if li > 0 {
-                f_lv = fixed.downsample_to(lvl);
-                m_lv = moving.downsample_to(lvl);
-            }
-            let p_px = p_um_to_px(&f_lv, &m_lv, &p_um);
-            let (p_px_new, it) = match opts.metric {
-                RegMetric::Ncc => ecc_level(&f_lv, &m_lv, &p_px, opts)?,
-                RegMetric::MutualInformation => mi_level(&f_lv, &m_lv, &p_px, opts)?,
+        let rigid_opts;
+        let guarded = opts.metric == RegMetric::Ncc && opts.model != RegModel::Rigid;
+        let first_opts = if guarded {
+            rigid_opts = RegOptions {
+                model: RegModel::Rigid,
+                ..opts.clone()
             };
-            iterations += it;
-            p_um = p_px_to_um(&f_lv, &m_lv, &p_px_new);
+            &rigid_opts
+        } else {
+            opts
+        };
+        let span = if guarded { 0.5 } else { 1.0 };
+        let (mut p_um, mut iterations, f_lv, m_lv) = refine_pyramid(
+            fixed,
+            moving,
+            &levels,
+            (f0, m0),
+            coarse.p_um,
+            first_opts,
+            progress,
+            (0.0, span),
+        )?;
+        if guarded {
+            // Rigid dulu, lalu model yang diminta mulai dari hasil rigid; model
+            // yang lebih bebas hanya diterima bila memperbaiki skor (NCC
+            // bermasker × Dice masker) dengan selisih yang berarti; lihat
+            // `AFFINE_MIN_RESIDUAL_GAIN`. Dice ikut dihitung karena ECC hanya
+            // melihat piksel di irisan kedua masker dan karenanya buta
+            // terhadap garis luar jaringan — saksi terkuat untuk skala.
+            let f_c = fixed.downsample_to(levels[0]);
+            let m_c = moving.downsample_to(levels[0]);
+            let (p_free, it2, _, _) = refine_pyramid(
+                fixed,
+                moving,
+                &levels,
+                (f_c, m_c),
+                p_um,
+                opts,
+                progress,
+                (span, 1.0),
+            )?;
+            iterations += it2;
+            let (ncc_r, dice_r) = evaluate(&f_lv, &m_lv, &p_um_to_px(&f_lv, &m_lv, &p_um))?;
+            let (ncc_a, dice_a) = evaluate(&f_lv, &m_lv, &p_um_to_px(&f_lv, &m_lv, &p_free))?;
+            let s_r = candidate_score(ncc_r, dice_r);
+            let s_a = candidate_score(ncc_a, dice_a);
+            let accept = free_model_justified(s_r, s_a);
+            log::debug!(
+                "pengaman model bebas: skor rigid {s_r:.4} → {s_a:.4} (NCC {ncc_r:.4} → {ncc_a:.4}, \
+                 Dice {dice_r:.4} → {dice_a:.4}), |det| {:.4}, diterima = {accept}",
+                p_free.determinant().abs()
+            );
+            if accept {
+                p_um = p_free;
+            }
         }
         if progress.is_cancelled() {
             return Err(RegError::Cancelled);

@@ -166,8 +166,40 @@ fn full_pipeline_volume_and_two_runs_byte_identical() {
          (piksel registrasi 16 µm); proyek dasar dibangun {:.1} s",
         sh.build_seconds
     );
-    assert!(tre_mean <= 2.0 * 16.0, "TRE rata-rata {tre_mean} µm > 2 px");
+    // Opsi BAWAAN (affine "rigid dulu"): rantai tidak boleh hanyut. Sebelum
+    // pengaman model bebas, affine memberi TRE rata-rata 26,9 µm / terburuk
+    // 58,6 µm dan |det T_i| sampai 1,11 di ujung rantai.
+    assert!(
+        tre_mean <= 16.0,
+        "TRE rata-rata {tre_mean} µm > 1 piksel registrasi"
+    );
+    assert!(
+        tre_worst <= 2.0 * 16.0,
+        "TRE terburuk {tre_worst} µm > 2 px"
+    );
     assert!(a.qc_table().iter().all(|r| r.registered && !r.flagged));
+    for e in a.project().usable_slides_ordered() {
+        let det = e.transform.affine().determinant().abs();
+        assert!(
+            (det - 1.0).abs() <= 0.02,
+            "irisan {}: skala kumulatif rantai |det| = {det}",
+            e.id
+        );
+    }
+    // Taksiran TRE berasal dari sisa galat terukur (bukan proksi Dice) dan
+    // berada dalam faktor 2 dari TRE sebenarnya.
+    assert!(a
+        .project()
+        .slides
+        .iter()
+        .filter_map(|e| e.reg.as_ref())
+        .all(|r| r.residual_um.is_some() && r.residual_fit_um.is_some()));
+    let tre_est = a.tre_estimate_um().expect("taksiran TRE");
+    println!("taksiran TRE {tre_est:.1} µm vs sebenarnya {tre_mean:.1} µm");
+    assert!(
+        tre_est >= tre_mean / 2.0 && tre_est <= tre_mean * 2.0,
+        "taksiran TRE {tre_est} µm di luar faktor 2 dari {tre_mean} µm"
+    );
 
     let pa = a.path().to_path_buf();
     let pb = b.path().to_path_buf();
@@ -245,8 +277,76 @@ fn full_pipeline_volume_and_two_runs_byte_identical() {
         reports[0].dimension_uncertainty_um
     );
     assert!(e_cav <= 0.03, "galat Cavalieri {e_cav}");
-    assert!(e_mesh <= 0.06, "galat volume mesh {e_mesh}");
+    assert!(e_mesh <= 0.03, "galat volume mesh {e_mesh}");
+    let masks = a.voxel_masks().unwrap();
+    let v_vox = masks
+        .iter()
+        .find(|(l, _)| *l == TUMOR)
+        .expect("masker voxel tumor")
+        .1
+        .volume_um3();
+    let e_vox = (v_vox - truth).abs() / truth;
+    println!(
+        "volume voxel {:.4} mm³ (galat {:.2} %)",
+        v_vox / 1e9,
+        e_vox * 100.0
+    );
+    assert!(e_vox <= 0.03, "galat volume voxel {e_vox}");
+
+    // `reconstruct` menulis out/volume/labels.nii.gz (8.7.1). Padanan
+    // kriteria H5 "volume di 3D Slicer sama dalam 1 %": volume voxel NIfTI
+    // (jumlah voxel berlabel × pixdim) vs Cavalieri.
+    let nii_path = pa.join("out").join("volume").join("labels.nii.gz");
+    assert_eq!(a.label_volume_path(), nii_path);
+    let gz = std::fs::read(&nii_path).expect("reconstruct menulis labels.nii.gz");
+    assert_eq!(
+        gz,
+        std::fs::read(pb.join("out").join("volume").join("labels.nii.gz")).unwrap(),
+        "labels.nii.gz harus byte-identik antar dua jalan"
+    );
+    let raw = h3d_io::gunzip(&gz).unwrap();
+    let (hdr, voxels) = h3d_io::decode_nifti(&raw).unwrap();
+    let grid = &masks[0].1.grid;
+    assert_eq!(hdr.dim[0], 3);
+    assert_eq!(
+        [hdr.dim[1], hdr.dim[2], hdr.dim[3]],
+        [grid.size[0] as i16, grid.size[1] as i16, grid.nz() as i16]
+    );
+    assert_eq!((hdr.datatype, hdr.bitpix), (2, 8), "u8");
+    // pixdim dalam mm: (s_xy, s_xy, s_z).
+    assert!((f64::from(hdr.pixdim[1]) - grid.s_xy / 1000.0).abs() < 1e-7);
+    assert!((f64::from(hdr.pixdim[2]) - grid.s_xy / 1000.0).abs() < 1e-7);
+    assert!((f64::from(hdr.pixdim[3]) - grid.median_dz() / 1000.0).abs() < 1e-7);
+    let n_tumor = voxels.iter().filter(|v| **v == TUMOR.0).count();
+    assert!(voxels.iter().all(|v| *v == 0 || *v == TUMOR.0));
+    let v_nii_mm3 = n_tumor as f64
+        * f64::from(hdr.pixdim[1])
+        * f64::from(hdr.pixdim[2])
+        * f64::from(hdr.pixdim[3]);
+    let v_cav_mm3 = row.volume_cavalieri_um3 / 1e9;
+    let e_nii = (v_nii_mm3 - v_cav_mm3).abs() / v_cav_mm3;
+    println!(
+        "volume NIfTI {v_nii_mm3:.4} mm³ vs Cavalieri {v_cav_mm3:.4} mm³ (selisih {:.2} %)",
+        e_nii * 100.0
+    );
+    assert!(e_nii <= 0.01, "volume NIfTI vs Cavalieri {e_nii}");
+    // Berkas yang terhapus ditulis ulang oleh `reconstruct` (dari cache) dan
+    // oleh `write_label_volume`.
+    std::fs::remove_file(&nii_path).unwrap();
+    a.reconstruct(&NoProgress).unwrap();
+    assert_eq!(std::fs::read(&nii_path).unwrap(), gz);
+    std::fs::remove_file(&nii_path).unwrap();
+    assert_eq!(a.write_label_volume().unwrap(), nii_path);
+    assert_eq!(std::fs::read(&nii_path).unwrap(), gz);
     assert!(reports[0].dimension_uncertainty_um > 0.0);
+    // Peringatan laporan tidak berulang (dulu `has_draft` tercetak dua kali
+    // di `measure --json`).
+    for (i, w) in reports[0].warnings.iter().enumerate() {
+        assert!(
+            !reports[0].warnings[..i].contains(w),
+            "peringatan berulang: {w:?}"
+        );
+    }
     assert!(
         reports[0].analysis.is_some(),
         "laporan memuat analisis yang masih sah"
@@ -1190,4 +1290,183 @@ fn ai_segmentation_only_fills_pending_proposals_until_accepted() {
     s.set_mpp(SlideId(0), [8.0, 8.0]).unwrap();
     assert!(s.slide(SlideId(0)).unwrap().reg.is_none());
     assert!(s.slide(SlideId(1)).unwrap().reg.is_some());
+}
+
+#[test]
+fn tre_estimate_falls_back_to_dice_proxy_for_records_without_residual() {
+    // Proyek lama: `RegRecord` tanpa `residual_um`/`residual_fit_um`.
+    let s = open_copy("tre-lama");
+    let with_residual = s.tre_estimate_um().expect("taksiran TRE");
+    let path = s.path().to_path_buf();
+    drop(s);
+    let file = path.join("project.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let mut stripped = 0;
+    for slide in v["slides"].as_array_mut().unwrap() {
+        if let Some(reg) = slide.get_mut("reg").and_then(|r| r.as_object_mut()) {
+            assert!(reg.remove("residual_um").is_some());
+            assert!(reg.remove("residual_fit_um").is_some());
+            stripped += 1;
+        }
+    }
+    assert_eq!(stripped, 23);
+    std::fs::write(&file, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    let old = Session::open(&path).expect("proyek lama tetap terbuka");
+    assert!(old
+        .project()
+        .slides
+        .iter()
+        .filter_map(|e| e.reg.as_ref())
+        .all(|r| r.residual_um.is_none() && r.residual_fit_um.is_none()));
+    let proxy = old.tre_estimate_um().expect("cadangan proksi Dice");
+    // Proksi Dice berbatas bawah setengah piksel registrasi (8 µm).
+    assert!(proxy >= 8.0, "proksi {proxy}");
+    assert_eq!(old.tre_per_slide_um().len(), 23);
+    println!("taksiran TRE: terukur {with_residual:.1} µm, proksi lama {proxy:.1} µm");
+    // Menyimpan ulang tidak menambah field kosong ke berkas lama.
+    let mut old = old;
+    old.set_user_initials("X");
+    old.save().unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(!text.contains("residual_um"));
+}
+
+/// PNG seukuran fantom tetapi isinya lain (untuk meniru berkas yang diganti).
+fn write_other_png(path: &Path, side: u32) {
+    write_png_variant(path, side, 90);
+}
+
+fn write_png_variant(path: &Path, side: u32, blue: u8) {
+    let mut img = image::RgbaImage::new(side, side);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        *p = image::Rgba([(x % 251) as u8, (y % 241) as u8, blue, 255]);
+    }
+    img.save(path).unwrap();
+}
+
+#[test]
+fn external_slide_fingerprint_is_enforced_until_relinked_or_accepted() {
+    let sh = shared();
+    // Proyek tersendiri dengan salinan tiga irisan, agar berkas fantom
+    // bersama tidak tersentuh.
+    let root = sh.root.path().join("sidik-jari");
+    let slides = root.join("slides");
+    std::fs::create_dir_all(&slides).unwrap();
+    let paths: Vec<PathBuf> = (10..13)
+        .map(|i| {
+            let name = format!("slice_{i:03}.png");
+            std::fs::copy(sh.slides_dir().join(&name), slides.join(&name)).unwrap();
+            slides.join(name)
+        })
+        .collect();
+    let dir = root.join("p.h3d");
+    let mut s = Session::create(&dir).unwrap();
+    let ids = s
+        .import_slides(&paths, Some([16.0, 16.0]), &NoProgress)
+        .unwrap();
+    s.register_all(&RegOptions::default(), &NoProgress).unwrap();
+    drop(s);
+
+    // (1) Tidak berubah: tidak ada yang dilaporkan, piksel terbaca.
+    let s = Session::open(&dir).unwrap();
+    assert!(s.changed_slides().is_empty() && s.missing_slides().is_empty());
+    assert!(s.recheck_slides().is_empty());
+    let thumb = s.thumbnail(ids[1], 64).unwrap();
+    s.registration_image(ids[1]).unwrap();
+    drop(s);
+
+    // (2) Berubah: isi berkas irisan ke-2 diganti (ukuran piksel sama).
+    let original = std::fs::read(&paths[1]).unwrap();
+    write_other_png(&paths[1], 192);
+    let mut s = Session::open(&dir).expect("proyek tetap terbuka walau satu berkas berubah");
+    assert_eq!(s.changed_slides(), vec![ids[1]]);
+    assert!(s.missing_slides().is_empty());
+    for err in [
+        s.thumbnail(ids[1], 64).unwrap_err(),
+        s.registration_image(ids[1]).unwrap_err(),
+        s.open_source(ids[1])
+            .err()
+            .expect("open_source harus menolak"),
+    ] {
+        assert!(
+            matches!(err, EngineError::SlideChanged { slide, .. } if slide == ids[1]),
+            "{err:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("slice_011.png") && text.contains("berubah"),
+            "{text}"
+        );
+    }
+    // Irisan lain tetap terbaca; registrasi ulang gagal dengan galat jelas
+    // dan tidak merusak proyek.
+    s.thumbnail(ids[0], 64).unwrap();
+    let before = s.project().clone();
+    let run = RegisterRun {
+        force: true,
+        ..Default::default()
+    };
+    let err = s.register_all_with(&run, &NoProgress).unwrap_err();
+    assert!(matches!(err, EngineError::SlideChanged { .. }), "{err:?}");
+    assert_eq!(s.project().slides, before.slides);
+
+    // (2a) Mengembalikan berkas asli: pemeriksaan ulang membersihkan daftar.
+    std::fs::write(&paths[1], &original).unwrap();
+    assert_eq!(
+        s.changed_slides(),
+        vec![ids[1]],
+        "daftar belum diperiksa ulang"
+    );
+    assert!(s.recheck_slides().is_empty());
+    assert_eq!(s.thumbnail(ids[1], 64).unwrap(), thumb);
+
+    // (2b) Berkas diganti SETELAH proyek dibuka: tertangkap saat dibaca.
+    write_other_png(&paths[1], 192);
+    let err = s.thumbnail(ids[1], 64).unwrap_err();
+    assert!(matches!(err, EngineError::SlideChanged { .. }), "{err:?}");
+    assert_eq!(s.changed_slides(), vec![ids[1]]);
+
+    // (2c) Menerima berkas baru: sidik jari tersimpan diperbarui, terbaca.
+    s.accept_changed_slide(ids[1]).unwrap();
+    assert!(s.changed_slides().is_empty());
+    let new_thumb = s.thumbnail(ids[1], 64).unwrap();
+    assert_ne!(new_thumb, thumb, "thumbnail dari berkas baru");
+    drop(s);
+    let mut s = Session::open(&dir).unwrap();
+    assert!(s.changed_slides().is_empty(), "penerimaan tersimpan");
+    // Berkas berukuran piksel lain tidak bisa diterima (label akan bergeser).
+    write_other_png(&paths[1], 100);
+    assert_eq!(s.recheck_slides(), vec![ids[1]]);
+    let err = s.accept_changed_slide(ids[1]).unwrap_err();
+    assert!(err.to_string().contains("impor ulang"), "{err}");
+    assert_eq!(s.changed_slides(), vec![ids[1]]);
+
+    // (3) Hilang: berkas irisan ke-3 dipindah.
+    let moved = root.join("pindah.png");
+    std::fs::rename(&paths[2], &moved).unwrap();
+    assert_eq!(s.missing_slides(), vec![ids[2]]);
+    assert_eq!(s.recheck_slides(), vec![ids[1]], "hilang bukan berubah");
+    let err = s.thumbnail(ids[2], 64).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Io(h3d_io::IoError::MissingFile(_))),
+        "{err:?}"
+    );
+    // Tautkan ulang ke berkas yang sama di lokasi baru → cocok.
+    assert!(s.relink_slide(ids[2], &moved).unwrap());
+    assert!(s.missing_slides().is_empty());
+    s.thumbnail(ids[2], 64).unwrap();
+    // Tautkan irisan ke-2 ke berkas lain yang tidak cocok → tetap "berubah".
+    let other = root.join("lain.png");
+    write_png_variant(&other, 192, 200);
+    assert!(!s.relink_slide(ids[1], &other).unwrap());
+    assert_eq!(s.changed_slides(), vec![ids[1]]);
+    assert!(s.thumbnail(ids[1], 64).is_err());
+    // Galat pemakaian: berkas tidak ada, berkas milik irisan lain.
+    assert!(s.relink_slide(ids[1], &root.join("tidak-ada.png")).is_err());
+    assert!(s.relink_slide(ids[1], &moved).is_err());
+    drop(s);
+    let s = Session::open(&dir).unwrap();
+    assert_eq!(s.changed_slides(), vec![ids[1]]);
+    assert!(s.missing_slides().is_empty());
+    assert_eq!(s.slide_path(ids[2]).unwrap(), moved);
 }

@@ -104,3 +104,156 @@ pub const MEASURE: MaterialIcon = icons::ICON_STRAIGHTEN;
 pub const PALETTE: MaterialIcon = icons::ICON_PALETTE;
 /// Bidang potong.
 pub const CLIP: MaterialIcon = icons::ICON_CROP;
+
+// --- Ikon tambahan untuk h3d-app ---
+
+/// Alat geser pandangan.
+pub const PAN: MaterialIcon = icons::ICON_PAN_TOOL;
+/// Tema terang.
+pub const LIGHT_MODE: MaterialIcon = icons::ICON_LIGHT_MODE;
+/// Tema gelap.
+pub const DARK_MODE: MaterialIcon = icons::ICON_DARK_MODE;
+/// Muat ulang / hitung ulang.
+pub const REFRESH: MaterialIcon = icons::ICON_REFRESH;
+/// Pindah ke posisi lebih awal.
+pub const ARROW_UP: MaterialIcon = icons::ICON_ARROW_UPWARD;
+/// Pindah ke posisi lebih akhir.
+pub const ARROW_DOWN: MaterialIcon = icons::ICON_ARROW_DOWNWARD;
+/// Irisan acuan.
+pub const REFERENCE: MaterialIcon = icons::ICON_PUSH_PIN;
+/// Dikecualikan.
+pub const EXCLUDE: MaterialIcon = icons::ICON_BLOCK;
+/// Pegangan geser (translasi manual).
+pub const MOVE: MaterialIcon = icons::ICON_OPEN_WITH;
+/// Pengguna / inisial.
+pub const PERSON: MaterialIcon = icons::ICON_PERSON;
+/// Folder / bundel proyek.
+pub const FOLDER: MaterialIcon = icons::ICON_FOLDER;
+/// Berkas gambar.
+pub const IMAGE: MaterialIcon = icons::ICON_IMAGE;
+/// Segmentasi klasik.
+pub const CLASSIC: MaterialIcon = icons::ICON_SCIENCE;
+/// Segmentasi AI.
+pub const AI: MaterialIcon = icons::ICON_AUTO_AWESOME;
+/// Interpolasi antar irisan.
+pub const INTERPOLATE: MaterialIcon = icons::ICON_INSIGHTS;
+/// Sudah ditinjau.
+pub const REVIEWED: MaterialIcon = icons::ICON_VERIFIED;
+/// Kalibrasi ambang IHC.
+pub const CALIBRATE: MaterialIcon = icons::ICON_BIOTECH;
+/// Opasitas.
+pub const OPACITY: MaterialIcon = icons::ICON_OPACITY;
+/// Mode garis tepi overlay.
+pub const OUTLINE: MaterialIcon = icons::ICON_BORDER_STYLE;
+/// Jari menggambar.
+pub const TOUCH: MaterialIcon = icons::ICON_TOUCH_APP;
+/// Pusatkan kamera.
+pub const CENTER_VIEW: MaterialIcon = icons::ICON_CENTER_FOCUS_STRONG;
+/// Analisis spasial.
+pub const ANALYZE: MaterialIcon = icons::ICON_ANALYTICS;
+/// Pegangan seret.
+pub const DRAG_HANDLE: MaterialIcon = icons::ICON_DRAG_INDICATOR;
+/// Jenis label: tumor.
+pub const KIND_TUMOR: MaterialIcon = icons::ICON_CORONAVIRUS;
+/// Jenis label: nekrosis.
+pub const KIND_NECROSIS: MaterialIcon = icons::ICON_BLUR_ON;
+/// Jenis label: stroma.
+pub const KIND_STROMA: MaterialIcon = icons::ICON_GRAIN;
+/// Jenis label: jaringan normal.
+pub const KIND_NORMAL: MaterialIcon = icons::ICON_CHECK_CIRCLE;
+/// Jenis label: pembuluh.
+pub const KIND_VESSEL: MaterialIcon = icons::ICON_BLOODTYPE;
+/// Jenis label: saraf.
+pub const KIND_NERVE: MaterialIcon = icons::ICON_HUB;
+/// Jenis label: kapsul.
+pub const KIND_CAPSULE: MaterialIcon = icons::ICON_SHIELD;
+/// Jenis label: tepi reseksi.
+pub const KIND_MARGIN: MaterialIcon = icons::ICON_BORDER_OUTER;
+/// Jenis label: permukaan.
+pub const KIND_SURFACE: MaterialIcon = icons::ICON_HORIZONTAL_RULE;
+/// Jenis label: lainnya.
+pub const KIND_OTHER: MaterialIcon = icons::ICON_LABEL;
+
+/// Semua ikon bernama (dipakai tes `named_icons_render`).
+pub const ALL: [MaterialIcon; 80] = [
+    CLOSE,
+    NEW,
+    OPEN_FOLDER,
+    SAVE,
+    IMPORT,
+    EXPORT,
+    UNDO,
+    REDO,
+    PLAY,
+    SETTINGS,
+    WARNING,
+    ERROR,
+    CHECK,
+    INFO,
+    HELP,
+    LANGUAGE,
+    BRUSH,
+    ERASER,
+    LASSO,
+    POLYGON,
+    FILL,
+    COPY,
+    DELETE,
+    ADD,
+    REMOVE,
+    ZOOM_IN,
+    ZOOM_OUT,
+    VISIBILITY_ON,
+    VISIBILITY_OFF,
+    LAYERS,
+    CUBE,
+    REPORT,
+    GRID,
+    COMPARE,
+    DRAW,
+    FLIP,
+    SWAP_VERT,
+    ROTATE,
+    FLAG,
+    DAMAGED,
+    LANDMARK,
+    PREV,
+    NEXT,
+    TUNE,
+    MEASURE,
+    PALETTE,
+    CLIP,
+    PAN,
+    LIGHT_MODE,
+    DARK_MODE,
+    REFRESH,
+    ARROW_UP,
+    ARROW_DOWN,
+    REFERENCE,
+    EXCLUDE,
+    MOVE,
+    PERSON,
+    FOLDER,
+    IMAGE,
+    CLASSIC,
+    AI,
+    INTERPOLATE,
+    REVIEWED,
+    CALIBRATE,
+    OPACITY,
+    OUTLINE,
+    TOUCH,
+    CENTER_VIEW,
+    ANALYZE,
+    DRAG_HANDLE,
+    KIND_TUMOR,
+    KIND_NECROSIS,
+    KIND_STROMA,
+    KIND_NORMAL,
+    KIND_VESSEL,
+    KIND_NERVE,
+    KIND_CAPSULE,
+    KIND_MARGIN,
+    KIND_SURFACE,
+    KIND_OTHER,
+];

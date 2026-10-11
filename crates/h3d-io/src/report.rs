@@ -169,6 +169,35 @@ pub struct GridInfo {
     pub nz: usize,
 }
 
+/// Gambar laporan (8.12.8 butir 3): irisan terdekat ke titik tumor–tepi
+/// terdekat, dengan garis luar label, kedua titik, dan panah di antaranya.
+/// Angka ada di sini (dan di keterangan Markdown), bukan di dalam gambar.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReportFigure {
+    /// Path PNG relatif terhadap `report.md`, mis. `figures/margin_tepi_reseksi.png`.
+    pub file: String,
+    /// Nama label tepi reseksi yang memuat titik tepi terdekat.
+    pub label: String,
+    /// Irisan yang digambar (terdekat pada sumbu z ke titik tumor terdekat).
+    pub slide: SlideId,
+    /// Nama berkas irisan itu.
+    pub slide_file: String,
+    /// `z` irisan itu, µm.
+    pub slide_z_um: f64,
+    /// Ukuran gambar `[lebar, tinggi]`, piksel.
+    pub size_px: [u32; 2],
+    /// µm ruang irisan per piksel gambar `[x, y]`.
+    pub um_per_px: [f64; 2],
+    /// Titik tumor terdekat di gambar, piksel (kontinu; ruang irisan itu).
+    pub tumor_px: [f64; 2],
+    /// Titik tepi terdekat di gambar, piksel.
+    pub margin_px: [f64; 2],
+    /// Jarak kedua titik pada bidang irisan, µm.
+    pub in_plane_um: f64,
+    /// Selisih `z` kedua titik (tepi − tumor), µm.
+    pub dz_um: f64,
+}
+
 /// Laporan lengkap. Tidak memuat data klinis.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Report {
@@ -196,6 +225,10 @@ pub struct Report {
     pub attrs: Vec<AttrReport>,
     /// Analisis spasial (bila sudah dijalankan untuk keadaan saat ini).
     pub analysis: Option<SpatialAnalysis>,
+    /// Gambar margin yang sudah ditulis di samping laporan (kosong sampai
+    /// ekspor laporan menulisnya).
+    #[serde(default)]
+    pub figures: Vec<ReportFigure>,
     /// Parameter rekonstruksi.
     pub recon: ReconConfig,
     /// Parameter analisis spasial.
@@ -226,6 +259,7 @@ impl Report {
             provenance: ProvenanceReport::default(),
             attrs: Vec::new(),
             analysis: None,
+            figures: Vec::new(),
             recon: ReconConfig::default(),
             spatial: SpatialConfig::default(),
             grid: None,
@@ -604,6 +638,29 @@ pub fn render_markdown(r: &Report, clinical: ClinicalScope<'_>) -> String {
                     })
                     .collect();
                 md_table(&mut o, &t::MARGIN_DIR_HEADER, &rows);
+                for f in &r.figures {
+                    // Tautan relatif terhadap report.md; angka di keterangan.
+                    let _ = writeln!(
+                        o,
+                        "![{}]({})\n",
+                        cell(&t::figure_alt(&f.label)),
+                        f.file.replace(' ', "%20")
+                    );
+                    let _ = writeln!(
+                        o,
+                        "*{}*\n",
+                        t::figure_caption(
+                            &cell(&f.label),
+                            f.slide.0,
+                            &cell(&f.slide_file),
+                            &fmt_mm(f.slide_z_um),
+                            &fmt_uncertainty(&m.d_min),
+                            &fmt_mm(f.in_plane_um),
+                            &fmt_mm(f.dz_um),
+                            (f.um_per_px[0] + f.um_per_px[1]) / 2.0,
+                        )
+                    );
+                }
             }
         },
     }
