@@ -305,20 +305,18 @@ fn corrupted_files_return_err_not_panic() {
         assert!(FlatBackend::open(&p).is_err());
     }
 
-    // TIFF sah yang dipotong di tengah.
+    // TIFF multi-IFD yang dipotong sebelum rantai IFD selesai harus ditolak
+    // saat dibuka (mis. unduhan BigTIFF yang belum selesai).
     let good = dir.path().join("good.tif");
     write_striped_pyramid(&good, &test_image(256, 256), None, None);
     let bytes = fs::read(&good).unwrap();
     let cut = dir.path().join("cut.tif");
     fs::write(&cut, &bytes[..bytes.len() / 3]).unwrap();
-    match TiffBackend::open(&cut) {
-        Err(_) => {}
-        Ok(b) => {
-            // Header mungkin masih terbaca; membaca piksel harus gagal
-            // atau mengembalikan gambar, tetapi tidak panik.
-            let _ = b.read_region(0, 0, 0, 256, 256);
-        }
-    }
+    assert!(
+        TiffBackend::open(&cut).is_err(),
+        "TIFF dengan rantai IFD terputus harus ditolak"
+    );
+    assert!(open_slide(&cut).is_err());
 
     // PNG sah yang dipotong.
     let png = dir.path().join("good.png");

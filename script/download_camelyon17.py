@@ -164,20 +164,25 @@ def download_file(s3_key: str, dest_path: Path, chunk_size: int = 8 * 1024 * 102
         print(f"[SKIP] File sudah lengkap: {dest_path} ({format_size(total_size)})")
         return dest_path
 
+    part_path = dest_path.with_name(dest_path.name + ".part")
+    if 0 < existing_size < total_size and not part_path.exists():
+        dest_path.replace(part_path)
+
+    part_size = part_path.stat().st_size if part_path.exists() else 0
     headers = {"User-Agent": "HISTO3D-Downloader/1.0"}
     mode = "wb"
-    if 0 < existing_size < total_size:
-        headers["Range"] = f"bytes={existing_size}-"
+    if 0 < part_size < total_size:
+        headers["Range"] = f"bytes={part_size}-"
         mode = "ab"
-        print(f"[RESUME] Melanjutkan unduhan dari {format_size(existing_size)} / {format_size(total_size)}")
+        print(f"[RESUME] Melanjutkan unduhan dari {format_size(part_size)} / {format_size(total_size)}")
     else:
-        existing_size = 0
+        part_size = 0
         print(f"[DOWNLOAD] {url} -> {dest_path} ({format_size(total_size)})")
 
     req = urllib.request.Request(url, headers=headers)
-    downloaded = existing_size
+    downloaded = part_size
 
-    with urllib.request.urlopen(req, timeout=60) as resp, open(dest_path, mode) as f:
+    with urllib.request.urlopen(req, timeout=60) as resp, open(part_path, mode) as f:
         while True:
             chunk = resp.read(chunk_size)
             if not chunk:
@@ -191,6 +196,11 @@ def download_file(s3_key: str, dest_path: Path, chunk_size: int = 8 * 1024 * 102
                 )
                 sys.stdout.flush()
 
+    if total_size > 0 and downloaded != total_size:
+        raise IOError(
+            f"Unduhan belum lengkap untuk {dest_path}: {downloaded} / {total_size} byte (tersimpan di {part_path})"
+        )
+    part_path.replace(dest_path)
     print("\n[DONE] Tersimpan di:", dest_path)
     return dest_path
 

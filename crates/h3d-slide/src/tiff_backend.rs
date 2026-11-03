@@ -71,8 +71,9 @@ impl TiffBackend {
                 break;
             }
             if let Err(e) = dec.next_image() {
-                log::warn!("{}: rantai IFD terputus setelah {ifd}: {e}", path.display());
-                break;
+                return Err(SlideError::Decode(format!(
+                    "rantai IFD terputus setelah {ifd}: {e}"
+                )));
             }
             ifd += 1;
         }

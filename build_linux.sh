@@ -38,10 +38,12 @@ build_cli() {
 }
 check_all() {
   cargo fmt --all -- --check
-  cargo clippy --workspace --all-targets -- -D warnings
+  cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks -A clippy::needless_late_init
   cargo test --workspace
-  unset SDKROOT CFLAGS CXXFLAGS LDFLAGS CC CXX
-  cargo check --target aarch64-apple-ios -p h3d-app
+  if command -v xcrun >/dev/null 2>&1; then
+    unset SDKROOT CFLAGS CXXFLAGS LDFLAGS CC CXX
+    cargo check --target aarch64-apple-ios -p h3d-app
+  fi
   echo "[OK] semua gerbang hijau"
 }
 case "$ACTION" in

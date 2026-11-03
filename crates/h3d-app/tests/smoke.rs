@@ -300,6 +300,42 @@ fn import_without_mpp_asks_for_mpp_and_never_guesses() {
 }
 
 #[test]
+fn open_slide_folder_and_skip_incomplete_download_in_batch() {
+    let _g = ui_lock();
+    let fx = phantom(3);
+    let slide_dir = fx.tmp.path().join("patient_001");
+    std::fs::create_dir_all(&slide_dir).unwrap();
+    for p in &fx.slide_paths {
+        let dest = slide_dir.join(p.file_name().unwrap());
+        std::fs::copy(p, dest).unwrap();
+    }
+    // Simulasikan berkas .tif yang sedang diunduh (belum lengkap/rusak) di folder yang sama.
+    std::fs::write(slide_dir.join("patient_001_node_4.tif"), b"II+\x00\x08\x00").unwrap();
+
+    let mut app = app();
+    assert!(app.open_project(&slide_dir));
+    app.wait_job();
+    let prompt = app
+        .mpp_prompt
+        .take()
+        .expect("PNG di folder meminta isian mpp setelah melewati berkas rusak");
+    app.start_import(prompt.request, Some([fx.manifest.mpp, fx.manifest.mpp]));
+    app.wait_job();
+
+    let shared = app.session.clone().unwrap();
+    let s = try_lock_session(&shared).unwrap();
+    assert_eq!(
+        s.slides().len(),
+        3,
+        "ketiga slide sah harus terimpor walau ada satu berkas rusak"
+    );
+    assert!(
+        app.toasts.items().iter().any(|t| t.is_error),
+        "berkas yang belum lengkap harus dilaporkan lewat pemberitahuan"
+    );
+}
+
+#[test]
 fn one_stroke_is_one_undo_entry_with_pressure_dependent_width() {
     let fx = phantom(3);
     let path = project(&fx);

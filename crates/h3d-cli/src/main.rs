@@ -477,6 +477,42 @@ fn mm3(um3: f64) -> f64 {
     um3 / 1.0e9
 }
 
+const SLIDE_EXTENSIONS: [&str; 10] = [
+    "svs", "tif", "tiff", "ndpi", "scn", "mrxs", "bif", "png", "jpg", "jpeg",
+];
+
+fn expand_slide_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        if p.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(p) {
+                let mut found: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|ep| {
+                        ep.is_file()
+                            && !ep
+                                .file_name()
+                                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                            && ep
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|e| e.to_ascii_lowercase())
+                                .is_some_and(|e| SLIDE_EXTENSIONS.contains(&e.as_str()))
+                    })
+                    .collect();
+                if !found.is_empty() {
+                    found.sort();
+                    out.extend(found);
+                    continue;
+                }
+            }
+        }
+        out.push(p.clone());
+    }
+    out
+}
+
 fn run(cli: Cli) -> Result<Outcome> {
     match cli.command {
         Command::Info { slide } => {
@@ -507,15 +543,37 @@ fn run(cli: Cli) -> Result<Outcome> {
             embed,
         } => {
             let mut s = open(&project)?;
-            let ids = s.import_slides_with(
-                &slides,
-                &ImportOptions {
-                    mpp,
-                    embed,
-                    spacing_um,
-                },
-                &NoProgress,
-            )?;
+            let expanded = expand_slide_paths(&slides);
+            let opts = ImportOptions {
+                mpp,
+                embed,
+                spacing_um,
+            };
+            let ids = match s.import_slides_with(&expanded, &opts, &NoProgress) {
+                Ok(ids) => ids,
+                Err(h3d_engine::EngineError::Slide(first_err)) if expanded.len() > 1 => {
+                    let mut valid = Vec::new();
+                    let mut skipped = Vec::new();
+                    for path in &expanded {
+                        match h3d_engine::tools::inspect_slide(path) {
+                            Ok(_) => valid.push(path.clone()),
+                            Err(e) => skipped.push((path.clone(), e)),
+                        }
+                    }
+                    if valid.is_empty() {
+                        return Err(h3d_engine::EngineError::Slide(first_err).into());
+                    }
+                    let ids = s.import_slides_with(&valid, &opts, &NoProgress)?;
+                    for (path, err) in skipped {
+                        eprintln!(
+                            "peringatan: melewati berkas slide {} yang belum lengkap atau rusak: {err}",
+                            path.display()
+                        );
+                    }
+                    ids
+                }
+                Err(e) => return Err(e.into()),
+            };
             println!("{} irisan diimpor:", ids.len());
             for id in ids {
                 let e = s.slide(id)?;

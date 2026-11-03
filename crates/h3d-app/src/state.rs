@@ -28,8 +28,13 @@ use crate::viewer::TouchTracker;
 
 /// Hasil job latar.
 pub enum JobOutput {
-    /// Irisan terimpor.
-    Imported(Vec<SlideId>),
+    /// Irisan terimpor beserta galat berkas yang dilewati pada impor banyak berkas.
+    Imported {
+        /// Id irisan yang berhasil diimpor.
+        ids: Vec<SlideId>,
+        /// Galat dari berkas yang dilewati (mis. unduhan belum selesai).
+        skipped: Vec<EngineError>,
+    },
     /// Usulan urutan dan orientasi (belum diterapkan; 8.4.7).
     OrderSuggested(OrderSuggestion),
     /// Registrasi selesai.
@@ -200,16 +205,65 @@ impl AppState {
         self.session = Some(Arc::new(Mutex::new(session)));
     }
 
-    /// Buka proyek yang sudah ada. Galat ditampilkan sebagai pemberitahuan.
+    /// Buka proyek yang sudah ada, atau inisialisasi proyek baru bila `path`
+    /// adalah folder berisi berkas slide. Galat ditampilkan sebagai pemberitahuan.
     pub fn open_project(&mut self, path: &Path) -> bool {
         if self.job.is_some() {
             self.toasts.error(t!("job-busy"));
             return false;
         }
         self.save_now();
+        if !crate::platform::is_bundle(path) && path.is_dir() {
+            let listing = crate::platform::list_documents(path);
+            if !listing.slides.is_empty() {
+                match Session::create(path) {
+                    Ok(s) => {
+                        self.install_session(s);
+                        self.mode = AppMode::Slides;
+                        let paths = listing.slides.into_iter().map(|e| e.path).collect();
+                        self.start_import(
+                            ImportRequest {
+                                paths,
+                                embed: false,
+                            },
+                            None,
+                        );
+                        return true;
+                    }
+                    Err(e) => {
+                        self.toasts.engine_error(&e);
+                        return false;
+                    }
+                }
+            }
+        }
         match Session::open(path) {
             Ok(s) => {
+                let unimported: Vec<PathBuf> = crate::platform::list_documents(path)
+                    .slides
+                    .into_iter()
+                    .map(|e| e.path)
+                    .filter(|p| {
+                        let rel = s.bundle().make_relative(p);
+                        !s.slides().iter().any(|entry| {
+                            matches!(
+                                &entry.source,
+                                h3d_core::SlideSourceRef::External { path: existing, .. }
+                                    if *existing == rel
+                            )
+                        })
+                    })
+                    .collect();
                 self.install_session(s);
+                if !unimported.is_empty() {
+                    self.start_import(
+                        ImportRequest {
+                            paths: unimported,
+                            embed: false,
+                        },
+                        None,
+                    );
+                }
                 true
             }
             Err(e) => {
@@ -300,9 +354,62 @@ impl AppState {
                 embed,
                 spacing_um: None,
             };
-            let ids = s.import_slides_with(&paths, &opts, p)?;
-            s.save()?;
-            Ok(JobOutput::Imported(ids))
+            let mut expanded: Vec<PathBuf> = Vec::with_capacity(paths.len());
+            for path in &paths {
+                if path.is_dir() && !crate::platform::is_bundle(path) {
+                    let slides = crate::platform::list_documents(path).slides;
+                    if !slides.is_empty() {
+                        expanded.extend(slides.into_iter().map(|e| e.path));
+                        continue;
+                    }
+                }
+                expanded.push(path.clone());
+            }
+            if !embed && expanded.len() > 1 {
+                let not_dup: Vec<PathBuf> = expanded
+                    .iter()
+                    .filter(|path| {
+                        let rel = s.bundle().make_relative(path);
+                        !s.slides().iter().any(|entry| {
+                            matches!(
+                                &entry.source,
+                                h3d_core::SlideSourceRef::External { path: existing, .. }
+                                    if *existing == rel
+                            )
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                if !not_dup.is_empty() {
+                    expanded = not_dup;
+                }
+            }
+            match s.import_slides_with(&expanded, &opts, p) {
+                Ok(ids) => {
+                    s.save()?;
+                    Ok(JobOutput::Imported {
+                        ids,
+                        skipped: Vec::new(),
+                    })
+                }
+                Err(EngineError::Slide(first_err)) if expanded.len() > 1 => {
+                    let mut valid = Vec::new();
+                    let mut skipped = Vec::new();
+                    for path in &expanded {
+                        match h3d_slide::open_slide(path) {
+                            Ok(_) => valid.push(path.clone()),
+                            Err(e) => skipped.push(EngineError::Slide(e)),
+                        }
+                    }
+                    if valid.is_empty() {
+                        return Err(EngineError::Slide(first_err));
+                    }
+                    let ids = s.import_slides_with(&valid, &opts, p)?;
+                    s.save()?;
+                    Ok(JobOutput::Imported { ids, skipped })
+                }
+                Err(e) => Err(e),
+            }
         });
     }
 
@@ -346,10 +453,13 @@ impl AppState {
 
     fn apply_job_output(&mut self, out: JobOutput) {
         match out {
-            JobOutput::Imported(ids) => {
+            JobOutput::Imported { ids, skipped } => {
                 self.pending_import = None;
                 self.toasts
                     .info(t!("slides-imported", n = ids.len().to_string()));
+                for err in &skipped {
+                    self.toasts.engine_error(err);
+                }
                 if let Some(first) = ids.first() {
                     self.slides.selected = Some(*first);
                     self.current.get_or_insert(*first);
