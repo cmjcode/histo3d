@@ -3,3 +3,4 @@
 *.h3d/out/
 .DS_Store
 /dist
+images

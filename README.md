@@ -24,6 +24,7 @@
 - [Coordinate Conventions & Physical Units](#coordinate-conventions--physical-units)
 - [Prerequisites & Installation](#prerequisites--installation)
 - [Running the GUI Application](#running-the-gui-application)
+  - [Linux](#linux)
   - [macOS](#macos)
   - [iPadOS & Apple Pencil](#ipados--apple-pencil)
 - [Headless CLI Guide (`h3d`)](#headless-cli-guide-h3d)
@@ -174,6 +175,21 @@ cd histo3d
 
 ## Running the GUI Application
 
+### Linux
+
+Run directly with Cargo:
+
+```bash
+cargo run -p h3d-app
+```
+
+Or build the release binary and `.desktop` launcher into `dist/linux/`:
+
+```bash
+./build_linux.sh app
+./dist/linux/histo3d
+```
+
 ### macOS
 
 Run directly with Cargo:
@@ -218,6 +234,11 @@ HISTO3D includes a full-featured headless binary (`h3d`) suitable for automated 
 Build the CLI executable:
 
 ```bash
+# Linux
+./build_linux.sh cli
+# Output is placed at dist/linux/h3d
+
+# macOS
 ./build_macos.sh cli
 # Output is placed at dist/macos/h3d
 ```

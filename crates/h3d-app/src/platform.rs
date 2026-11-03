@@ -74,10 +74,28 @@ pub fn physical_memory_bytes() -> Option<u64> {
     {
         Some(crate::apple::physical_memory_bytes())
     }
-    #[cfg(not(target_vendor = "apple"))]
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| parse_proc_meminfo(&s))
+    }
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
     {
         None
     }
+}
+
+/// Urai nilai `MemTotal` (kB) dari isi `/proc/meminfo` menjadi byte.
+pub fn parse_proc_meminfo(meminfo: &str) -> Option<u64> {
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb_str = rest.split_whitespace().next()?;
+            let kb: u64 = kb_str.parse().ok()?;
+            return kb.checked_mul(1024);
+        }
+    }
+    None
 }
 
 /// Anggaran memori/thread aplikasi: anggaran platform diskalakan menurut
@@ -352,5 +370,12 @@ mod tests {
         assert_eq!(bundle_dir_name("../../x"), "x.h3d");
         assert_eq!(fmt_bytes(3 * 1024 * 1024), "3.0 MB");
         assert_eq!(fmt_bytes(5 * 1024 * 1024 * 1024 / 2), "2.5 GB");
+    }
+
+    #[test]
+    fn parses_linux_proc_meminfo() {
+        let sample = "MemTotal:       16384000 kB\nMemFree:         1024000 kB\n";
+        assert_eq!(parse_proc_meminfo(sample), Some(16_384_000 * 1024));
+        assert_eq!(parse_proc_meminfo("MemFree: 100 kB\n"), None);
     }
 }
