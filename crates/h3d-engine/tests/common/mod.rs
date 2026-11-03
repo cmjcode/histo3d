@@ -75,6 +75,7 @@ pub fn build_project(shared_root: &Path, manifest: &PhantomManifest, run: &str) 
                 mpp: Some([manifest.mpp, manifest.mpp]),
                 embed: false,
                 spacing_um: Some(manifest.spacing_um),
+                ..Default::default()
             },
             &NoProgress,
         )

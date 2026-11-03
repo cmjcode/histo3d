@@ -533,3 +533,85 @@ fn fingerprint_is_deterministic_and_sensitive() {
     fs::write(&s, b"").unwrap();
     assert_eq!(fingerprint(&s).unwrap().0, 0);
 }
+
+#[test]
+fn tile_loader_evicts_least_recently_used_slide() {
+    let make = || -> Arc<dyn SlideSource> {
+        Arc::new(FlatBackend::from_image(test_image(512, 256)).unwrap())
+    };
+    let (loader, rx) = TileLoader::with_max_slides(1, 2);
+    assert!(loader.add_slide(SlideId(1), make()).is_empty());
+    assert!(loader.add_slide(SlideId(2), make()).is_empty());
+    // Slide 1 dipakai lagi → slide 2 menjadi yang paling lama.
+    let mut r1 = req(0, 0, 0.0);
+    r1.slide = SlideId(1);
+    assert!(loader.request(r1));
+    assert!(rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .result
+        .is_ok());
+
+    let evicted = loader.add_slide(SlideId(3), make());
+    assert_eq!(evicted, vec![SlideId(2)]);
+    assert_eq!(loader.slide_count(), 2);
+    assert!(loader.has_slide(SlideId(1)));
+    assert!(!loader.has_slide(SlideId(2)));
+    assert!(loader.has_slide(SlideId(3)));
+
+    // Sumber yang dicabut benar-benar dilepas (tidak ada salinan Arc tersisa).
+    let tracked = make();
+    let weak = Arc::downgrade(&tracked);
+    loader.add_slide(SlideId(4), tracked);
+    loader.add_slide(SlideId(5), make());
+    loader.add_slide(SlideId(6), make());
+    assert!(
+        weak.upgrade().is_none(),
+        "sumber yang dicabut harus dilepas"
+    );
+
+    // Daftarkan ulang setelah dicabut tetap bisa dilayani.
+    loader.add_slide(SlideId(2), make());
+    let mut r2 = req(1, 0, 0.0);
+    r2.slide = SlideId(2);
+    assert!(loader.request(r2));
+    assert!(rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .result
+        .is_ok());
+}
+
+#[test]
+fn tile_loader_retain_slides_drops_others_and_their_queue() {
+    let slow = |d: u64| -> Arc<dyn SlideSource> {
+        Arc::new(SlowSource {
+            inner: FlatBackend::from_image(test_image(2048, 256)).unwrap(),
+            delay: Duration::from_millis(d),
+        })
+    };
+    let (loader, rx) = TileLoader::new(1);
+    loader.add_slide(SlideId(7), slow(40));
+    loader.add_slide(SlideId(8), slow(0));
+    loader.add_slide(SlideId(9), slow(0));
+    // Sibukkan pekerja, lalu antrekan tile slide 8.
+    loader.request(req(0, 0, 0.0));
+    std::thread::sleep(Duration::from_millis(10));
+    let mut r8 = req(1, 0, 1.0);
+    r8.slide = SlideId(8);
+    loader.request(r8);
+    assert_eq!(loader.pending(), 1);
+
+    let removed = loader.retain_slides(&[SlideId(7)]);
+    assert_eq!(removed, vec![SlideId(8), SlideId(9)]);
+    assert_eq!(loader.pending(), 0, "antrean slide yang dicabut dibuang");
+    assert_eq!(loader.slide_count(), 1);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .request
+            .slide,
+        SlideId(7)
+    );
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+}

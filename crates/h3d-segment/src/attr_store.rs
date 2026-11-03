@@ -439,7 +439,9 @@ pub fn decode_atr(data: &[u8]) -> Result<(AttrStore, u16), SegError> {
     for e in &entries {
         let raw = decompress_tile(data, e, n * 2)?;
         let vals: Vec<u16> = raw
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         store.set_tile_values(e.tx, e.ty, &vals)?;

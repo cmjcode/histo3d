@@ -47,6 +47,7 @@ fn run(opts: &PhantomOptions) -> Run {
             mpp: Some([manifest.mpp, manifest.mpp]),
             embed: false,
             spacing_um: Some(manifest.spacing_um),
+            ..Default::default()
         },
         &NoProgress,
     )
@@ -371,6 +372,7 @@ fn shuffled_stack_is_reordered_by_suggestion_then_registered() {
             mpp: Some([manifest.mpp, manifest.mpp]),
             embed: false,
             spacing_um: Some(manifest.spacing_um),
+            ..Default::default()
         },
         &NoProgress,
     )

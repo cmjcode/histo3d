@@ -41,14 +41,38 @@ pub use wsi::WsiBackend;
 
 /// Buka slide dengan mencoba backend berurutan: `wsi` (bila fitur aktif),
 /// `tiff`, lalu `flat`. Bila semua gagal, [`SlideError::UnsupportedFormat`]
-/// memuat alasan tiap backend.
+/// memuat alasan tiap backend. Cache internal `wsi-rs` memakai bawaan
+/// pustaka; pemakai jangka panjang (viewer, sesi) memakai
+/// [`open_slide_with_cache_bytes`].
 pub fn open_slide(path: &Path) -> Result<Box<dyn SlideSource>, SlideError> {
+    open_slide_impl(path, None)
+}
+
+/// Seperti [`open_slide`], tetapi cache internal `wsi-rs` dibatasi
+/// `wsi_cache_bytes` (dari `h3d_core::Budgets::wsi_internal_cache_bytes`).
+/// Backend lain tidak punya cache internal sehingga nilai ini diabaikan.
+pub fn open_slide_with_cache_bytes(
+    path: &Path,
+    wsi_cache_bytes: u64,
+) -> Result<Box<dyn SlideSource>, SlideError> {
+    open_slide_impl(path, Some(wsi_cache_bytes))
+}
+
+#[cfg_attr(not(feature = "wsi"), allow(unused_variables))]
+fn open_slide_impl(
+    path: &Path,
+    wsi_cache_bytes: Option<u64>,
+) -> Result<Box<dyn SlideSource>, SlideError> {
     let meta = std::fs::metadata(path).map_err(|e| SlideError::io(path, e))?;
     let mut attempts: Vec<String> = Vec::new();
 
     #[cfg(feature = "wsi")]
     {
-        match WsiBackend::open(path) {
+        let opened = match wsi_cache_bytes {
+            Some(bytes) => WsiBackend::open_with_cache_bytes(path, bytes),
+            None => WsiBackend::open(path),
+        };
+        match opened {
             Ok(b) => return Ok(Box::new(b)),
             Err(e) => attempts.push(format!("wsi: {e}")),
         }

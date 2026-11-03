@@ -385,9 +385,17 @@ impl AppState {
                         self.browser = Some(browser);
                     }
                 }
-                BrowserAction::Import(paths) => {
-                    // Dari Documents slide selalu disalin ke bundel (9.3).
-                    self.start_import(ImportRequest { paths, embed: true }, None);
+                BrowserAction::Import(paths, embed_mode) => {
+                    // Dari Documents slide selalu dimasukkan ke bundel (9.3):
+                    // dipindahkan (tanpa salinan ganda) atau disalin.
+                    self.start_import(
+                        ImportRequest {
+                            paths,
+                            embed: true,
+                            embed_mode,
+                        },
+                        None,
+                    );
                 }
             }
         }

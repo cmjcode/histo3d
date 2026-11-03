@@ -295,7 +295,9 @@ fn decode_reg(bytes: &[u8], fingerprint: u64, mpp_l0: [f64; 2]) -> Option<RegIma
         return None;
     }
     let gray: Vec<f32> = gray_bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let gray = Array2::from_shape_vec((h, w), gray).ok()?;
@@ -515,7 +517,10 @@ impl Session {
                 Err(e) => log::debug!("FlatBackend gagal, mencoba backend lain: {e}"),
             }
         }
-        Ok(h3d_slide::open_slide(&path)?)
+        Ok(h3d_slide::open_slide_with_cache_bytes(
+            &path,
+            self.budgets.wsi_internal_cache_bytes,
+        )?)
     }
 
     /// Thumbnail irisan dengan sisi terpanjang ≤ `max_side`, ber-cache di
@@ -575,6 +580,16 @@ impl Session {
     /// Ber-cache di `cache/reg/NNNN.reg`; cache divalidasi dengan sidik jari
     /// berkas dan mpp.
     pub fn registration_image(&self, slide: SlideId) -> Result<Arc<RegImage>, EngineError> {
+        self.registration_image_with_progress(slide, &h3d_core::NoProgress)
+    }
+
+    /// [`Session::registration_image`] dengan progres pembacaan slide (hanya
+    /// bila cache belum ada) dan pembatalan ([`EngineError::Cancelled`]).
+    pub fn registration_image_with_progress(
+        &self,
+        slide: SlideId,
+        p: &dyn Progress,
+    ) -> Result<Arc<RegImage>, EngineError> {
         let entry = self.slide(slide)?;
         let fp = self.source_fingerprint(entry)?;
         let path = self
@@ -586,7 +601,7 @@ impl Session {
                 return Ok(Arc::new(img));
             }
         }
-        let raster = self.read_slide_at(slide, REG_IMAGE_MPP, &h3d_core::NoProgress)?;
+        let raster = self.read_slide_at(slide, REG_IMAGE_MPP, p)?;
         let img = RegImage::from_rgba(
             &raster.rgba,
             raster.w,

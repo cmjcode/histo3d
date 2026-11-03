@@ -618,7 +618,7 @@ pub fn infer_slide(
             )));
         }
         let mut out = vec![0.0f32; 3 * s * s];
-        for (i, px) in rgba.chunks_exact(4).enumerate() {
+        for (i, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
             for ch in 0..3 {
                 out[ch * s * s + i] = (px[ch] as f32 / 255.0 - mean[ch]) / std[ch];
             }

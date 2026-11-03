@@ -548,6 +548,7 @@ fn run(cli: Cli) -> Result<Outcome> {
                 mpp,
                 embed,
                 spacing_um,
+                ..Default::default()
             };
             let ids = match s.import_slides_with(&expanded, &opts, &NoProgress) {
                 Ok(ids) => ids,

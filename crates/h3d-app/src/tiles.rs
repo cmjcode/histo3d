@@ -347,7 +347,8 @@ impl TileStreamer {
     /// Buat aliran tile dengan anggaran `budgets` (cache CPU dan jumlah
     /// thread dekode; aturan keras 15).
     pub fn new(budgets: &Budgets) -> Self {
-        let (loader, rx) = TileLoader::new(budgets.decode_threads);
+        let (loader, rx) =
+            TileLoader::with_max_slides(budgets.decode_threads, budgets.max_open_slides.max(2));
         TileStreamer {
             loader,
             rx,
@@ -405,9 +406,11 @@ impl TileStreamer {
     }
 
     /// Pastikan sumber piksel irisan terbuka dan terdaftar di pemuat.
-    /// Kegagalan dicatat sekali (tidak dicoba ulang tiap frame).
+    /// Sumber yang dicabut pemuat (batas `Budgets::max_open_slides` atau
+    /// peringatan memori) dibuka ulang di sini; tile di cache CPU tetap
+    /// berlaku. Kegagalan dicatat sekali (tidak dicoba ulang tiap frame).
     pub fn ensure_source(&mut self, session: &Session, slide: SlideId) -> Option<&SlideMeta> {
-        if !self.metas.contains_key(&slide) {
+        if !self.metas.contains_key(&slide) || !self.loader.has_slide(slide) {
             if self.failed.contains(&slide) {
                 return None;
             }
@@ -419,7 +422,12 @@ impl TileStreamer {
                         info: src.info().clone(),
                         mpp: entry.mpp,
                     };
-                    self.loader.add_slide(slide, src);
+                    let evicted = self.loader.add_slide(slide, src);
+                    if !evicted.is_empty() {
+                        // Permintaan antre slide yang dicabut tidak akan
+                        // pernah dijawab; jangan ditunggu.
+                        self.pending.retain(|k| !evicted.contains(&k.slide));
+                    }
                     self.metas.insert(slide, meta);
                 }
                 Err(e) => {
@@ -463,6 +471,21 @@ impl TileStreamer {
         self.clear_cpu_cache();
         self.label_floor.clear();
         self.label_versions.clear();
+    }
+
+    /// Lepas semua sumber slide yang terbuka (handle berkas dan cache
+    /// internal backend; peringatan memori, 9.4). Metadata tetap; irisan yang
+    /// masih tampil dibuka ulang oleh [`TileStreamer::ensure_source`].
+    /// Mengembalikan jumlah sumber yang dilepas.
+    pub fn release_sources(&mut self) -> usize {
+        let n = self.loader.retain_slides(&[]).len();
+        self.pending.clear();
+        n
+    }
+
+    /// Jumlah sumber slide yang sedang terbuka di pemuat.
+    pub fn open_source_count(&self) -> usize {
+        self.loader.slide_count()
     }
 
     /// Kosongkan cache CPU dan antrean (peringatan memori, 9.4). Cache GPU

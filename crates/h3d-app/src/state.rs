@@ -68,8 +68,10 @@ pub struct RunningJob {
 pub struct ImportRequest {
     /// Berkas slide.
     pub paths: Vec<PathBuf>,
-    /// Salin ke dalam bundel (wajib di iPad, 9.3).
+    /// Masukkan ke dalam bundel (wajib di iPad, 9.3).
     pub embed: bool,
+    /// Cara memasukkan bila `embed`: salin atau pindahkan.
+    pub embed_mode: h3d_engine::EmbedMode,
 }
 
 /// Keadaan aplikasi.
@@ -225,6 +227,7 @@ impl AppState {
                             ImportRequest {
                                 paths,
                                 embed: false,
+                                embed_mode: h3d_engine::EmbedMode::Copy,
                             },
                             None,
                         );
@@ -260,6 +263,7 @@ impl AppState {
                         ImportRequest {
                             paths: unimported,
                             embed: false,
+                            embed_mode: h3d_engine::EmbedMode::Copy,
                         },
                         None,
                     );
@@ -347,11 +351,13 @@ impl AppState {
         }
         let paths = request.paths.clone();
         let embed = request.embed;
+        let embed_mode = request.embed_mode;
         self.pending_import = Some(request);
         self.start_job(t!("job-import"), move |s, p| {
             let opts = ImportOptions {
                 mpp,
                 embed,
+                embed_mode,
                 spacing_um: None,
             };
             let mut expanded: Vec<PathBuf> = Vec::with_capacity(paths.len());
@@ -523,8 +529,9 @@ impl AppState {
     /// thumbnail. Dipanggil saat `platform::take_memory_warning()` benar;
     /// juga bisa dipanggil langsung.
     pub fn on_memory_warning(&mut self, gpu: Option<&Gpu>) {
-        log::warn!("peringatan memori: cache tile dikosongkan");
         self.tiles.clear_cpu_cache();
+        let released = self.tiles.release_sources();
+        log::warn!("peringatan memori: cache tile dikosongkan, {released} sumber slide dilepas");
         self.thumbs.clear();
         self.segment.proposal_tex = None;
         if let Some(g) = gpu {

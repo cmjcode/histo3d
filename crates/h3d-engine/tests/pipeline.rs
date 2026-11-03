@@ -13,8 +13,8 @@ use h3d_core::{
     ReviewStatus, SlideId, SlideSourceRef, SlideStatus, SlideTransform,
 };
 use h3d_engine::{
-    spawn_job, spawn_session_job, EngineError, ExportKind, ImportOptions, OrderSuggestion,
-    PaintMode, Proposal, RegOptions, RegisterRun, Session,
+    spawn_job, spawn_session_job, EmbedMode, EngineError, ExportKind, ImportOptions,
+    OrderSuggestion, PaintMode, Proposal, RegOptions, RegisterRun, Session,
 };
 use ndarray::Array2;
 
@@ -40,14 +40,18 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 /// Progres yang meminta batal setelah `limit` panggilan `set`.
+/// Batal setelah `limit` laporan tahap pasangan registrasi ("registrasi
+/// berpasangan"); laporan tahap lain (pemuatan gambar) tidak dihitung.
 struct CancelAfter {
     calls: AtomicUsize,
     limit: usize,
 }
 
 impl Progress for CancelAfter {
-    fn set(&self, _f: f32, _s: &str) {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+    fn set(&self, _f: f32, stage: &str) {
+        if stage == "registrasi berpasangan" {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
     }
     fn is_cancelled(&self) -> bool {
         self.calls.load(Ordering::SeqCst) >= self.limit
@@ -128,6 +132,7 @@ fn import_without_mpp_is_error_and_with_mpp_reopens_identically() {
             mpp: Some([16.0, 16.0]),
             embed: true,
             spacing_um: Some(75.0),
+            ..Default::default()
         },
         &NoProgress,
     )
@@ -505,6 +510,7 @@ fn interrupted_registration_resumes_from_saved_pairs() {
             mpp: Some([16.0, 16.0]),
             embed: false,
             spacing_um: Some(sh.manifest.spacing_um),
+            ..Default::default()
         },
         &NoProgress,
     )
@@ -1469,4 +1475,181 @@ fn external_slide_fingerprint_is_enforced_until_relinked_or_accepted() {
     assert_eq!(s.changed_slides(), vec![ids[1]]);
     assert!(s.missing_slides().is_empty());
     assert_eq!(s.slide_path(ids[2]).unwrap(), moved);
+}
+
+/// Progres pencatat: semua pecahan yang dilaporkan, berurutan.
+struct Recorder(std::sync::Mutex<Vec<f32>>);
+
+impl Progress for Recorder {
+    fn set(&self, fraction: f32, _stage: &str) {
+        self.0.lock().unwrap().push(fraction);
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn order_suggestion_from_coarse_images_matches_full_resolution_and_reports_progress() {
+    let s = open_copy("urutan-hemat");
+    let rec = Recorder(std::sync::Mutex::new(Vec::new()));
+    let got = s.suggest_order(&rec).unwrap();
+
+    // Acuan perilaku lama: semua gambar registrasi 16 µm diserahkan utuh.
+    let slides = s.project().slides_ordered();
+    let inputs: Vec<h3d_register::RegInput> = slides
+        .iter()
+        .map(|e| h3d_register::RegInput {
+            id: e.id,
+            order: e.order,
+            status: e.status,
+            image: s.registration_image(e.id).unwrap(),
+            init: None,
+        })
+        .collect();
+    let current: Vec<SlideId> = slides.iter().map(|e| e.id).collect();
+    let want = h3d_register::suggest_order(&inputs, &current, &NoProgress).unwrap();
+    assert_eq!(
+        got, want,
+        "penurunan resolusi lebih awal tidak boleh mengubah usulan"
+    );
+
+    let fr = rec.0.into_inner().unwrap();
+    assert!(
+        fr.len() >= slides.len(),
+        "progres per irisan harus dilaporkan"
+    );
+    assert!(
+        fr.windows(2).all(|w| w[1] >= w[0] - 1e-6),
+        "progres tidak boleh mundur: {fr:?}"
+    );
+    assert!(fr.iter().all(|f| (0.0..=1.0).contains(f)));
+}
+
+/// Progres pencatat tahap (teks), berurutan.
+struct StageRecorder(std::sync::Mutex<Vec<String>>);
+
+impl Progress for StageRecorder {
+    fn set(&self, _fraction: f32, stage: &str) {
+        self.0.lock().unwrap().push(stage.to_owned());
+    }
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn registration_wave_size_follows_budget_and_result_is_unchanged() {
+    let sh = shared();
+    let dir = sh.root.path().join("gelombang").join("p.h3d");
+    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    let mut s = Session::create(&dir).unwrap();
+    s.import_slides_with(
+        &sh.slide_paths(),
+        &ImportOptions {
+            mpp: Some([16.0, 16.0]),
+            spacing_um: Some(sh.manifest.spacing_um),
+            ..Default::default()
+        },
+        &NoProgress,
+    )
+    .unwrap();
+    s.set_budgets(h3d_core::Budgets {
+        register_batch: 2,
+        ..h3d_core::Budgets::MACOS
+    });
+    let rec = StageRecorder(std::sync::Mutex::new(Vec::new()));
+    // `batch: 0` = ukuran gelombang dari anggaran.
+    s.register_all_with(&RegisterRun::default(), &rec).unwrap();
+
+    // Satu gelombang dimulai tiap kali pemuatan gambar menyusul tahap lain.
+    let stages = rec.0.into_inner().unwrap();
+    let mut waves = 0;
+    let mut loading = false;
+    for st in &stages {
+        let is_load = st == "memuat gambar registrasi" || st == "membaca slide";
+        if is_load && !loading {
+            waves += 1;
+        }
+        loading = is_load;
+    }
+    assert_eq!(waves, 23usize.div_ceil(2), "23 pasangan, 2 per gelombang");
+
+    let base = Session::open(&sh.base_project()).unwrap();
+    for (a, b) in s.slides().iter().zip(base.slides().iter()) {
+        assert_eq!(a.transform, b.transform, "T irisan {}", a.id);
+        assert_eq!(a.reg, b.reg);
+    }
+}
+
+/// Batal begitu tahap "menambahkan irisan" sudah dilaporkan `limit` kali.
+struct CancelDuringAdd {
+    adds: AtomicUsize,
+    limit: usize,
+}
+
+impl Progress for CancelDuringAdd {
+    fn set(&self, _fraction: f32, stage: &str) {
+        if stage == "menambahkan irisan" {
+            self.adds.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn is_cancelled(&self) -> bool {
+        self.adds.load(Ordering::SeqCst) >= self.limit
+    }
+}
+
+#[test]
+fn embed_move_imports_without_second_copy_and_rollback_restores_sources() {
+    let sh = shared();
+    let root = sh.root.path().join("pindah");
+    let docs = root.join("Documents");
+    std::fs::create_dir_all(&docs).unwrap();
+    let originals: Vec<PathBuf> = sh.slide_paths().into_iter().take(4).collect();
+    let copies: Vec<PathBuf> = originals
+        .iter()
+        .map(|p| {
+            let dst = docs.join(p.file_name().unwrap());
+            std::fs::copy(p, &dst).unwrap();
+            dst
+        })
+        .collect();
+    let opts = ImportOptions {
+        mpp: Some([16.0, 16.0]),
+        embed: true,
+        embed_mode: EmbedMode::Move,
+        ..Default::default()
+    };
+
+    // Dibatalkan setelah dua berkas dipindahkan: proyek tidak berubah dan
+    // semua berkas kembali ke path asal dengan isi sama.
+    let mut s = Session::create(&root.join("p.h3d")).unwrap();
+    let cancel = CancelDuringAdd {
+        adds: AtomicUsize::new(0),
+        limit: 2,
+    };
+    let err = s.import_slides_with(&copies, &opts, &cancel).unwrap_err();
+    assert!(matches!(err, EngineError::Cancelled), "{err:?}");
+    assert!(s.slides().is_empty());
+    for (c, o) in copies.iter().zip(&originals) {
+        assert_eq!(std::fs::read(c).unwrap(), std::fs::read(o).unwrap());
+    }
+    let left = std::fs::read_dir(s.path().join("slides"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(left, 0, "tidak ada sisa berkas di slides/");
+
+    // Berhasil: berkas pindah ke bundel, tidak ada salinan ganda.
+    let ids = s.import_slides_with(&copies, &opts, &NoProgress).unwrap();
+    assert_eq!(ids.len(), 4);
+    for (c, id) in copies.iter().zip(&ids) {
+        assert!(!c.exists(), "berkas asal harus sudah dipindahkan");
+        let entry = s.slide(*id).unwrap();
+        let SlideSourceRef::Embedded { rel_path } = &entry.source else {
+            panic!("irisan {id} harus Embedded");
+        };
+        assert!(s.path().join(rel_path).is_file());
+    }
+    // Sumber pindahan terbaca seperti biasa.
+    assert!(s.open_source(ids[0]).is_ok());
 }

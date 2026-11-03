@@ -297,7 +297,7 @@ pub fn pick_triangle(
 ) -> Option<(usize, f32, [f32; 3])> {
     const EPS: f32 = 1e-7;
     let mut best: Option<(usize, f32, [f32; 3])> = None;
-    for (tri, idx) in indices.chunks_exact(3).enumerate() {
+    for (tri, idx) in indices.as_chunks::<3>().0.iter().enumerate() {
         let (Some(a), Some(b), Some(c)) = (
             positions_mm.get(idx[0] as usize),
             positions_mm.get(idx[1] as usize),

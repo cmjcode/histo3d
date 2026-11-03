@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use h3d_core::{Affine2, OrderSource, Progress, RegRecord, SlideId, SlideStatus, SlideTransform};
+use h3d_core::{
+    Affine2, OrderSource, Progress, RegRecord, SlideId, SlideStatus, SlideTransform, SubProgress,
+};
 use h3d_imgproc::{dice, ncc_masked, warp_affine_f32, warp_affine_u8, Interp};
 use h3d_register::{
     compose_chain, from_landmarks, neighbor_toward_reference, pair_residual, record_from_result,
@@ -269,8 +271,12 @@ impl Session {
         }
 
         let registrar = BuiltinRegistrar;
+        // Gelombang dibatasi anggaran (aturan 15) agar jumlah gambar
+        // registrasi di memori tidak bergantung pada jumlah inti CPU.
         let batch = if run.batch == 0 {
-            rayon::current_num_threads().max(1)
+            self.budgets
+                .register_batch
+                .clamp(1, rayon::current_num_threads().max(1))
         } else {
             run.batch
         };
@@ -284,11 +290,16 @@ impl Session {
                 return Err(EngineError::Cancelled);
             }
             // Muat gambar registrasi yang dibutuhkan gelombang ini saja.
+            // Pembacaan slide (cache belum ada) melaporkan progres pada
+            // setengah langkah pasangan berikutnya dan bisa dibatalkan.
+            let base = done.load(Ordering::SeqCst) as f32 / total as f32;
+            let load_p = SubProgress::new(p, base, base + 0.5 / total as f32);
             let mut images: HashMap<SlideId, Arc<RegImage>> = HashMap::new();
             for &(m, f) in chunk {
                 for id in [m, f] {
                     if let std::collections::hash_map::Entry::Vacant(e) = images.entry(id) {
-                        e.insert(self.registration_image(id)?);
+                        load_p.set(0.0, "memuat gambar registrasi");
+                        e.insert(self.registration_image_with_progress(id, &load_p)?);
                     }
                 }
             }
@@ -381,15 +392,25 @@ impl Session {
     }
 
     /// Usulan urutan dan orientasi (8.4.7). Tidak mengubah proyek.
+    ///
+    /// Usulan dihitung pada [`h3d_register::SIMILARITY_MPP`]; tiap gambar
+    /// registrasi langsung diturunkan ke resolusi itu dan versi
+    /// [`REG_IMAGE_MPP`] dilepas, sehingga memori ~16× lebih kecil daripada
+    /// menahan semua gambar registrasi. Hasilnya identik karena penurunan
+    /// resolusi idempoten. Progres: 0–50 % menyiapkan citra, 50–100 % usulan.
     pub fn suggest_order(&self, p: &dyn Progress) -> Result<OrderSuggestion, EngineError> {
         let slides = self.project.slides_ordered();
+        let n = slides.len().max(1) as f32;
         let mut inputs = Vec::with_capacity(slides.len());
-        for s in &slides {
+        for (i, s) in slides.iter().enumerate() {
             if p.is_cancelled() {
                 return Err(EngineError::Cancelled);
             }
             let image = if s.status == SlideStatus::Ok {
-                self.registration_image(s.id)?
+                let sub = SubProgress::new(p, 0.5 * i as f32 / n, 0.5 * (i + 1) as f32 / n);
+                sub.set(0.0, "menyiapkan citra urutan");
+                let full = self.registration_image_with_progress(s.id, &sub)?;
+                Arc::new(full.downsample_to(h3d_register::SIMILARITY_MPP))
             } else {
                 // Irisan non-Ok tidak dihitung; cukup citra pengganti mungil.
                 Arc::new(RegImage::new(
@@ -408,7 +429,8 @@ impl Session {
             });
         }
         let current: Vec<SlideId> = slides.iter().map(|s| s.id).collect();
-        Ok(h3d_register::suggest_order(&inputs, &current, p)?)
+        let rest = SubProgress::new(p, 0.5, 1.0);
+        Ok(h3d_register::suggest_order(&inputs, &current, &rest)?)
     }
 
     /// Terima usulan urutan untuk irisan `accept` saja (8.4.7). Irisan yang

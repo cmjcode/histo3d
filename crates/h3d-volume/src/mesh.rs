@@ -138,7 +138,11 @@ impl LabelMesh {
 
     /// Iterasi segitiga sebagai `[a, b, c]` indeks.
     fn triangles(&self) -> impl Iterator<Item = [u32; 3]> + '_ {
-        self.indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]])
+        self.indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| [t[0], t[1], t[2]])
     }
 
     /// Volume bertanda: `(1/6) Σ a · (b × c)`; positif bila segitiga
@@ -334,7 +338,7 @@ impl LabelMesh {
 
     /// Balik orientasi semua segitiga.
     pub fn flip_winding(&mut self) {
-        for t in self.indices.chunks_exact_mut(3) {
+        for t in self.indices.as_chunks_mut::<3>().0.iter_mut() {
             t.swap(1, 2);
         }
     }
@@ -552,14 +556,14 @@ impl LabelMesh {
         }
         // Langkah 2: jahit sisi batas yang berasal dari sisi asli yang sama.
         let mut directed: HashMap<(u32, u32), u32> = HashMap::with_capacity(corner.len());
-        for t in corner.chunks_exact(3) {
+        for t in corner.as_chunks::<3>().0.iter() {
             for k in 0..3 {
                 *directed.entry((t[k], t[(k + 1) % 3])).or_insert(0) += 1;
             }
         }
         // (asal lo, asal hi, searah lo→hi?, x, y)
         let mut boundary: Vec<(u32, u32, bool, u32, u32)> = Vec::new();
-        for t in corner.chunks_exact(3) {
+        for t in corner.as_chunks::<3>().0.iter() {
             for k in 0..3 {
                 let (x, y) = (t[k], t[(k + 1) % 3]);
                 if directed.get(&(y, x)).copied().unwrap_or(0) == 0 {

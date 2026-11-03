@@ -28,6 +28,28 @@ use crate::error::IoError;
 pub const PROJECT_FILE: &str = "project.json";
 /// Nama berkas data klinis.
 pub const CLINICAL_FILE: &str = "clinical.json";
+/// Cara berkas slide dimasukkan ke bundel (histo3d.md 9.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EmbedMode {
+    /// Salin; berkas asal tidak disentuh.
+    #[default]
+    Copy,
+    /// Pindahkan (`rename`) bila asal dan bundel berada di sistem berkas yang
+    /// sama, sehingga tidak ada salinan ganda (mis. dari folder Documents
+    /// iPad). Bila beda sistem berkas, jatuh ke [`EmbedMode::Copy`].
+    Move,
+}
+
+/// Hasil [`ProjectBundle::embed_slide_with`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmbedOutcome {
+    /// Rujukan sumber untuk `SlideEntry`.
+    pub source: SlideSourceRef,
+    /// Benar bila berkas asal dipindahkan (bukan disalin); pemanggil yang
+    /// membatalkan impor harus memindahkannya kembali ke path asal.
+    pub moved: bool,
+}
+
 /// Cadangan ruang kosong yang harus tersisa setelah menyalin slide (byte).
 pub const EMBED_FREE_SPACE_MARGIN: u64 = 64 * 1024 * 1024;
 
@@ -289,31 +311,105 @@ impl ProjectBundle {
     /// Salin slide ke `slides/NNNN.<ext>` (atomik) setelah memeriksa ruang
     /// kosong, lalu kembalikan rujukan `Embedded`.
     pub fn embed_slide(&self, src: &Path, id: SlideId) -> Result<SlideSourceRef, IoError> {
+        Ok(self.embed_slide_with(src, id, EmbedMode::Copy)?.source)
+    }
+
+    /// Masukkan berkas slide ke `slides/` dengan cara `mode`. Mode
+    /// [`EmbedMode::Move`] memakai `rename` (atomik) dan tidak butuh ruang
+    /// tambahan; bila `rename` gagal (beda sistem berkas), berkas disalin
+    /// atomik setelah ruang kosong diperiksa.
+    pub fn embed_slide_with(
+        &self,
+        src: &Path,
+        id: SlideId,
+        mode: EmbedMode,
+    ) -> Result<EmbedOutcome, IoError> {
         let meta = fs::metadata(src).map_err(|e| IoError::io(src, e))?;
         if !meta.is_file() {
             return Err(IoError::invalid(src, "bukan berkas biasa"));
         }
         let dir = self.slides_dir();
         fs::create_dir_all(&dir).map_err(|e| IoError::io(&dir, e))?;
-        if let Some(available) = free_space(&dir) {
-            let needed = meta.len().saturating_add(EMBED_FREE_SPACE_MARGIN);
+        let rel_path = PathBuf::from("slides").join(embedded_file_name(src, id));
+        let dst = self.root.join(&rel_path);
+        if mode == EmbedMode::Move {
+            match fs::rename(src, &dst) {
+                Ok(()) => {
+                    return Ok(EmbedOutcome {
+                        source: SlideSourceRef::Embedded { rel_path },
+                        moved: true,
+                    })
+                }
+                Err(e) => {
+                    log::info!("memindahkan {} gagal ({e}); berkas disalin", src.display());
+                }
+            }
+        }
+        self.check_free_space(meta.len())?;
+        copy_atomic(src, &dst)?;
+        Ok(EmbedOutcome {
+            source: SlideSourceRef::Embedded { rel_path },
+            moved: false,
+        })
+    }
+
+    /// Byte yang dibutuhkan untuk memasukkan berkas `files` (`(path,
+    /// ukuran)`) dengan cara `mode`. Pada [`EmbedMode::Move`], berkas yang
+    /// berada di sistem berkas yang sama dengan bundel tidak dihitung.
+    pub fn bytes_needed_to_embed(&self, files: &[(PathBuf, u64)], mode: EmbedMode) -> u64 {
+        files
+            .iter()
+            .filter(|(p, _)| mode == EmbedMode::Copy || !same_filesystem(p, &self.root))
+            .map(|(_, n)| *n)
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// Pastikan ruang kosong di bundel cukup untuk `bytes` ditambah
+    /// [`EMBED_FREE_SPACE_MARGIN`]. Bila ruang tidak dapat ditentukan,
+    /// pemeriksaan dilewati.
+    pub fn check_free_space(&self, bytes: u64) -> Result<(), IoError> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        if let Some(available) = free_space(&self.root) {
+            let needed = bytes.saturating_add(EMBED_FREE_SPACE_MARGIN);
             if available < needed {
                 return Err(IoError::InsufficientSpace { needed, available });
             }
         }
-        let ext = src
-            .extension()
-            .map(|e| e.to_string_lossy().to_ascii_lowercase())
-            .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()));
-        let name = match ext {
-            Some(e) => format!("{}.{}", slide_stem(id), e),
-            None => slide_stem(id),
-        };
-        let rel_path = PathBuf::from("slides").join(name);
-        copy_atomic(src, &self.root.join(&rel_path))?;
-        Ok(SlideSourceRef::Embedded { rel_path })
+        Ok(())
     }
+}
 
+/// Nama berkas slide tertanam: `NNNN.<ext>` (ekstensi huruf kecil).
+fn embedded_file_name(src: &Path, id: SlideId) -> String {
+    let ext = src
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_alphanumeric()));
+    match ext {
+        Some(e) => format!("{}.{}", slide_stem(id), e),
+        None => slide_stem(id),
+    }
+}
+
+/// Benar bila `a` dan `b` berada di sistem berkas yang sama (perangkat
+/// sama). Bila tidak dapat ditentukan, dianggap berbeda (aman: dihitung).
+#[cfg(unix)]
+fn same_filesystem(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_filesystem(_a: &Path, _b: &Path) -> bool {
+    false
+}
+
+impl ProjectBundle {
     /// Hapus seluruh isi `cache/` (aman kapan saja; semuanya bisa dibuat ulang).
     pub fn clear_cache(&self) -> Result<(), IoError> {
         let dir = self.cache_dir();
@@ -502,6 +598,57 @@ mod tests {
             normalize(Path::new("/a/b/../c/./d")),
             PathBuf::from("/a/c/d")
         );
+    }
+
+    #[test]
+    fn embed_move_renames_on_same_filesystem_and_copy_keeps_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = ProjectBundle::create(&dir.path().join("p.h3d")).unwrap();
+        let a = dir.path().join("A.TIF");
+        let c = dir.path().join("c.png");
+        fs::write(&a, b"aaaa").unwrap();
+        fs::write(&c, b"cc").unwrap();
+
+        // Sama sistem berkas: mode pindah tidak butuh ruang tambahan.
+        let files = vec![(a.clone(), 4), (c.clone(), 2)];
+        assert_eq!(b.bytes_needed_to_embed(&files, EmbedMode::Copy), 6);
+        assert_eq!(b.bytes_needed_to_embed(&files, EmbedMode::Move), 0);
+
+        let out = b.embed_slide_with(&a, SlideId(3), EmbedMode::Move).unwrap();
+        assert!(out.moved);
+        assert!(!a.exists(), "berkas asal dipindahkan");
+        let rel = PathBuf::from("slides").join("0003.tif");
+        assert_eq!(
+            out.source,
+            SlideSourceRef::Embedded {
+                rel_path: rel.clone()
+            }
+        );
+        assert_eq!(fs::read(b.root.join(&rel)).unwrap(), b"aaaa");
+
+        let out = b.embed_slide_with(&c, SlideId(4), EmbedMode::Copy).unwrap();
+        assert!(!out.moved);
+        assert!(c.exists(), "berkas asal tetap pada mode salin");
+        assert_eq!(fs::read(b.root.join("slides/0004.png")).unwrap(), b"cc");
+
+        // Berkas asal tidak ada → galat, bukan panik.
+        assert!(b
+            .embed_slide_with(&dir.path().join("hilang.tif"), SlideId(5), EmbedMode::Move)
+            .is_err());
+    }
+
+    #[test]
+    fn free_space_check_rejects_impossible_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = ProjectBundle::create(&dir.path().join("p.h3d")).unwrap();
+        assert!(b.check_free_space(0).is_ok());
+        assert!(b.check_free_space(1).is_ok());
+        if free_space(&b.root).is_some() {
+            assert!(matches!(
+                b.check_free_space(u64::MAX / 2),
+                Err(IoError::InsufficientSpace { .. })
+            ));
+        }
     }
 
     #[test]

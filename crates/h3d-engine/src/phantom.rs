@@ -299,8 +299,7 @@ fn spec_for(o: &PhantomOptions) -> Result<(PhantomSpec, f64), EngineError> {
         ..Default::default()
     };
     // Setengah tinggi (z) yang harus dicakup tumpukan.
-    let half_z;
-    match o.shape {
+    let mut half_z = match o.shape {
         PhantomShapeKind::Ellipsoid => {
             let radii = if o.foci.is_some() {
                 [0.10 * field; 3]
@@ -311,12 +310,16 @@ fn spec_for(o: &PhantomOptions) -> Result<(PhantomSpec, f64), EngineError> {
                 [0.28 * field, 0.22 * field, 0.19 * field]
             };
             spec.shape = PhantomShape::Ellipsoid { radii };
-            half_z = if o.foci.is_some() { radii[0] } else { radii[2] };
+            if o.foci.is_some() {
+                radii[0]
+            } else {
+                radii[2]
+            }
         }
         PhantomShapeKind::Torus => {
             let (major, minor) = (0.20 * field, 0.08 * field);
             spec.shape = PhantomShape::Torus { major, minor };
-            half_z = minor;
+            minor
         }
         PhantomShapeKind::Branch => {
             let (trunk, arm, radius, half_angle) =
@@ -327,10 +330,9 @@ fn spec_for(o: &PhantomOptions) -> Result<(PhantomSpec, f64), EngineError> {
                 radius,
                 half_angle,
             };
-            half_z = (trunk + radius).max(arm * half_angle.cos() + radius);
+            (trunk + radius).max(arm * half_angle.cos() + radius)
         }
-    }
-    let mut half_z = half_z;
+    };
     if let Some((k, g)) = o.foci {
         if o.shape != PhantomShapeKind::Ellipsoid || k == 0 || !(g.is_finite() && g >= 0.0) {
             return Err(EngineError::invalid(

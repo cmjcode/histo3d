@@ -96,6 +96,7 @@ pub fn begin_import(app: &mut AppState) {
             ImportRequest {
                 paths,
                 embed: false,
+                embed_mode: h3d_engine::EmbedMode::Copy,
             },
             None,
         );

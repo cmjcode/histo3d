@@ -30,7 +30,7 @@ pub use analysis_json::{
     decode_analysis, encode_analysis, to_stable_json, to_stable_json_of, AnalysisFile,
 };
 pub use atomic::{copy_atomic, remove_if_exists, write_atomic};
-pub use bundle::{encode_project, slide_stem, ProjectBundle};
+pub use bundle::{encode_project, slide_stem, EmbedMode, EmbedOutcome, ProjectBundle};
 pub use error::IoError;
 pub use geojson::export_slide_geojson;
 pub use glb::{encode_glb, parse_glb, scalar_attribute_name, GlbMesh, GlbScalar};

@@ -5,6 +5,12 @@
 //! nomor generasi viewport; permintaan yang generasinya lebih tua dari
 //! generasi saat ini dibuang, baik saat masuk antrean maupun saat diambil
 //! pekerja. Hasil dikirim lewat `mpsc`. Hanya `std`, tanpa runtime async.
+//!
+//! Jumlah slide terdaftar dibatasi (`max_slides`, dari
+//! `Budgets::max_open_slides`): saat batas terlampaui, slide yang paling lama
+//! tidak diminta tile-nya dicabut sehingga handle berkas dan cache internal
+//! backend-nya dilepas. Pemakai mendaftarkannya lagi saat dibutuhkan
+//! ([`TileLoader::has_slide`]).
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -88,7 +94,10 @@ impl Ord for Queued {
 
 struct State {
     queue: BinaryHeap<Queued>,
-    slides: HashMap<SlideId, Arc<dyn SlideSource>>,
+    /// Sumber per slide beserta jam pemakaian terakhir (untuk LRU).
+    slides: HashMap<SlideId, (Arc<dyn SlideSource>, u64)>,
+    max_slides: usize,
+    use_clock: u64,
     next_seq: u64,
     shutdown: bool,
 }
@@ -108,13 +117,22 @@ pub struct TileLoader {
 
 impl TileLoader {
     /// Buat pemuat dengan `threads` pekerja (minimal 1; ambil angkanya dari
-    /// `Budgets::decode_threads`). Mengembalikan penerima hasil.
+    /// `Budgets::decode_threads`) tanpa batas jumlah slide terdaftar.
+    /// Mengembalikan penerima hasil.
     pub fn new(threads: usize) -> (Self, Receiver<TileResult>) {
+        Self::with_max_slides(threads, usize::MAX)
+    }
+
+    /// Seperti [`TileLoader::new`], dengan paling banyak `max_slides` slide
+    /// terdaftar bersamaan (minimal 1; ambil dari `Budgets::max_open_slides`).
+    pub fn with_max_slides(threads: usize, max_slides: usize) -> (Self, Receiver<TileResult>) {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 queue: BinaryHeap::new(),
                 slides: HashMap::new(),
+                max_slides: max_slides.max(1),
+                use_clock: 0,
                 next_seq: 0,
                 shutdown: false,
             }),
@@ -136,20 +154,89 @@ impl TileLoader {
     }
 
     /// Daftarkan sumber untuk `slide`; permintaan untuk slide yang tidak
-    /// terdaftar menghasilkan `TileResult` berisi error.
-    pub fn add_slide(&self, slide: SlideId, source: Arc<dyn SlideSource>) {
+    /// terdaftar menghasilkan `TileResult` berisi error. Bila jumlah slide
+    /// melampaui batas, slide yang paling lama tidak dipakai dicabut dan
+    /// dikembalikan (urutan tetap: jam pemakaian, lalu id).
+    pub fn add_slide(&self, slide: SlideId, source: Arc<dyn SlideSource>) -> Vec<SlideId> {
+        let mut dropped: Vec<Arc<dyn SlideSource>> = Vec::new();
+        let mut evicted = Vec::new();
         if let Ok(mut st) = self.shared.state.lock() {
-            st.slides.insert(slide, source);
+            st.use_clock += 1;
+            let now = st.use_clock;
+            if let Some((old, _)) = st.slides.insert(slide, (source, now)) {
+                dropped.push(old);
+            }
+            while st.slides.len() > st.max_slides {
+                let victim = st
+                    .slides
+                    .iter()
+                    .filter(|(id, _)| **id != slide)
+                    .min_by_key(|(id, (_, used))| (*used, id.0))
+                    .map(|(id, _)| *id);
+                let Some(victim) = victim else { break };
+                if let Some((src, _)) = st.slides.remove(&victim) {
+                    dropped.push(src);
+                }
+                drop_queued(&mut st, victim);
+                evicted.push(victim);
+            }
         }
+        // Sumber dilepas di luar kunci (menutup berkas bisa lambat).
+        drop(dropped);
+        evicted
     }
 
     /// Cabut sumber `slide` dan buang permintaannya yang masih antre.
     pub fn remove_slide(&self, slide: SlideId) {
+        let mut dropped = None;
         if let Ok(mut st) = self.shared.state.lock() {
-            st.slides.remove(&slide);
-            let kept: Vec<Queued> = st.queue.drain().filter(|q| q.req.slide != slide).collect();
-            st.queue.extend(kept);
+            dropped = st.slides.remove(&slide);
+            drop_queued(&mut st, slide);
         }
+        drop(dropped);
+    }
+
+    /// Cabut semua sumber kecuali `keep` (peringatan memori). Permintaan
+    /// slide yang dicabut ikut dibuang. Mengembalikan slide yang dicabut,
+    /// terurut menurut id.
+    pub fn retain_slides(&self, keep: &[SlideId]) -> Vec<SlideId> {
+        let mut dropped: Vec<Arc<dyn SlideSource>> = Vec::new();
+        let mut removed: Vec<SlideId> = Vec::new();
+        if let Ok(mut st) = self.shared.state.lock() {
+            removed = st
+                .slides
+                .keys()
+                .copied()
+                .filter(|id| !keep.contains(id))
+                .collect();
+            removed.sort_by_key(|id| id.0);
+            for id in &removed {
+                if let Some((src, _)) = st.slides.remove(id) {
+                    dropped.push(src);
+                }
+                drop_queued(&mut st, *id);
+            }
+        }
+        drop(dropped);
+        removed
+    }
+
+    /// Benar bila `slide` sedang terdaftar.
+    pub fn has_slide(&self, slide: SlideId) -> bool {
+        self.shared
+            .state
+            .lock()
+            .map(|st| st.slides.contains_key(&slide))
+            .unwrap_or(false)
+    }
+
+    /// Jumlah slide terdaftar.
+    pub fn slide_count(&self) -> usize {
+        self.shared
+            .state
+            .lock()
+            .map(|st| st.slides.len())
+            .unwrap_or(0)
     }
 
     /// Generasi viewport saat ini.
@@ -175,6 +262,11 @@ impl TileLoader {
         let Ok(mut st) = self.shared.state.lock() else {
             return false;
         };
+        st.use_clock += 1;
+        let now = st.use_clock;
+        if let Some(entry) = st.slides.get_mut(&req.slide) {
+            entry.1 = now;
+        }
         let seq = st.next_seq;
         st.next_seq += 1;
         st.queue.push(Queued { req, seq });
@@ -231,6 +323,14 @@ impl Drop for TileLoader {
     }
 }
 
+/// Buang permintaan antre milik `slide`.
+fn drop_queued(st: &mut State, slide: SlideId) {
+    if st.queue.iter().any(|q| q.req.slide == slide) {
+        let kept: Vec<Queued> = st.queue.drain().filter(|q| q.req.slide != slide).collect();
+        st.queue.extend(kept);
+    }
+}
+
 fn worker_loop(shared: &Shared, tx: &Sender<TileResult>) {
     loop {
         let (req, source) = {
@@ -242,7 +342,7 @@ fn worker_loop(shared: &Shared, tx: &Sender<TileResult>) {
                     return;
                 }
                 if let Some(q) = st.queue.pop() {
-                    let source = st.slides.get(&q.req.slide).cloned();
+                    let source = st.slides.get(&q.req.slide).map(|(s, _)| Arc::clone(s));
                     break (q.req, source);
                 }
                 st = match shared.wake.wait(st) {

@@ -61,6 +61,7 @@ fn project(fx: &Fixture) -> PathBuf {
             mpp: Some([fx.manifest.mpp, fx.manifest.mpp]),
             embed: false,
             spacing_um: Some(fx.manifest.spacing_um),
+            ..Default::default()
         },
         &NoProgress,
     )
@@ -263,6 +264,7 @@ fn import_without_mpp_asks_for_mpp_and_never_guesses() {
     let request = ImportRequest {
         paths: fx.slide_paths.clone(),
         embed: true,
+        embed_mode: h3d_engine::EmbedMode::Copy,
     };
     app.start_import(request.clone(), None);
     app.wait_job();
@@ -499,4 +501,45 @@ fn every_warning_has_a_translation_in_both_locales() {
         }
     }
     h3d_i18n::set_language(h3d_i18n::Language::default());
+}
+
+#[test]
+fn tile_streamer_caps_open_sources_and_reopens_after_release() {
+    use h3d_app::tiles::TileStreamer;
+
+    let fx = phantom(6);
+    let path = fx.tmp.path().join("cap.h3d");
+    let mut s = Session::create(&path).unwrap();
+    let ids = s
+        .import_slides_with(
+            &fx.slide_paths,
+            &ImportOptions {
+                mpp: Some([fx.manifest.mpp, fx.manifest.mpp]),
+                ..Default::default()
+            },
+            &NoProgress,
+        )
+        .unwrap();
+    let budgets = Budgets {
+        max_open_slides: 2,
+        ..Budgets::IPAD
+    };
+    let mut tiles = TileStreamer::new(&budgets);
+    for &id in &ids {
+        assert!(tiles.ensure_source(&s, id).is_some());
+        assert!(
+            tiles.open_source_count() <= 2,
+            "batas slide terbuka dilanggar"
+        );
+    }
+    assert_eq!(tiles.open_source_count(), 2);
+
+    // Peringatan memori: semua sumber dilepas, metadata tetap.
+    assert_eq!(tiles.release_sources(), 2);
+    assert_eq!(tiles.open_source_count(), 0);
+    assert!(tiles.meta(ids[0]).is_some());
+
+    // Irisan yang tampil lagi dibuka ulang secara transparan.
+    assert!(tiles.ensure_source(&s, ids[0]).is_some());
+    assert_eq!(tiles.open_source_count(), 1);
 }

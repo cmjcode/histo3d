@@ -1,12 +1,15 @@
 //! Peramban Documents dalam-aplikasi (9.3). Di iPad tidak ada dialog berkas
 //! native (`rfd` tidak mendukung iOS): proyek `.h3d` dan berkas gambar
 //! diambil dari folder Documents tersandbox, yang terbuka ke aplikasi Files.
-//! Impor dari sini selalu menyalin slide ke dalam bundel; ukuran yang
-//! dibutuhkan ditampilkan sebelum menyalin, dan mesin memeriksa ruang kosong.
+//! Impor dari sini selalu memasukkan slide ke dalam bundel, dengan cara
+//! dipindahkan (bawaan; tanpa salinan ganda di penyimpanan yang sama) atau
+//! disalin. Ukuran yang dibutuhkan ditampilkan sebelum menyalin, dan mesin
+//! memeriksa ruang kosong untuk seluruh batch.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use h3d_engine::EmbedMode;
 use h3d_i18n::t;
 
 use crate::platform::{self, DocListing};
@@ -32,8 +35,8 @@ pub enum BrowserAction {
     Open(PathBuf),
     /// Buat bundel baru di path ini.
     Create(PathBuf),
-    /// Impor berkas-berkas ini (disalin ke bundel).
-    Import(Vec<PathBuf>),
+    /// Impor berkas-berkas ini ke bundel dengan cara yang dipilih.
+    Import(Vec<PathBuf>, EmbedMode),
 }
 
 /// Keadaan peramban.
@@ -49,6 +52,8 @@ pub struct BrowserState {
     pub selected: BTreeSet<PathBuf>,
     /// Nama proyek baru.
     pub new_name: String,
+    /// Cara memasukkan slide ke bundel (bawaan: pindahkan).
+    pub embed_mode: EmbedMode,
 }
 
 impl BrowserState {
@@ -66,6 +71,7 @@ impl BrowserState {
             listing,
             selected: BTreeSet::new(),
             new_name: String::new(),
+            embed_mode: EmbedMode::Move,
         }
     }
 
@@ -197,15 +203,31 @@ impl BrowserState {
                     }
                 }
             });
+        ui.horizontal(|ui| {
+            ui.radio_value(
+                &mut self.embed_mode,
+                EmbedMode::Move,
+                t!("browser-mode-move"),
+            );
+            ui.radio_value(
+                &mut self.embed_mode,
+                EmbedMode::Copy,
+                t!("browser-mode-copy"),
+            );
+        });
         ui.label(t!(
-            "browser-space-needed",
+            "browser-total-size",
             size = platform::fmt_bytes(self.selected_bytes())
         ));
-        ui.small(t!("browser-copy-note"));
+        match self.embed_mode {
+            EmbedMode::Move => ui.small(t!("browser-move-note")),
+            EmbedMode::Copy => ui.small(t!("browser-copy-note")),
+        };
         if icon_text_button(ui, h3d_ui::icons::IMPORT, &t!("slides-import")).clicked()
             && !self.selected.is_empty()
         {
-            *action = BrowserAction::Import(self.selected.iter().cloned().collect());
+            *action =
+                BrowserAction::Import(self.selected.iter().cloned().collect(), self.embed_mode);
         }
     }
 }

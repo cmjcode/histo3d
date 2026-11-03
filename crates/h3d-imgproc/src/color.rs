@@ -200,7 +200,7 @@ pub fn deconvolve(
         .zip(c1.par_chunks_mut(w))
         .zip(c2.par_chunks_mut(w))
         .for_each(|(((row, o0), o1), o2)| {
-            for (i, px) in row.chunks_exact(4).enumerate() {
+            for (i, px) in row.as_chunks::<4>().0.iter().enumerate() {
                 let c = m.concentrations(rgb_to_od(px));
                 o0[i] = c[0];
                 o1[i] = c[1];
@@ -218,7 +218,7 @@ pub fn od_total(rgba: &[u8], w: usize, h: usize) -> Result<Array2<f32>, ImgError
     rgba.par_chunks(w * 4)
         .zip(out.par_chunks_mut(w))
         .for_each(|(row, o)| {
-            for (i, px) in row.chunks_exact(4).enumerate() {
+            for (i, px) in row.as_chunks::<4>().0.iter().enumerate() {
                 let od = rgb_to_od(px);
                 o[i] = od[0] + od[1] + od[2];
             }

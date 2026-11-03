@@ -67,7 +67,9 @@ fn read_f32(bin: &[u8], doc: &Value, accessor: u64) -> Vec<f32> {
     let off = v["byteOffset"].as_u64().unwrap() as usize;
     let len = v["byteLength"].as_u64().unwrap() as usize;
     bin[off..off + len]
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
@@ -78,7 +80,9 @@ fn read_u32(bin: &[u8], doc: &Value, accessor: u64) -> Vec<u32> {
     let off = v["byteOffset"].as_u64().unwrap() as usize;
     let len = v["byteLength"].as_u64().unwrap() as usize;
     bin[off..off + len]
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
@@ -174,12 +178,16 @@ fn glb_parses_back_with_consistent_buffers() {
     // sama dengan mesh asal (µm³ → m³).
     let idx = read_u32(&bin, &doc, idx_acc);
     let p64: Vec<[f64; 3]> = pos
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])])
         .collect();
     let vol_m3 = signed_volume(
         &p64,
-        idx.chunks_exact(3)
+        idx.as_chunks::<3>()
+            .0
+            .iter()
             .map(|t| [t[0] as usize, t[1] as usize, t[2] as usize]),
     );
     let expect = mesh.signed_volume_um3() * 1e-18;

@@ -320,13 +320,13 @@ fn to_rgba(
             }
         }
         ColorType::RGB(_) | ColorType::YCbCr(_) => {
-            for p in samples.chunks_exact(3) {
+            for p in samples.as_chunks::<3>().0.iter() {
                 out.extend_from_slice(&[p[0], p[1], p[2], 255]);
             }
         }
         ColorType::RGBA(_) => out = samples,
         ColorType::CMYK(_) => {
-            for p in samples.chunks_exact(4) {
+            for p in samples.as_chunks::<4>().0.iter() {
                 let k = 255 - u32::from(p[3]);
                 let f = |c: u8| ((255 - u32::from(c)) * k / 255) as u8;
                 out.extend_from_slice(&[f(p[0]), f(p[1]), f(p[2]), 255]);

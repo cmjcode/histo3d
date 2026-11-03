@@ -633,7 +633,7 @@ impl LabelStore {
             }
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let row = &mut mask[j * w..(j + 1) * w];
-            for pair in xs.chunks_exact(2) {
+            for pair in xs.as_chunks::<2>().0.iter() {
                 // Piksel ikut bila pusatnya x + 0,5 ∈ [xa, xb).
                 let xa = (pair[0] - 0.5).ceil().max(x0 as f64);
                 let xb = (pair[1] - 0.5).ceil().min(x1 as f64);

@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use h3d_core::{OrderSource, Progress, SlideEntry, SlideId, SlideSourceRef, SlideStatus};
+use h3d_io::EmbedMode;
 
 use super::Session;
 use crate::error::EngineError;
@@ -14,8 +15,12 @@ pub struct ImportOptions {
     /// mpp isian pengguna `[x, y]`, dipakai HANYA bila metadata berkas tidak
     /// memuatnya. Tanpa keduanya impor gagal dengan `MppMissing`.
     pub mpp: Option<[f64; 2]>,
-    /// Salin berkas ke dalam bundel (`slides/`); wajib di iPad.
+    /// Masukkan berkas ke dalam bundel (`slides/`); wajib di iPad.
     pub embed: bool,
+    /// Cara memasukkan bila `embed`: salin (bawaan) atau pindahkan. Mode
+    /// pindah menghindari salinan ganda dari folder Documents iPad; bila
+    /// impor gagal, berkas dikembalikan ke path asal.
+    pub embed_mode: EmbedMode,
     /// Jarak irisan untuk `z_um` bawaan; `None` = nilai proyek.
     pub spacing_um: Option<f64>,
 }
@@ -165,6 +170,17 @@ impl Session {
             });
         }
 
+        // Ruang untuk seluruh batch diperiksa sekali, sebelum berkas pertama
+        // disalin (9.3).
+        if opts.embed {
+            let files: Vec<(PathBuf, u64)> = pending
+                .iter()
+                .map(|x| (x.path.clone(), x.size_bytes))
+                .collect();
+            let needed = self.bundle.bytes_needed_to_embed(&files, opts.embed_mode);
+            self.bundle.check_free_space(needed)?;
+        }
+
         // Tahap 2: masukkan ke proyek.
         let previous_spacing = self.project.recon.default_spacing_um;
         if let Some(s) = opts.spacing_um {
@@ -183,6 +199,9 @@ impl Session {
         let original_len = self.project.slides.len();
         let mut ids = Vec::with_capacity(pending.len());
         let mut failure: Option<EngineError> = None;
+        // Berkas yang dipindahkan (path asal, rel_path di bundel) untuk
+        // dikembalikan bila impor dibatalkan.
+        let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (i, item) in pending.into_iter().enumerate() {
             if p.is_cancelled() {
                 failure = Some(EngineError::Cancelled);
@@ -192,8 +211,18 @@ impl Session {
             let next_order = first_order + i as u32;
             let id = self.project.next_slide_id();
             let source = if opts.embed {
-                match self.bundle.embed_slide(&item.path, id) {
-                    Ok(s) => s,
+                match self
+                    .bundle
+                    .embed_slide_with(&item.path, id, opts.embed_mode)
+                {
+                    Ok(out) => {
+                        if out.moved {
+                            if let SlideSourceRef::Embedded { rel_path } = &out.source {
+                                moved.push((item.path.clone(), rel_path.clone()));
+                            }
+                        }
+                        out.source
+                    }
                     Err(e) => {
                         failure = Some(e.into());
                         break;
@@ -225,7 +254,22 @@ impl Session {
         if let Some(e) = failure {
             for s in self.project.slides.drain(original_len..) {
                 if let SlideSourceRef::Embedded { rel_path } = &s.source {
-                    let _ = std::fs::remove_file(self.bundle.root.join(rel_path));
+                    let abs = self.bundle.root.join(rel_path);
+                    match moved.iter().find(|(_, r)| r == rel_path) {
+                        // Berkas pindahan dikembalikan, bukan dihapus.
+                        Some((orig, _)) => {
+                            if let Err(e) = std::fs::rename(&abs, orig) {
+                                log::error!(
+                                    "gagal mengembalikan {} ke {}: {e}",
+                                    abs.display(),
+                                    orig.display()
+                                );
+                            }
+                        }
+                        None => {
+                            let _ = std::fs::remove_file(abs);
+                        }
+                    }
                 }
             }
             self.project.recon.default_spacing_um = previous_spacing;

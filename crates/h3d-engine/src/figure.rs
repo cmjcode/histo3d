@@ -190,7 +190,7 @@ mod tests {
         c.put(-1, 0, RED);
         c.put(20, 0, RED);
         c.put(0, 10, RED);
-        assert!(c.as_rgba().chunks_exact(4).all(|p| p == WHITE));
+        assert!(c.as_rgba().as_chunks::<4>().0.iter().all(|p| *p == WHITE));
         assert_eq!(c.get(-1, 0), None);
         // Cakram r = 1,2 di (5,5; 5,5): pusat piksel (5,5) dan 4 tetangganya.
         c.disc([5.5, 5.5], 1.2, RED);

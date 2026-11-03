@@ -287,6 +287,7 @@ mod tests {
             ImportRequest {
                 paths: vec![PathBuf::from("/x/a.png")],
                 embed: false,
+                embed_mode: h3d_engine::EmbedMode::Copy,
             },
             "a.png".into(),
         );

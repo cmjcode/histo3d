@@ -43,9 +43,14 @@ impl WsiBackend {
     }
 
     /// Buka dengan anggaran cache tile internal `wsi-rs` dalam byte (ambil
-    /// dari `h3d_core::Budgets`, jangan tulis angka di sini).
+    /// dari `h3d_core::Budgets::wsi_internal_cache_bytes`, jangan tulis angka
+    /// di sini). Cache bersama memakai `cache_bytes`, cache tampilan
+    /// setengahnya; cache privat format dibatasi `wsi-rs` ke seperempat cache
+    /// bersama. Tanpa ini tiap slide memakai bawaan pustaka (64 + 32 + 16 MiB).
     pub fn open_with_cache_bytes(path: &Path, cache_bytes: u64) -> Result<Self, SlideError> {
-        let cfg = CacheConfig::deterministic().with_shared_tile_bytes(cache_bytes);
+        let cfg = CacheConfig::deterministic()
+            .with_shared_tile_bytes(cache_bytes)
+            .with_display_tile_bytes(cache_bytes / 2);
         Self::open_with_options(
             path,
             SlideOpenOptions::deterministic().with_cache_config(cfg),

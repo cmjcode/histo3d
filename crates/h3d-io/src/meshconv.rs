@@ -74,7 +74,11 @@ pub fn validate_mesh(mesh: &LabelMesh) -> Result<(), IoError> {
 /// Segitiga mesh dengan orientasi sudah ditukar untuk kerangka tangan-kanan:
 /// `[a, c, b]`.
 pub fn flipped_triangles(mesh: &LabelMesh) -> impl Iterator<Item = [u32; 3]> + '_ {
-    mesh.indices.chunks_exact(3).map(|t| [t[0], t[2], t[1]])
+    mesh.indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|t| [t[0], t[2], t[1]])
 }
 
 /// Nama berkas aman dari nama label: huruf kecil ASCII, angka, `-`, `_`.
