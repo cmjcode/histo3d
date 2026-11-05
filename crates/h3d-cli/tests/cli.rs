@@ -445,6 +445,91 @@ fn write_disc_png(path: &Path, size: u32, center: (f64, f64), radius: f64, rgb: 
     img.save(path).unwrap();
 }
 
+/// Masker grayscale 8-bit `size×size`: cakram berpusat `center` berjari-jari
+/// `radius` (piksel, pusat +0,5) bernilai 255, selainnya 0.
+fn write_disc_mask_png(path: &Path, size: u32, center: (f64, f64), radius: f64) {
+    let mut img = image::GrayImage::new(size, size);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        let dx = f64::from(x) + 0.5 - center.0;
+        let dy = f64::from(y) + 0.5 - center.1;
+        if dx * dx + dy * dy <= radius * radius {
+            *p = image::Luma([255]);
+        }
+    }
+    img.save(path).unwrap();
+}
+
+#[test]
+fn labels_import_mask_then_diff_reports_dice_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    phantom(root, &[]);
+    let t = truth(&root.join("ph"));
+    let mpp = t["mpp"].as_f64().unwrap();
+    let names = slices(&root.join("ph"));
+    ok(root, &["new", "p.h3d"]);
+    let mut args: Vec<String> = vec!["import".into(), "p.h3d".into()];
+    args.extend(names.iter().map(|n| format!("ph/{n}")));
+    args.extend(["--mpp".into(), mpp.to_string()]);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    ok(root, &argv);
+
+    // Masker pada mpp yang sama dengan slide (160 px), label baru "Cakram".
+    write_disc_mask_png(&root.join("m.png"), 160, (80.0, 70.0), 40.0);
+    let mpp_s = mpp.to_string();
+    let import = [
+        "labels",
+        "import-mask",
+        "p.h3d",
+        "--slide",
+        "0",
+        "--mask",
+        "m.png",
+        "--mpp",
+        &mpp_s,
+        "--label",
+        "Cakram",
+    ];
+    let out = ok(root, &import);
+    assert!(out.contains("Masker diimpor ke irisan 0"), "{out}");
+    assert!(!out.contains(" 0 piksel diisi"), "{out}");
+    // Impor ulang: OnlyBackground → tidak ada piksel baru.
+    let out = ok(root, &import);
+    assert!(out.contains(": 0 piksel diisi"), "{out}");
+
+    let diff = [
+        "labels", "diff", "p.h3d", "--slide", "0", "--label", "Cakram", "--mask", "m.png", "--mpp",
+        &mpp_s, "--json",
+    ];
+    let v: Value = serde_json::from_str(&ok(root, &diff)).unwrap();
+    let dice = v["dice"].as_f64().unwrap();
+    assert!((dice - 1.0).abs() < 1e-6, "dice = {dice}");
+    let out = ok(root, &diff[..diff.len() - 1]);
+    assert!(out.contains("Dice label \"Cakram\" irisan 0"), "{out}");
+    assert!(out.contains("1.0000"), "{out}");
+
+    // Masker ukuran salah → galat data satu baris (kode 2); mpp tidak ditebak.
+    write_disc_mask_png(&root.join("kecil.png"), 40, (20.0, 20.0), 10.0);
+    let err = fails(
+        root,
+        &[
+            "labels",
+            "diff",
+            "p.h3d",
+            "--slide",
+            "0",
+            "--label",
+            "Cakram",
+            "--mask",
+            "kecil.png",
+            "--mpp",
+            &mpp_s,
+        ],
+        2,
+    );
+    assert!(err.contains("tidak cocok"), "{err}");
+}
+
 #[test]
 fn exit_codes_and_single_line_errors() {
     let tmp = tempfile::tempdir().unwrap();

@@ -89,6 +89,31 @@ pub struct LabelReport {
     pub n_slices_reviewed: usize,
 }
 
+/// Pengukuran satu objek (instance) hasil rekonstruksi per objek.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ObjectReport {
+    /// Label.
+    pub label: LabelId,
+    /// Nama tampilan, mis. `Tumor#3`.
+    pub name: String,
+    /// Id objek.
+    pub instance_id: u32,
+    /// Volume mesh bertanda, µm³.
+    pub volume_mesh_um3: f64,
+    /// Luas permukaan mesh, µm².
+    pub surface_area_um2: f64,
+    /// Kotak pembatas mesh `(min, max)`, µm.
+    pub bbox_um: Option<([f64; 3], [f64; 3])>,
+    /// Diameter maksimum mesh, µm.
+    pub max_diameter_um: f64,
+    /// Jumlah komponen mesh.
+    pub n_components: usize,
+    /// Jumlah irisan anggota track (`None` bila `tracks.json` tidak ada).
+    pub n_slices: Option<usize>,
+    /// Rentang z anggota track, µm.
+    pub z_range_um: Option<(f64, f64)>,
+}
+
 /// Anggota grup.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GroupMember {
@@ -219,6 +244,9 @@ pub struct Report {
     pub labels: Vec<LabelReport>,
     /// Agregasi per grup.
     pub groups: Vec<GroupReport>,
+    /// Pengukuran per objek (hanya bila rekonstruksi per objek aktif).
+    #[serde(default)]
+    pub objects: Vec<ObjectReport>,
     /// Provenance.
     pub provenance: ProvenanceReport,
     /// Atribut.
@@ -256,6 +284,7 @@ impl Report {
             slides: SlideSummary::default(),
             labels: Vec::new(),
             groups: Vec::new(),
+            objects: Vec::new(),
             provenance: ProvenanceReport::default(),
             attrs: Vec::new(),
             analysis: None,
@@ -556,6 +585,31 @@ pub fn render_markdown(r: &Report, clinical: ClinicalScope<'_>) -> String {
         .collect();
     if !rows.is_empty() {
         md_table(&mut o, &t::GROUP_HEADER, &rows);
+    }
+    let rows: Vec<Vec<String>> = r
+        .objects
+        .iter()
+        .map(|ob| {
+            vec![
+                ob.name.clone(),
+                r.labels
+                    .iter()
+                    .find(|l| l.label == ob.label)
+                    .map_or_else(|| ob.label.to_string(), |l| l.name.clone()),
+                fmt_mm3(ob.volume_mesh_um3),
+                fmt_mm2(ob.surface_area_um2),
+                fmt_distance(ob.max_diameter_um, u),
+                opt(ob.n_slices, |n| n.to_string()),
+                ob.z_range_um.map_or_else(
+                    || "-".to_owned(),
+                    |(a, b)| format!("{} – {}", fmt_mm(a), fmt_mm(b)),
+                ),
+            ]
+        })
+        .collect();
+    if !rows.is_empty() {
+        md_table(&mut o, &t::OBJECT_HEADER, &rows);
+        let _ = writeln!(o, "{}\n", t::OBJECT_NOTE);
     }
     if let Some(a) = &r.analysis {
         if let Some(p) = a.fractions.necrosis_percent {
@@ -1073,6 +1127,36 @@ pub fn render_csv(r: &Report, clinical: ClinicalScope<'_>) -> String {
             "",
             "",
         );
+    }
+    for ob in &r.objects {
+        let n = ob.name.as_str();
+        c.row(
+            "2",
+            "objek_volume_mesh",
+            n,
+            &fmt_mm3(ob.volume_mesh_um3),
+            "",
+            "mm3",
+        );
+        c.row(
+            "2",
+            "objek_luas_permukaan",
+            n,
+            &fmt_mm2(ob.surface_area_um2),
+            "",
+            "mm2",
+        );
+        c.row(
+            "2",
+            "objek_diameter_maks",
+            n,
+            &fmt_mm(ob.max_diameter_um),
+            &fmt_mm(u),
+            "mm",
+        );
+        if let Some(k) = ob.n_slices {
+            c.row("2", "objek_irisan", n, &k.to_string(), "", "");
+        }
     }
     for g in &r.groups {
         c.row(

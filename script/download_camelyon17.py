@@ -18,6 +18,7 @@ import io
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -145,6 +146,39 @@ def format_size(num_bytes: float) -> str:
     return f"{num_bytes:.2f} PB"
 
 
+def format_eta(seconds: float) -> str:
+    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+        return "--:--"
+    sec = int(seconds + 0.5)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def make_bar(done: int, total: int, width: int = 24) -> str:
+    ratio = min(max(done / total, 0.0), 1.0) if total > 0 else 1.0
+    filled = int(round(ratio * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+def render_progress(done: int, total: int, speed: float) -> None:
+    if total > 0:
+        pct = (done / total) * 100.0
+        eta = (total - done) / speed if speed > 0 and total > done else 0.0
+        bar = make_bar(done, total)
+        line = (
+            f"  [{bar}] {pct:5.1f}%  {format_size(done)}/{format_size(total)}"
+            f"  {format_size(speed)}/s  ETA {format_eta(eta)}"
+        )
+    else:
+        line = f"  Downloaded: {format_size(done)}  ({format_size(speed)}/s)"
+    if sys.stdout.isatty():
+        sys.stdout.write("\r\033[K" + line)
+    else:
+        sys.stdout.write("\r" + line + "   ")
+    sys.stdout.flush()
+
+
 def download_file(s3_key: str, dest_path: Path, chunk_size: int = 8 * 1024 * 1024) -> Path:
     """
     Mengunduh file dari S3 dengan dukungan resume (HTTP Range) dan progress bar.
@@ -181,20 +215,26 @@ def download_file(s3_key: str, dest_path: Path, chunk_size: int = 8 * 1024 * 102
 
     req = urllib.request.Request(url, headers=headers)
     downloaded = part_size
+    start_bytes = part_size
+    t0 = time.monotonic()
+    last_draw = 0.0
 
     with urllib.request.urlopen(req, timeout=60) as resp, open(part_path, mode) as f:
+        render_progress(downloaded, total_size, 0.0)
         while True:
             chunk = resp.read(chunk_size)
             if not chunk:
                 break
             f.write(chunk)
             downloaded += len(chunk)
-            if total_size > 0:
-                pct = (downloaded / total_size) * 100
-                sys.stdout.write(
-                    f"\r  Progress: {pct:6.2f}% ({format_size(downloaded)} / {format_size(total_size)})"
-                )
-                sys.stdout.flush()
+            now = time.monotonic()
+            if now - last_draw >= 0.15 or (total_size > 0 and downloaded >= total_size):
+                speed = (downloaded - start_bytes) / max(now - t0, 1e-6)
+                render_progress(downloaded, total_size, speed)
+                last_draw = now
+        if total_size > 0:
+            speed = (downloaded - start_bytes) / max(time.monotonic() - t0, 1e-6)
+            render_progress(downloaded, total_size, speed)
 
     if total_size > 0 and downloaded != total_size:
         raise IOError(

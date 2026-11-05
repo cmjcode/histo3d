@@ -1,11 +1,11 @@
-//! Kamera: `OrbitCamera` 3D (disalin dari DUCAD, tanpa mode Ortho2D) dan
-//! `Camera2D` ortografis untuk viewer slide.
+//! Kamera: `OrbitCamera` 3D (arcball bebas; turunan dari kamera turntable
+//! DUCAD, tanpa mode Ortho2D) dan `Camera2D` ortografis untuk viewer slide.
 //!
-//! Satuan `OrbitCamera`: milimeter ruang render R (Z ke atas). Satuan
+//! Satuan `OrbitCamera`: milimeter ruang render R (Z = arah tumpukan). Satuan
 //! `Camera2D`: mikrometer ruang W/U (`f64`), karena hanya matematika
 //! koordinat; konversi ke GPU lewat [`View2D`] (`f32`, relatif pusat).
 
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec2, Vec3};
 
 /// Preset sudut pandang kamera standar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,18 +24,23 @@ pub enum ViewPreset {
     Left,
     /// Isometrik.
     Isometric,
+    /// Tumpukan menyamping: dilihat dari depan (−Y) dengan sumbu Z (arah
+    /// tumpukan) mendatar ke kanan layar, sehingga irisan pertama di kiri
+    /// dan irisan terakhir di kanan.
+    Side,
 }
 
-/// Kamera orbit gaya turntable: berputar mengelilingi `target`, sumbu Z
-/// dunia selalu "atas" — tidak pernah roll. Satuan milimeter (ruang R).
+/// Kamera orbit bebas (arcball): berputar mengelilingi `target` ke segala
+/// arah tanpa kunci kutub dan tanpa gimbal lock. Orientasi disimpan sebagai
+/// kuaternion `rotation` yang memetakan basis kamera ke dunia: `+X` lokal =
+/// kanan layar, `+Y` lokal = atas layar, `+Z` lokal = arah dari target ke
+/// mata. Satuan milimeter (ruang R, Z dunia = arah tumpukan).
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrbitCamera {
     /// Titik yang dikelilingi (mm).
     pub target: Vec3,
-    /// Rotasi sekitar sumbu Z (radian).
-    pub yaw: f32,
-    /// Elevasi dari bidang XY (radian), dibatasi < ±90° agar tidak gimbal-flip.
-    pub pitch: f32,
+    /// Orientasi kamera (basis kamera → dunia), selalu ternormalisasi.
+    pub rotation: Quat,
     /// Jarak mata ke target (mm).
     pub distance: f32,
     /// Sudut pandang vertikal (radian).
@@ -46,12 +51,35 @@ impl Default for OrbitCamera {
     fn default() -> Self {
         Self {
             target: Vec3::ZERO,
-            yaw: -45f32.to_radians(),
-            pitch: 30f32.to_radians(),
+            rotation: rotation_from_eye_up(eye_dir_from_yaw_pitch(-45.0, 30.0), Vec3::Z),
             distance: 50.0,
             fov_y: 45f32.to_radians(),
         }
     }
+}
+
+/// Arah target → mata untuk sudut turntable `yaw`/`pitch` (derajat).
+/// Hanya dipakai untuk menyatakan preset dalam istilah yang akrab.
+fn eye_dir_from_yaw_pitch(yaw_deg: f32, pitch_deg: f32) -> Vec3 {
+    let (sin_yaw, cos_yaw) = yaw_deg.to_radians().sin_cos();
+    let (sin_pitch, cos_pitch) = pitch_deg.to_radians().sin_cos();
+    Vec3::new(cos_pitch * cos_yaw, cos_pitch * sin_yaw, sin_pitch)
+}
+
+/// Orientasi kamera dari arah target → mata `eye_dir` dan petunjuk "atas"
+/// `up_hint` (tidak perlu tegak lurus). Bila keduanya sejajar, dipilih
+/// sumbu dunia lain supaya basis tetap sah.
+fn rotation_from_eye_up(eye_dir: Vec3, up_hint: Vec3) -> Quat {
+    let z = eye_dir.normalize_or_zero();
+    let z = if z == Vec3::ZERO { Vec3::Z } else { z };
+    let mut up = up_hint.normalize_or_zero();
+    if up == Vec3::ZERO || up.cross(z).length_squared() < 1e-6 {
+        up = if z.z.abs() < 0.9 { Vec3::Z } else { Vec3::Y };
+    }
+    // Kanan layar = up × eye_dir (sama dengan `forward × up`, forward = −z).
+    let x = up.cross(z).normalize();
+    let y = z.cross(x).normalize();
+    Quat::from_mat3(&Mat3::from_cols(x, y, z)).normalize()
 }
 
 /// Rentang jarak kamera (mm) yang diizinkan.
@@ -69,16 +97,21 @@ impl OrbitCamera {
         viewport_h_px / world_h_mm.max(1e-4)
     }
 
-    /// Posisi mata (mm).
-    pub fn eye(&self) -> Vec3 {
-        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
-        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
-        self.target + self.distance * Vec3::new(cos_pitch * cos_yaw, cos_pitch * sin_yaw, sin_pitch)
+    /// Arah satuan dari target ke mata (dunia).
+    pub fn eye_dir(&self) -> Vec3 {
+        (self.rotation * Vec3::Z).normalize_or_zero()
     }
 
-    /// Matriks pandang (dunia → mata), tangan-kanan, Z ke atas.
+    /// Posisi mata (mm).
+    pub fn eye(&self) -> Vec3 {
+        self.target + self.distance * self.eye_dir()
+    }
+
+    /// Matriks pandang (dunia → mata), tangan-kanan; "atas" mengikuti
+    /// orientasi kamera (boleh miring terhadap Z dunia).
     pub fn view(&self) -> Mat4 {
-        glam::camera::rh::view::look_at_mat4(self.eye(), self.target, Vec3::Z)
+        let (_, up) = self.screen_basis();
+        glam::camera::rh::view::look_at_mat4(self.eye(), self.target, up)
     }
 
     /// Matriks proyeksi perspektif untuk wgpu (kedalaman 0..1).
@@ -94,18 +127,44 @@ impl OrbitCamera {
     }
 
     /// Basis layar `(right, up)` dalam koordinat dunia.
-    fn screen_basis(&self) -> (Vec3, Vec3) {
-        let forward = (self.target - self.eye()).normalize_or_zero();
-        let right = forward.cross(Vec3::Z).normalize_or_zero();
-        let up = right.cross(forward).normalize_or_zero();
-        (right, up)
+    pub fn screen_basis(&self) -> (Vec3, Vec3) {
+        (
+            (self.rotation * Vec3::X).normalize_or_zero(),
+            (self.rotation * Vec3::Y).normalize_or_zero(),
+        )
     }
 
-    /// Putar kamera; delta dalam piksel layar.
+    /// Putar kamera bebas (arcball); delta dalam piksel layar. Seret
+    /// mendatar memutar sekitar sumbu "atas" layar, seret tegak sekitar
+    /// sumbu "kanan" layar; tidak ada batas kutub, kamera boleh melewati
+    /// atas/bawah spesimen dengan mulus.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         const SENSITIVITY: f32 = 0.008;
-        self.yaw -= dx * SENSITIVITY;
-        self.pitch = (self.pitch + dy * SENSITIVITY).clamp(-89f32.to_radians(), 89f32.to_radians());
+        if !(dx.is_finite() && dy.is_finite()) {
+            return;
+        }
+        let (right, up) = self.screen_basis();
+        let around_up = Quat::from_axis_angle(up, -dx * SENSITIVITY);
+        let around_right = Quat::from_axis_angle(right, -dy * SENSITIVITY);
+        self.rotation = (around_up * around_right * self.rotation).normalize();
+    }
+
+    /// Tegakkan kamera: pertahankan arah pandang, tetapi putar sekitar sumbu
+    /// pandang agar "atas" layar sejajar Z dunia (arah tumpukan) lagi. Bila
+    /// kamera memandang hampir tepat sepanjang Z, "atas" diarahkan ke +Y.
+    pub fn upright(&mut self) {
+        let eye_dir = self.eye_dir();
+        let hint = if eye_dir.cross(Vec3::Z).length_squared() < 1e-4 {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        };
+        self.rotation = rotation_from_eye_up(eye_dir, hint);
+    }
+
+    /// Sudut elevasi mata di atas bidang XY dunia (radian, −π/2..π/2).
+    pub fn elevation(&self) -> f32 {
+        self.eye_dir().z.clamp(-1.0, 1.0).asin()
     }
 
     /// Geser target sejajar bidang layar; delta dalam piksel, diskalakan agar
@@ -147,19 +206,23 @@ impl OrbitCamera {
         self.distance = new_distance;
     }
 
-    /// Terapkan preset orientasi.
+    /// Terapkan preset orientasi; `target`, jarak, dan `fov_y` tidak berubah.
     pub fn set_preset(&mut self, preset: ViewPreset) {
-        let (yaw_deg, pitch_deg): (f32, f32) = match preset {
-            ViewPreset::Top => (-90.0, 89.0),
-            ViewPreset::Bottom => (-90.0, -89.0),
-            ViewPreset::Front => (-90.0, 0.0),
-            ViewPreset::Back => (90.0, 0.0),
-            ViewPreset::Right => (0.0, 0.0),
-            ViewPreset::Left => (180.0, 0.0),
-            ViewPreset::Isometric => (-45.0, 35.264),
+        let (eye_dir, up) = match preset {
+            // Z dunia menjadi arah pandang, jadi "atas" layar = +Y (atas) atau
+            // −Y (bawah), sama dengan orientasi turntable di tepi kutub.
+            ViewPreset::Top => (Vec3::Z, Vec3::Y),
+            ViewPreset::Bottom => (-Vec3::Z, -Vec3::Y),
+            ViewPreset::Front => (-Vec3::Y, Vec3::Z),
+            ViewPreset::Back => (Vec3::Y, Vec3::Z),
+            ViewPreset::Right => (Vec3::X, Vec3::Z),
+            ViewPreset::Left => (-Vec3::X, Vec3::Z),
+            ViewPreset::Isometric => (eye_dir_from_yaw_pitch(-45.0, 35.264), Vec3::Z),
+            // Dari depan, dengan +Z ke kanan layar: kanan = up × eye_dir
+            // = (−X) × (−Y) = +Z.
+            ViewPreset::Side => (-Vec3::Y, -Vec3::X),
         };
-        self.yaw = yaw_deg.to_radians();
-        self.pitch = pitch_deg.to_radians();
+        self.rotation = rotation_from_eye_up(eye_dir, up);
     }
 
     /// Geser `target` ke pusat kotak `(min, max)` (mm) dan atur jarak supaya
@@ -310,12 +373,88 @@ mod tests {
     }
 
     #[test]
-    fn pitch_is_clamped() {
+    fn default_matches_turntable_yaw_pitch() {
+        // Bawaan setara yaw −45°, pitch 30° dengan Z dunia ke atas layar.
+        let cam = OrbitCamera::default();
+        let expect = eye_dir_from_yaw_pitch(-45.0, 30.0);
+        assert!((cam.eye_dir() - expect).length() < 1e-5);
+        assert!((cam.elevation() - 30f32.to_radians()).abs() < 1e-5);
+        let (right, up) = cam.screen_basis();
+        assert!(right.z.abs() < 1e-5, "kanan layar mendatar: {right:?}");
+        assert!(up.z > 0.0);
+    }
+
+    #[test]
+    fn orbit_passes_over_the_pole_without_lock() {
         let mut cam = OrbitCamera::default();
-        cam.orbit(0.0, 1e6);
-        assert!(cam.pitch <= 89f32.to_radians() + 1e-6);
-        cam.orbit(0.0, -1e6);
-        assert!(cam.pitch >= -89f32.to_radians() - 1e-6);
+        // Seret ke bawah terus: elevasi naik melewati +90° lalu turun lagi
+        // di sisi seberang (tidak ada kunci di ±89°).
+        let before = cam.eye_dir();
+        let mut max_elev = f32::MIN;
+        let mut crossed = false;
+        for _ in 0..400 {
+            cam.orbit(0.0, 2.0);
+            max_elev = max_elev.max(cam.elevation());
+            if cam.eye_dir().dot(before) < 0.0 {
+                crossed = true;
+            }
+            assert!((cam.rotation.length() - 1.0).abs() < 1e-4);
+        }
+        assert!(max_elev > 85f32.to_radians(), "{max_elev}");
+        assert!(crossed, "kamera harus bisa ke sisi seberang");
+    }
+
+    #[test]
+    fn orbit_full_turn_returns_home() {
+        let mut cam = OrbitCamera::default();
+        let home = cam.clone();
+        // 2π / 0.008 piksel ≈ 785,398 piksel; dibagi 1000 langkah.
+        let step = std::f32::consts::TAU / 0.008 / 1000.0;
+        for _ in 0..1000 {
+            cam.orbit(step, 0.0);
+        }
+        assert!((cam.eye_dir() - home.eye_dir()).length() < 1e-2);
+        let (r0, _) = home.screen_basis();
+        let (r1, _) = cam.screen_basis();
+        assert!((r0 - r1).length() < 1e-2);
+    }
+
+    #[test]
+    fn orbit_direction_matches_turntable_feel() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset(ViewPreset::Front);
+        // Seret ke bawah: mata naik (melihat lebih dari atas).
+        cam.orbit(0.0, 20.0);
+        assert!(cam.eye_dir().z > 0.0);
+        // Seret ke kanan dari depan: mata bergeser ke −X (searah jarum jam
+        // dari atas), seperti yaw berkurang pada turntable.
+        let mut cam = OrbitCamera::default();
+        cam.set_preset(ViewPreset::Front);
+        cam.orbit(20.0, 0.0);
+        assert!(cam.eye_dir().x < 0.0, "{:?}", cam.eye_dir());
+        // Masukan tak finit diabaikan.
+        let before = cam.clone();
+        cam.orbit(f32::NAN, 0.0);
+        assert_eq!(cam, before);
+    }
+
+    #[test]
+    fn upright_realigns_screen_up_to_world_z() {
+        let mut cam = OrbitCamera::default();
+        for _ in 0..37 {
+            cam.orbit(13.0, 7.0);
+        }
+        let dir = cam.eye_dir();
+        cam.upright();
+        assert!((cam.eye_dir() - dir).length() < 1e-5, "arah pandang tetap");
+        let (right, up) = cam.screen_basis();
+        assert!(right.z.abs() < 1e-5);
+        assert!(up.z > 0.0);
+        // Memandang lurus sepanjang Z: tidak NaN, atas = +Y.
+        cam.set_preset(ViewPreset::Top);
+        cam.upright();
+        assert!(cam.rotation.is_finite());
+        assert!((cam.screen_basis().1 - Vec3::Y).length() < 1e-5);
     }
 
     #[test]
@@ -388,11 +527,53 @@ mod tests {
     fn presets_apply() {
         let mut cam = OrbitCamera::default();
         cam.set_preset(ViewPreset::Top);
-        assert!((cam.pitch - 89f32.to_radians()).abs() < 1e-4);
+        assert!((cam.elevation() - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        assert!((cam.screen_basis().1 - Vec3::Y).length() < 1e-5);
+        cam.set_preset(ViewPreset::Bottom);
+        assert!((cam.screen_basis().1 + Vec3::Y).length() < 1e-5);
         cam.set_preset(ViewPreset::Front);
-        assert!(cam.pitch.abs() < 1e-4);
+        assert!(cam.elevation().abs() < 1e-4);
         // Dari depan (−Y) melihat ke +Y: mata di y negatif.
         assert!(cam.eye().y < cam.target.y);
+        // Tampilan ortogonal selalu mengarah tepat ke sumbu.
+        for (p, dir) in [
+            (ViewPreset::Right, Vec3::X),
+            (ViewPreset::Left, -Vec3::X),
+            (ViewPreset::Back, Vec3::Y),
+        ] {
+            cam.set_preset(p);
+            assert!((cam.eye_dir() - dir).length() < 1e-5, "{p:?}");
+            assert!((cam.screen_basis().1 - Vec3::Z).length() < 1e-5, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn side_preset_lays_stack_left_to_right() {
+        let mut cam = OrbitCamera::default();
+        cam.set_preset(ViewPreset::Side);
+        let (right, up) = cam.screen_basis();
+        // +Z dunia (irisan berikutnya) ke kanan layar; dilihat dari −Y.
+        assert!((right - Vec3::Z).length() < 1e-5, "{right:?}");
+        assert!((cam.eye_dir() + Vec3::Y).length() < 1e-5);
+        assert!(up.z.abs() < 1e-5);
+        // Titik dengan z lebih besar jatuh lebih ke kanan di layar.
+        let vp = cam.view_proj(1.0);
+        let lo = vp * Vec3::new(0.0, 0.0, -5.0).extend(1.0);
+        let hi = vp * Vec3::new(0.0, 0.0, 5.0).extend(1.0);
+        assert!(hi.x / hi.w > lo.x / lo.w);
+    }
+
+    #[test]
+    fn view_matrix_is_consistent_with_basis() {
+        let mut cam = OrbitCamera::default();
+        cam.orbit(-31.0, 44.0);
+        let v = cam.view();
+        let (right, up) = cam.screen_basis();
+        // Titik target + right harus muncul di +x mata, target + up di +y mata.
+        let r = v.transform_point3(cam.target + right);
+        let u = v.transform_point3(cam.target + up);
+        assert!(r.x > 0.99 && r.y.abs() < 1e-4, "{r:?}");
+        assert!(u.y > 0.99 && u.x.abs() < 1e-4, "{u:?}");
     }
 
     #[test]

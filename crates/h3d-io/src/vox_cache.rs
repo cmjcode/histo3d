@@ -29,6 +29,8 @@ struct VoxHeader {
 #[derive(Serialize, Deserialize)]
 struct MeshHeader {
     label: u8,
+    #[serde(default)]
+    instance_id: Option<u32>,
     n_vertices: usize,
     n_normals: usize,
     n_indices: usize,
@@ -115,6 +117,7 @@ pub fn encode_mesh(mesh: &LabelMesh) -> Result<Vec<u8>, IoError> {
         .collect();
     let header = MeshHeader {
         label: mesh.label.0,
+        instance_id: mesh.instance_id,
         n_vertices: n,
         n_normals: mesh.normals.len(),
         n_indices: mesh.indices.len(),
@@ -216,5 +219,6 @@ pub fn decode_mesh(bytes: &[u8], path: &Path) -> Result<LabelMesh, IoError> {
         normals,
         indices,
         scalars,
+        instance_id: h.instance_id,
     })
 }

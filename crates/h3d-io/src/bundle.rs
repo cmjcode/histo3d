@@ -168,6 +168,10 @@ impl ProjectBundle {
     pub fn analysis_json(&self) -> PathBuf {
         self.out_dir().join("analysis.json")
     }
+    /// `out/tracks.json` (penautan objek antar irisan).
+    pub fn tracks_json(&self) -> PathBuf {
+        self.out_dir().join(crate::tracks::TRACKS_FILE)
+    }
     /// `out/report.md`.
     pub fn report_md(&self) -> PathBuf {
         self.out_dir().join("report.md")
@@ -225,6 +229,23 @@ impl ProjectBundle {
                 write_atomic(&path, &bytes)
             }
         }
+    }
+
+    // ---- tracks.json ----
+
+    /// Muat `out/tracks.json`; `None` bila berkas tidak ada.
+    pub fn load_tracks(&self) -> Result<Option<crate::tracks::TracksFile>, IoError> {
+        let path = self.tracks_json();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = read_file(&path)?;
+        crate::tracks::decode_tracks(&bytes, &path).map(Some)
+    }
+
+    /// Tulis `out/tracks.json` (atomik: `.tmp` lalu `rename`).
+    pub fn save_tracks(&self, file: &crate::tracks::TracksFile) -> Result<(), IoError> {
+        write_atomic(&self.tracks_json(), &crate::tracks::encode_tracks(file)?)
     }
 
     // ---- label & atribut ----

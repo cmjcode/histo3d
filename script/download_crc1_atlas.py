@@ -168,6 +168,36 @@ def format_size(num_bytes: float) -> str:
     return f"{num_bytes:.2f} PB"
 
 
+def format_eta(seconds: float) -> str:
+    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+        return "--:--"
+    sec = int(seconds + 0.5)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def make_bar(done: int, total: int, width: int = 24) -> str:
+    ratio = min(max(done / total, 0.0), 1.0) if total > 0 else 1.0
+    filled = int(round(ratio * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+def render_progress(done: int, total: int, speed: float) -> None:
+    eta = (total - done) / speed if speed > 0 and total > done else 0.0
+    pct = 100.0 * done / total if total > 0 else 100.0
+    bar = make_bar(done, total)
+    line = (
+        f"    [{bar}] {pct:5.1f}%  {format_size(done)}/{format_size(total)}"
+        f"  {format_size(speed)}/s  ETA {format_eta(eta)}"
+    )
+    if sys.stdout.isatty():
+        sys.stdout.write("\r\033[K" + line)
+    else:
+        sys.stdout.write("\r" + line + "   ")
+    sys.stdout.flush()
+
+
 def s3_etag_matches(path: Path, etag: str) -> bool | None:
     """
     Cocokkan berkas lokal dengan ETag S3. ETag biasa = MD5; ETag multipart
@@ -230,20 +260,15 @@ def download_resumable(key: str, size: int, dest: Path, retries: int = 5) -> str
                     have = 0  # server mengabaikan Range: mulai ulang
                 mode = "ab" if have else "wb"
                 with open(tmp, mode) as out:
-                    t0, done0, last = time.time(), have, 0.0
+                    t0, done0, last = time.monotonic(), have, 0.0
+                    render_progress(have, size, 0.0)
                     for chunk in iter(lambda: resp.read(CHUNK), b""):
                         out.write(chunk)
                         have += len(chunk)
-                        now = time.time()
-                        if now - last >= 1.0:
+                        now = time.monotonic()
+                        if now - last >= 0.2 or have >= size:
                             speed = (have - done0) / max(now - t0, 1e-6)
-                            eta = (size - have) / speed if speed > 0 else 0
-                            print(
-                                f"\r    {100 * have / size:5.1f}%  {format_size(have)} / {format_size(size)}"
-                                f"  {format_size(speed)}/s  sisa ~{eta / 60:.0f} mnt   ",
-                                end="",
-                                flush=True,
-                            )
+                            render_progress(have, size, speed)
                             last = now
             print()
         except (urllib.error.URLError, OSError, http.client.HTTPException) as e:

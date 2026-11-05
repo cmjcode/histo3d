@@ -33,6 +33,12 @@ pub struct ReconConfig {
     pub default_spacing_um: f64,
     /// Resolusi label, µm/px (bawaan 4).
     pub mpp_label: f64,
+    /// Rekonstruksi per objek: komponen label ditautkan antar irisan
+    /// (`h3d_volume::track`) dan tiap objek menjadi mesh terpisah
+    /// `<Label>#<id>` (bawaan `false`).
+    pub per_object: bool,
+    /// Ambang IoU penautan objek antar irisan bertetangga (bawaan 0,2).
+    pub track_min_iou: f64,
 }
 
 impl Default for ReconConfig {
@@ -46,6 +52,8 @@ impl Default for ReconConfig {
             decimate_error_factor: 0.5,
             default_spacing_um: 50.0,
             mpp_label: 4.0,
+            per_object: false,
+            track_min_iou: 0.2,
         }
     }
 }

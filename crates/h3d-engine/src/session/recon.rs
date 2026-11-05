@@ -7,12 +7,14 @@ use std::path::PathBuf;
 use h3d_core::{LabelDef, LabelId, Progress, SlideId, SlideStatus, SlideTransform, SubProgress};
 use h3d_io::{
     decode_mesh, decode_vox, encode_mesh, encode_vox, write_atomic, AttrReport, GridInfo,
-    GroupMember, GroupReport, LabelReport, ProvenanceReport, Report, SlideSummary,
+    GroupMember, GroupReport, LabelReport, ObjectReport, ProvenanceReport, Report, SlideSummary,
+    TracksFile,
 };
 use h3d_segment::LabelStore;
 use h3d_volume::{
     build_voxel_mask, cavalieri, cavalieri_areas, measure_label, plan_grid, reconstruct_label,
-    GridPlan, LabelMesh, LabelSampler, SliceInput, VoxelMask, Warning,
+    reconstruct_label_objects, track_label, GridPlan, LabelMesh, LabelSampler, SliceInput,
+    TrackParams, TrackSet, VoxelMask, Warning,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +77,41 @@ struct CacheManifest {
     plan: GridPlan,
     mask_labels: Vec<u8>,
     mesh_labels: Vec<u8>,
+    /// Id objek per mesh (sejajar `mesh_labels`); kosong = semua `None`.
+    #[serde(default)]
+    mesh_instances: Vec<Option<u32>>,
+}
+
+/// Mesh satu label untuk baris laporan per label: mesh label utuh bila ada,
+/// atau gabungan semua mesh per objek label itu (rekonstruksi per objek).
+/// `None` bila label tidak punya mesh.
+fn label_mesh(meshes: &[LabelMesh], label: LabelId) -> Option<Cow<'_, LabelMesh>> {
+    if let Some(m) = meshes
+        .iter()
+        .find(|m| m.label == label && m.instance_id.is_none())
+    {
+        return Some(Cow::Borrowed(m));
+    }
+    let parts: Vec<&LabelMesh> = meshes.iter().filter(|m| m.label == label).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut out = LabelMesh::empty(label);
+    for m in parts {
+        let base = out.positions_um.len() as u32;
+        out.positions_um.extend_from_slice(&m.positions_um);
+        out.normals.extend_from_slice(&m.normals);
+        out.indices.extend(m.indices.iter().map(|i| i + base));
+    }
+    Some(Cow::Owned(out))
+}
+
+/// Nama berkas mesh di cache: `LLL.mesh` atau `LLL_IIII.mesh` per objek.
+fn mesh_cache_name(label: u8, instance: Option<u32>) -> String {
+    match instance {
+        Some(i) => format!("{label:03}_{i:04}.mesh"),
+        None => format!("{label:03}.mesh"),
+    }
 }
 
 impl Session {
@@ -176,8 +213,9 @@ impl Session {
             masks.push((LabelId(*l), decode_vox(&b, &path).ok()?));
         }
         let mut meshes = Vec::new();
-        for l in &manifest.mesh_labels {
-            let path = dir.join(format!("{l:03}.mesh"));
+        for (k, l) in manifest.mesh_labels.iter().enumerate() {
+            let inst = manifest.mesh_instances.get(k).copied().flatten();
+            let path = dir.join(mesh_cache_name(*l, inst));
             let b = std::fs::read(&path).ok()?;
             meshes.push(decode_mesh(&b, &path).ok()?);
         }
@@ -205,7 +243,7 @@ impl Session {
         }
         for m in &state.meshes {
             write_atomic(
-                &dir.join(format!("{:03}.mesh", m.label.0)),
+                &dir.join(mesh_cache_name(m.label.0, m.instance_id)),
                 &encode_mesh(m)?,
             )?;
         }
@@ -214,6 +252,7 @@ impl Session {
             plan: state.plan.clone(),
             mask_labels: state.masks.iter().map(|(l, _)| l.0).collect(),
             mesh_labels: state.meshes.iter().map(|m| m.label.0).collect(),
+            mesh_instances: state.meshes.iter().map(|m| m.instance_id).collect(),
         };
         let json = serde_json::to_vec(&manifest)
             .map_err(|e| h3d_io::IoError::json(dir.join("plan.json"), e))?;
@@ -256,13 +295,26 @@ impl Session {
                 let plan = plan_grid(&inputs, &ids, cfg, &self.budgets)?;
                 let mut masks = Vec::new();
                 let mut meshes = Vec::new();
+                let mut sets: Vec<TrackSet> = Vec::new();
                 let n = labels.len().max(1) as f32;
                 for (i, l) in labels.iter().enumerate() {
                     if p.is_cancelled() {
                         return Err(EngineError::Cancelled);
                     }
                     let sub = SubProgress::new(p, i as f32 / n, (i + 1) as f32 / n);
-                    if l.reconstruct {
+                    if l.reconstruct && cfg.per_object {
+                        // Per objek: masker label utuh untuk analisis spasial,
+                        // mesh terpisah per objek hasil penautan antar irisan.
+                        let sub_a = SubProgress::new(&sub, 0.0, 0.25);
+                        masks.push((l.id, build_voxel_mask(&plan, &inputs, l.id.0, cfg, &sub_a)?));
+                        let sub_b = SubProgress::new(&sub, 0.25, 1.0);
+                        let params = self.track_params(None);
+                        let (set, obj) = reconstruct_label_objects(
+                            &plan, &inputs, l.id.0, cfg, &params, &sub_b,
+                        )?;
+                        meshes.extend(obj);
+                        sets.push(set);
+                    } else if l.reconstruct {
                         let (mask, mesh) = reconstruct_label(&plan, &inputs, l.id.0, cfg, &sub)?;
                         masks.push((l.id, mask));
                         meshes.push(mesh);
@@ -272,6 +324,12 @@ impl Session {
                 }
                 if p.is_cancelled() {
                     return Err(EngineError::Cancelled);
+                }
+                if !sets.is_empty() {
+                    // Gagal menulis tracks.json bukan galat rekonstruksi.
+                    if let Err(e) = self.save_track_sets(sets) {
+                        log::warn!("gagal menulis out/tracks.json: {e}");
+                    }
                 }
                 (
                     ReconState {
@@ -303,6 +361,72 @@ impl Session {
         self.write_label_volume_logged();
         p.set(1.0, "rekonstruksi selesai");
         Ok(meshes)
+    }
+
+    /// Parameter penautan dari konfigurasi proyek; `min_iou` menimpa
+    /// `recon.track_min_iou`.
+    fn track_params(&self, min_iou: Option<f64>) -> TrackParams {
+        TrackParams {
+            min_iou: min_iou.unwrap_or(self.project.recon.track_min_iou),
+            max_gap_um: self.project.recon.max_gap_um,
+        }
+    }
+
+    /// Gabungkan `sets` ke `out/tracks.json` (set lama label lain tetap).
+    fn save_track_sets(&self, sets: Vec<TrackSet>) -> Result<(), EngineError> {
+        let mut file = match self.bundle.load_tracks() {
+            Ok(Some(f)) => f,
+            Ok(None) => TracksFile::new(APP_VERSION),
+            Err(e) => {
+                log::warn!("tracks.json lama tidak terbaca, ditulis ulang: {e}");
+                TracksFile::new(APP_VERSION)
+            }
+        };
+        file.app_version = APP_VERSION.to_owned();
+        for s in sets {
+            file.put(s);
+        }
+        self.bundle.save_tracks(&file)?;
+        Ok(())
+    }
+
+    /// `out/tracks.json` yang tersimpan; `None` bila belum ada.
+    pub fn tracks(&self) -> Result<Option<TracksFile>, EngineError> {
+        Ok(self.bundle.load_tracks()?)
+    }
+
+    /// Tautkan objek (instance) `label` antar irisan (`h3d_volume::track`)
+    /// pada kisi rekonstruksi, simpan hasilnya ke `out/tracks.json`
+    /// (atomik), dan kembalikan set-nya. `min_iou` menimpa
+    /// `ReconConfig::track_min_iou`; celah maksimum mengikuti rekonstruksi.
+    /// Tidak mengubah label, urutan, maupun orientasi irisan.
+    pub fn track(
+        &mut self,
+        label: LabelId,
+        min_iou: Option<f64>,
+        p: &dyn Progress,
+    ) -> Result<TrackSet, EngineError> {
+        if self.project.label(label).is_none() {
+            return Err(EngineError::invalid(format!("label {label} tidak ada")));
+        }
+        let data = self.slice_data()?;
+        if data.is_empty() {
+            return Err(h3d_volume::VolError::NoLabelledSlices.into());
+        }
+        let params = self.track_params(min_iou);
+        let set = {
+            let samplers: Vec<StoreSampler<'_>> =
+                data.iter().map(|d| StoreSampler(&d.store)).collect();
+            let inputs = slice_inputs(&data, &samplers);
+            let cfg = &self.project.recon;
+            p.set(0.0, "merencanakan kisi");
+            let plan = plan_grid(&inputs, &[label.0], cfg, &self.budgets)?;
+            let sub = SubProgress::new(p, 0.05, 0.95);
+            track_label(&plan, &inputs, label.0, &params, &sub)?
+        };
+        self.save_track_sets(vec![set.clone()])?;
+        p.set(1.0, "penautan objek selesai");
+        Ok(set)
     }
 
     /// `out/volume/labels.nii.gz` (8.7.1).
@@ -433,12 +557,10 @@ impl Session {
                 .collect();
             let n_reviewed = reviewed_areas.len();
             let volume_reviewed = (n_reviewed >= 2).then(|| cavalieri(&reviewed_areas));
-            let mesh = recon
-                .as_ref()
-                .and_then(|r| r.meshes.iter().find(|m| m.label == l.id));
+            let mesh = recon.as_ref().and_then(|r| label_mesh(&r.meshes, l.id));
             let row = match mesh {
                 Some(mesh) => {
-                    let m = measure_label(mesh, &inputs, id, shrink);
+                    let m = measure_label(&mesh, &inputs, id, shrink);
                     for w in &m.warnings {
                         if !report.warnings.contains(w) {
                             report.warnings.push(w.clone());
@@ -485,6 +607,42 @@ impl Session {
                 }
             };
             report.labels.push(row);
+        }
+
+        // Objek (rekonstruksi per objek): satu baris per mesh ber-`instance_id`.
+        if let Some(r) = &recon {
+            let tracks = match self.bundle.load_tracks() {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("tracks.json tidak terbaca: {e}");
+                    None
+                }
+            };
+            for m in r.meshes.iter().filter(|m| m.instance_id.is_some()) {
+                let Some(id) = m.instance_id else {
+                    continue;
+                };
+                let name = labels
+                    .iter()
+                    .find(|l| l.id == m.label)
+                    .map_or_else(|| m.label.to_string(), |l| l.name.clone());
+                let track = tracks
+                    .as_ref()
+                    .and_then(|t| t.set(m.label))
+                    .and_then(|s| s.track(id));
+                report.objects.push(ObjectReport {
+                    label: m.label,
+                    name: m.display_name(&name),
+                    instance_id: id,
+                    volume_mesh_um3: m.signed_volume_um3(),
+                    surface_area_um2: m.surface_area_um2(),
+                    bbox_um: m.bbox(),
+                    max_diameter_um: m.max_diameter_um(),
+                    n_components: m.connected_components(),
+                    n_slices: track.map(|t| t.members.len()),
+                    z_range_um: track.and_then(|t| t.z_range_um()),
+                });
+            }
         }
 
         // Grup: volume grup = jumlah volume anggota (8.12.4).

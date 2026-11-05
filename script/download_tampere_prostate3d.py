@@ -44,9 +44,11 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -122,6 +124,83 @@ def format_size(num_bytes: float) -> str:
     return f"{num_bytes:.2f} PB"
 
 
+def format_eta(seconds: float) -> str:
+    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+        return "--:--"
+    sec = int(seconds + 0.5)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def make_bar(done: int, total: int, width: int = 24) -> str:
+    ratio = min(max(done / total, 0.0), 1.0) if total > 0 else 1.0
+    filled = int(round(ratio * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+class DownloadProgress:
+    """Progress bar thread-safe untuk unduhan paralel."""
+
+    def __init__(self, total_files: int, total_bytes: int) -> None:
+        self.total_files = total_files
+        self.total_bytes = total_bytes
+        self.done_files = 0
+        self.done_bytes = 0
+        self.net_bytes = 0
+        self.t0 = time.monotonic()
+        self.last_draw = 0.0
+        self.lock = threading.Lock()
+        self.is_tty = sys.stdout.isatty()
+
+    def _bar_line(self) -> str:
+        elapsed = max(time.monotonic() - self.t0, 1e-6)
+        speed = max(self.net_bytes, 0) / elapsed
+        remaining = max(self.total_bytes - self.done_bytes, 0)
+        eta = remaining / speed if speed > 0 else float("inf")
+        pct = 100.0 * self.done_bytes / self.total_bytes if self.total_bytes else 100.0
+        bar = make_bar(self.done_bytes, self.total_bytes)
+        return (
+            f"  [{bar}] {pct:5.1f}%  {format_size(self.done_bytes)}/{format_size(self.total_bytes)}"
+            f"  {format_size(speed)}/s  ETA {format_eta(eta)}"
+            f"  ({self.done_files}/{self.total_files})"
+        )
+
+    def add_chunk(self, delta: int, counted_for_speed: bool = True) -> None:
+        with self.lock:
+            self.done_bytes = max(0, self.done_bytes + delta)
+            if counted_for_speed:
+                self.net_bytes = max(0, self.net_bytes + delta)
+            now = time.monotonic()
+            if self.is_tty and (now - self.last_draw >= 0.08):
+                sys.stdout.write("\r\033[K" + self._bar_line())
+                sys.stdout.flush()
+                self.last_draw = now
+
+    def file_finished(self, entry: dict, status: str) -> None:
+        with self.lock:
+            self.done_files += 1
+            pct = 100.0 * self.done_bytes / self.total_bytes if self.total_bytes else 100.0
+            msg = (
+                f"  [{self.done_files:4d}/{self.total_files}] {pct:5.1f}% {status:6s} "
+                f"{entry['stack']}/{entry['type']}/{entry['name']} ({format_size(entry['size'])})"
+            )
+            if self.is_tty:
+                sys.stdout.write("\r\033[K" + msg + "\n" + self._bar_line())
+                sys.stdout.flush()
+                self.last_draw = time.monotonic()
+            else:
+                print(msg, flush=True)
+
+    def finish(self) -> None:
+        with self.lock:
+            if self.is_tty:
+                sys.stdout.write("\r\033[K" + self._bar_line() + "\n")
+                sys.stdout.flush()
+            else:
+                print(self._bar_line(), flush=True)
+
+
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -147,9 +226,16 @@ def authorize(file_path: str) -> str:
     return url
 
 
-def download_one(entry: dict, dest: Path, retries: int = 3) -> str:
+def download_one(
+    entry: dict,
+    dest: Path,
+    retries: int = 3,
+    on_chunk: Callable[[int, bool], None] | None = None,
+) -> str:
     """Unduh satu berkas secara atomik (.part lalu rename) dan verifikasi SHA-256."""
     if is_valid(dest, entry):
+        if on_chunk:
+            on_chunk(entry["size"], False)
         return "lewati"
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -157,13 +243,17 @@ def download_one(entry: dict, dest: Path, retries: int = 3) -> str:
     last_error: Exception | None = None
 
     for attempt in range(1, retries + 1):
+        attempt_bytes = 0
         try:
             url = authorize(entry["path"])
             h = hashlib.sha256()
             with http_request(url, timeout=120) as resp, open(tmp, "wb") as out:
-                for chunk in iter(lambda: resp.read(1024 * 1024), b""):
+                for chunk in iter(lambda: resp.read(256 * 1024), b""):
                     out.write(chunk)
                     h.update(chunk)
+                    attempt_bytes += len(chunk)
+                    if on_chunk:
+                        on_chunk(len(chunk), True)
             size = tmp.stat().st_size
             if size != entry["size"]:
                 raise RuntimeError(f"ukuran {size} != {entry['size']}")
@@ -173,6 +263,8 @@ def download_one(entry: dict, dest: Path, retries: int = 3) -> str:
             return "unduh"
         except (urllib.error.URLError, OSError, RuntimeError, ValueError) as e:
             last_error = e
+            if attempt_bytes and on_chunk:
+                on_chunk(-attempt_bytes, True)
             if tmp.exists():
                 tmp.unlink()
             if attempt < retries:
@@ -226,6 +318,16 @@ def write_dataset_info(out_dir: Path, stacks: list[str], files: list[dict]) -> N
     }
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / "dataset_info.json"
+    # Pertahankan nilai mpp (dan sumbernya) yang sudah diisi tangan dari sumber
+    # resmi pada unduhan sebelumnya; skrip ini sendiri tidak pernah menebaknya.
+    if target.exists():
+        try:
+            old = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            old = {}
+        for key in ("mpp_um", "mpp_um_source", "sub4_mpp_um", "spacing_um"):
+            if old.get(key) is not None:
+                info[key] = old[key]
     tmp = target.with_name(target.name + ".tmp")
     tmp.write_text(json.dumps(info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(tmp, target)
@@ -301,27 +403,30 @@ def main() -> int:
     def dest_of(f: dict) -> Path:
         return args.out / f["stack"] / f["type"] / f["name"]
 
-    done_bytes = 0
     failures: list[str] = []
     counts = {"unduh": 0, "lewati": 0}
+    progress = DownloadProgress(total_files=len(selected), total_bytes=total)
+    progress.add_chunk(0, False)
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {pool.submit(download_one, f, dest_of(f)): f for f in selected}
-        for i, fut in enumerate(as_completed(futures), start=1):
+        futures = {
+            pool.submit(download_one, f, dest_of(f), on_chunk=progress.add_chunk): f
+            for f in selected
+        }
+        for fut in as_completed(futures):
             f = futures[fut]
             try:
                 status = fut.result()
                 counts[status] += 1
-                done_bytes += f["size"]
             except RuntimeError as e:
                 failures.append(str(e))
                 status = "GAGAL"
-            pct = 100.0 * done_bytes / total if total else 100.0
-            print(f"  [{i:4d}/{len(selected)}] {pct:5.1f}% {status:6s} {f['stack']}/{f['type']}/{f['name']}")
+            progress.file_finished(f, status)
+    progress.finish()
 
     write_dataset_info(args.out, stacks, files)
 
     print(f"\nSelesai: {counts['unduh']} diunduh, {counts['lewati']} sudah ada, {len(failures)} gagal.")
-    print(f"Metadata: {args.out / 'dataset_info.json'} (mpp_um = null, tidak ditebak)")
+    print(f"Metadata: {args.out / 'dataset_info.json'} (mpp_um tidak ditebak; nilai yang sudah diisi dipertahankan)")
     print(f"Atribusi (CC BY 4.0): {CITATION}")
     if failures:
         print("\nBerkas gagal (jalankan ulang perintah yang sama untuk mencoba lagi):", file=sys.stderr)

@@ -36,6 +36,10 @@ pub struct LabelMesh {
     pub indices: Vec<u32>,
     /// Skalar per verteks.
     pub scalars: Vec<MeshScalars>,
+    /// Id objek (instance) bila mesh hasil rekonstruksi per objek
+    /// (`h3d_volume::track`); `None` untuk mesh satu label utuh.
+    #[serde(default)]
+    pub instance_id: Option<u32>,
 }
 
 #[inline]
@@ -128,6 +132,16 @@ impl LabelMesh {
             normals: Vec::new(),
             indices: Vec::new(),
             scalars: Vec::new(),
+            instance_id: None,
+        }
+    }
+
+    /// Nama tampilan mesh: `name` untuk mesh label utuh, `name#id` untuk
+    /// mesh per objek.
+    pub fn display_name(&self, label_name: &str) -> String {
+        match self.instance_id {
+            Some(id) => format!("{label_name}#{id}"),
+            None => label_name.to_owned(),
         }
     }
 
@@ -1093,6 +1107,7 @@ mod tests {
             normals: Vec::new(),
             indices: vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
             scalars: Vec::new(),
+            instance_id: None,
         }
     }
 

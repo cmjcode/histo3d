@@ -68,6 +68,45 @@ impl Progress for AlwaysCancelled {
 }
 
 #[test]
+fn tissue_thumbnail_has_transparent_background_and_is_cached() {
+    let sh = shared();
+    let dir = sh.root.path().join("thumb-tissue").join("p.h3d");
+    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    let mut s = Session::create(&dir).unwrap();
+    let ids = s
+        .import_slides(&sh.slide_paths(), Some([16.0, 16.0]), &NoProgress)
+        .unwrap();
+    let mid = ids[ids.len() / 2];
+
+    let plain = s.thumbnail(mid, 64).unwrap();
+    let tissue = s.thumbnail_tissue(mid, 64).unwrap();
+    assert_eq!(plain.dimensions(), tissue.dimensions());
+    // RGB tidak berubah; hanya kanal alfa yang diisi masker jaringan.
+    for (p, t) in plain.pixels().zip(tissue.pixels()) {
+        assert_eq!(p.0[..3], t.0[..3]);
+    }
+    let (w, h) = tissue.dimensions();
+    assert_eq!(plain.get_pixel(0, 0).0[3], 255, "thumbnail biasa opak");
+    assert_eq!(tissue.get_pixel(0, 0).0[3], 0, "sudut (kaca) transparan");
+    assert_eq!(
+        tissue.get_pixel(w / 2, h / 2).0[3],
+        255,
+        "pusat fantom opak"
+    );
+    assert!(
+        tissue.pixels().any(|p| p.0[3] > 0 && p.0[3] < 255),
+        "tepi dilunakkan"
+    );
+
+    // Panggilan kedua datang dari cache dan identik.
+    assert_eq!(s.thumbnail_tissue(mid, 64).unwrap(), tissue);
+    assert!(std::fs::read_dir(dir.join("cache").join("thumbs"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| e.file_name().to_string_lossy().ends_with("-64-tissue.png")));
+}
+
+#[test]
 fn import_without_mpp_is_error_and_with_mpp_reopens_identically() {
     let sh = shared();
     let dir = sh.root.path().join("impor").join("p.h3d");

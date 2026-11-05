@@ -9,3 +9,10 @@ build.sh
 
 # Skrip build lokal
 build.sh
+
+# Pelatihan ML (workspace ml/)
+/ml/target
+/ml/cache
+/ml/runs
+*.onnx
+*.bpk

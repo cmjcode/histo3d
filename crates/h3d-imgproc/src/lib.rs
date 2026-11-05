@@ -59,5 +59,5 @@ pub use pyramid::{
     downsample2_attr_weighted, downsample2_f32, downsample2_label_mode, downsample2_rgba, half_size,
 };
 pub use threshold::{otsu, otsu_masked};
-pub use tissue::tissue_mask;
+pub use tissue::{apply_tissue_alpha, mask_to_alpha, tissue_alpha, tissue_mask, FEATHER_PX};
 pub use warp::{resize_f32, warp_affine_f32, warp_affine_rgba, warp_affine_u8, Interp};

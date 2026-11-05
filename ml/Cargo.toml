@@ -1,0 +1,43 @@
+# Workspace terpisah untuk pelatihan model (histo3d.md Fase 2, versi Rust).
+# Sengaja bukan anggota workspace utama: burn + wgpu berat dikompilasi dan
+# tidak boleh masuk pohon dependensi `h3d-app` maupun target iOS.
+[workspace]
+resolver = "2"
+members = ["h3d-train"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Yulius Jayuda <yulius.jayuda@gmail.com>"]
+rust-version = "1.96"
+
+[workspace.dependencies]
+h3d-core = { path = "../crates/h3d-core", version = "0.0.1" }
+h3d-imgproc = { path = "../crates/h3d-imgproc", version = "0.0.1" }
+h3d-segment = { path = "../crates/h3d-segment", version = "0.0.1" }
+burn = { version = "0.22", default-features = false, features = ["std", "optim", "wgpu", "metal", "autotune", "flex", "autodiff"] }
+tract-onnx = "0.23"
+prost = "0.14"
+image = { version = "0.25", default-features = false, features = ["png"] }
+ndarray = "0.17"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+rand = "0.9"
+rand_chacha = "0.9"
+tempfile = "3"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3

@@ -12,7 +12,8 @@ use std::process::ExitCode;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use h3d_core::{
-    AttrDef, AttrKind, ClinicalMeta, IhcScoring, NoProgress, SlideId, Stain, StainPattern,
+    AttrDef, AttrKind, ClinicalMeta, IhcScoring, LabelKind, NoProgress, SlideId, Stain,
+    StainPattern,
 };
 use h3d_engine::phantom::{write_phantom, PhantomOptions, PhantomShapeKind};
 use h3d_engine::{
@@ -159,6 +160,10 @@ enum Command {
         /// Galat decimate relatif terhadap ukuran voxel.
         #[arg(long)]
         decimate: Option<f64>,
+        /// Rekonstruksi per objek: komponen label ditautkan antar irisan dan
+        /// tiap objek menjadi mesh terpisah `<Label>#<id>`.
+        #[arg(long = "per-object")]
+        per_object: bool,
     },
     /// Tabel pengukuran per label.
     Measure {
@@ -233,6 +238,20 @@ enum Command {
     },
     /// Buat data uji sintetis dengan kebenaran dasar.
     Phantom(PhantomArgs),
+    /// Tautkan objek (instance) satu label antar irisan; menulis `out/tracks.json`.
+    Track {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Nama label.
+        #[arg(long)]
+        label: String,
+        /// Ambang IoU penautan (0..1; bawaan dari konfigurasi proyek, 0,2).
+        #[arg(long = "min-iou")]
+        min_iou: Option<f64>,
+        /// Keluaran JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -247,6 +266,45 @@ enum LabelsCommand {
         /// Berkas GeoJSON.
         #[arg(long)]
         geojson: PathBuf,
+    },
+    /// Impor masker raster PNG (piksel bukan-nol → label) ke satu irisan,
+    /// hanya pada piksel yang masih kosong. Label dibuat bila belum ada.
+    #[command(name = "import-mask")]
+    ImportMask {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Id irisan.
+        #[arg(long)]
+        slide: u32,
+        /// Berkas masker PNG (8/16-bit, grayscale/RGB; bukan-nol = label).
+        #[arg(long)]
+        mask: PathBuf,
+        /// µm per piksel masker (wajib; tidak pernah ditebak).
+        #[arg(long)]
+        mpp: f64,
+        /// Nama label tujuan.
+        #[arg(long)]
+        label: String,
+    },
+    /// Bandingkan label satu irisan dengan masker raster PNG (koefisien Dice).
+    Diff {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Id irisan.
+        #[arg(long)]
+        slide: u32,
+        /// Nama label.
+        #[arg(long)]
+        label: String,
+        /// Berkas masker PNG pembanding.
+        #[arg(long)]
+        mask: PathBuf,
+        /// µm per piksel masker.
+        #[arg(long)]
+        mpp: f64,
+        /// Keluaran JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -466,6 +524,33 @@ fn warn_about_slide_files(s: &Session) {
             name(id)
         );
     }
+}
+
+/// Id label bernama `name`; bila belum ada di tabel, buat label baru jenis
+/// `Other` dengan warna deterministik dari id-nya.
+fn label_or_create(s: &mut Session, name: &str) -> Result<h3d_core::LabelId> {
+    if let Ok(id) = s.label_by_name(name) {
+        return Ok(id);
+    }
+    let next = s
+        .project()
+        .next_label_id()
+        .ok_or_else(|| anyhow!("tabel label penuh (maksimum 255)"))?;
+    // Warna berbeda per id, tanpa acak: putar rona lewat perkalian modulo.
+    let hue = (u32::from(next.0) * 47) % 256;
+    let color = [
+        (hue.wrapping_mul(3) % 200 + 40) as u8,
+        (hue.wrapping_mul(7) % 200 + 40) as u8,
+        (hue.wrapping_mul(11) % 200 + 40) as u8,
+        255,
+    ];
+    let id = s.add_label(name, color, LabelKind::Other)?;
+    eprintln!(
+        "label \"{}\" belum ada; dibuat dengan id {}",
+        name.trim(),
+        id
+    );
+    Ok(id)
 }
 
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
@@ -752,6 +837,59 @@ fn run(cli: Cli) -> Result<Outcome> {
                 sum.imported, sum.features, sum.skipped_unknown_label, sum.skipped_geometry
             );
         }
+        Command::Labels {
+            command:
+                LabelsCommand::ImportMask {
+                    project,
+                    slide,
+                    mask,
+                    mpp,
+                    label,
+                },
+        } => {
+            let mut s = open(&project)?;
+            let id = label_or_create(&mut s, &label)?;
+            let sum = s.import_mask(SlideId(slide), &mask, mpp, id)?;
+            s.save()?;
+            println!(
+                "Masker diimpor ke irisan {slide} sebagai label \"{}\": {} piksel diisi ({:.1} µm², \
+                 hanya pada piksel kosong) dari {} piksel masker",
+                label.trim(),
+                sum.filled_px,
+                sum.area_um2,
+                sum.mask_px
+            );
+        }
+        Command::Labels {
+            command:
+                LabelsCommand::Diff {
+                    project,
+                    slide,
+                    label,
+                    mask,
+                    mpp,
+                    json,
+                },
+        } => {
+            let mut s = open(&project)?;
+            let id = s.label_by_name(&label)?;
+            let dice = s.dice_against_mask(SlideId(slide), id, &mask, mpp)?;
+            if json {
+                print_json(&json!({
+                    "slide": slide,
+                    "label": label.trim(),
+                    "mask": mask.display().to_string(),
+                    "mpp_mask": mpp,
+                    "dice": dice,
+                }))?;
+            } else {
+                println!(
+                    "Dice label \"{}\" irisan {slide} terhadap masker {}: {dice:.4}",
+                    label.trim(),
+                    mask.display()
+                );
+            }
+        }
         Command::Segment {
             project,
             model,
@@ -798,6 +936,7 @@ fn run(cli: Cli) -> Result<Outcome> {
             sxy,
             smooth,
             decimate,
+            per_object,
         } => {
             let mut s = open(&project)?;
             let mut cfg = s.project().recon.clone();
@@ -810,6 +949,9 @@ fn run(cli: Cli) -> Result<Outcome> {
             if let Some(v) = decimate {
                 cfg.decimate_error_factor = v;
             }
+            if per_object {
+                cfg.per_object = true;
+            }
             s.set_recon_config(cfg)?;
             s.save()?;
             let meshes = s.reconstruct(&NoProgress)?;
@@ -821,6 +963,7 @@ fn run(cli: Cli) -> Result<Outcome> {
                     .project()
                     .label(m.label)
                     .map_or_else(|| m.label.to_string(), |l| l.name.clone());
+                let name = m.display_name(&name);
                 println!(
                     "  {:<16} {:>8} verteks {:>8} segitiga  volume mesh {:.4} mm³",
                     name,
@@ -855,6 +998,19 @@ fn run(cli: Cli) -> Result<Outcome> {
                         l.n_slices_interpolated,
                         l.n_slices_reviewed
                     );
+                }
+                if !report.objects.is_empty() {
+                    println!("Objek               Mesh mm³    Luas mm²   Diameter mm  Irisan");
+                    for ob in &report.objects {
+                        println!(
+                            "{:<18} {:>11.4} {:>11.4} {:>13.3} {:>7}",
+                            ob.name,
+                            mm3(ob.volume_mesh_um3),
+                            ob.surface_area_um2 / 1.0e6,
+                            ob.max_diameter_um / 1000.0,
+                            ob.n_slices.map_or("-".to_owned(), |n| n.to_string())
+                        );
+                    }
                 }
                 println!(
                     "Ketidakpastian ukuran 3D: ± {:.3} mm",
@@ -1169,6 +1325,83 @@ fn run(cli: Cli) -> Result<Outcome> {
                 m.mpp,
                 m.spacing_um
             );
+        }
+        Command::Track {
+            project,
+            label,
+            min_iou,
+            json,
+        } => {
+            if let Some(v) = min_iou {
+                if !(v.is_finite() && (0.0..=1.0).contains(&v)) {
+                    bail!("--min-iou harus bilangan di antara 0 dan 1");
+                }
+            }
+            let mut s = open(&project)?;
+            let id = s.label_by_name(&label)?;
+            let set = s.track(id, min_iou, &NoProgress)?;
+            if json {
+                print_json(&set)?;
+            } else {
+                println!(
+                    "Penautan label \"{label}\": {} objek, {} peristiwa (IoU ≥ {:.2}, celah maks {:.0} µm, s_xy {} µm)",
+                    set.tracks.len(),
+                    set.event_count(),
+                    set.min_iou,
+                    set.max_gap_um,
+                    set.s_xy_um
+                );
+                println!(
+                    "  id  irisan   z awal (µm)   z akhir (µm)   luas rata-rata (mm²)  peristiwa"
+                );
+                for t in &set.tracks {
+                    let (z0, z1) = t.z_range_um().unwrap_or((f64::NAN, f64::NAN));
+                    let mean_area = if t.members.is_empty() {
+                        0.0
+                    } else {
+                        t.members.iter().map(|m| m.area_um2).sum::<f64>() / t.members.len() as f64
+                    };
+                    let events: Vec<String> = t
+                        .events
+                        .iter()
+                        .map(|e| match e {
+                            h3d_engine::TrackEvent::Split { children, .. } => format!(
+                                "pecah→{}",
+                                children
+                                    .iter()
+                                    .map(|c| c.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                            h3d_engine::TrackEvent::Merge { parents, .. } => format!(
+                                "gabung←{}",
+                                parents
+                                    .iter()
+                                    .map(|c| c.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                        })
+                        .collect();
+                    println!(
+                        "{:>4} {:>7} {:>13.0} {:>14.0} {:>22.4}  {}",
+                        t.instance_id,
+                        t.members.len(),
+                        z0,
+                        z1,
+                        mean_area / 1.0e6,
+                        if events.is_empty() {
+                            "-".to_owned()
+                        } else {
+                            events.join(" ")
+                        }
+                    );
+                }
+                for w in &set.warnings {
+                    println!("Peringatan: {}", h3d_engine::warning_text(w));
+                }
+                println!("Hasil ditulis ke {}", s.bundle().tracks_json().display());
+            }
         }
     }
     Ok(Outcome::Ok)

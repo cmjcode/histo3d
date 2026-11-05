@@ -19,6 +19,7 @@ pub mod mesh;
 pub mod phantom3d;
 pub mod recon;
 pub mod spatial;
+pub mod track;
 
 pub use error::VolError;
 pub use grid::StackGrid;
@@ -31,9 +32,9 @@ pub use phantom3d::{
     PhantomSpec, PhantomTruth,
 };
 pub use recon::{
-    build_label_stack, build_voxel_mask, extract_mesh, layer_sources, plan_grid, reconstruct_label,
-    resample_masks, GridPlan, LabelSampler, LabelStack, LayerSource, SdfProvider, SliceInput,
-    SphereSdf, VoxelMask,
+    build_label_stack, build_label_stack_from_masks, build_voxel_mask, extract_mesh, layer_sources,
+    plan_grid, reconstruct_label, reconstruct_label_objects, resample_masks, GridPlan,
+    LabelSampler, LabelStack, LayerSource, SdfProvider, SliceInput, SphereSdf, VoxelMask,
 };
 pub use spatial::{
     analyze, attr_stats, capsule_penetration, contact, depth, distance_uncertainty, foci,
@@ -41,4 +42,8 @@ pub use spatial::{
     AttrStats, AttrStatsEntry, AttrVolume, CapsuleResult, ContactEntry, ContactResult, DepthResult,
     FociResult, Focus, FractionRow, FractionsResult, GridSummary, HypoxiaResult, MarginResult,
     MarginStatus, Patch, SizeResult, SpatialAnalysis, Uncertainty,
+};
+pub use track::{
+    component_masks, instance_masks, link_components, track_label, ComponentMask, ObjectTrack,
+    TrackEvent, TrackMember, TrackParams, TrackSet, DEFAULT_MIN_IOU,
 };

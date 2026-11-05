@@ -25,6 +25,7 @@ pub mod interpolate;
 pub mod label_store;
 pub mod lbl_format;
 pub mod proposal;
+pub mod raster_import;
 
 pub use ai::{infer_slide, AiResult, ClassSpec, ModelSpec, Segmenter, TractSegmenter};
 pub use attr_store::{decode_atr, encode_atr, AttrStore, NODATA};
@@ -36,3 +37,4 @@ pub use interpolate::{interpolate_between, interpolate_label};
 pub use label_store::{LabelStore, PaintMode, TileKey};
 pub use lbl_format::{decode_lbl, encode_lbl};
 pub use proposal::{accept_proposal, Proposal};
+pub use raster_import::{dice_against_mask, import_mask, load_mask_png, RasterImportSummary};

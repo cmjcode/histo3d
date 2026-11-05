@@ -1,14 +1,15 @@
 //! ViewCube: kubus orientasi di pojok kanvas 3D (disalin dari
-//! `ducad-ui/src/viewcube.rs`). Berputar mengikuti yaw/pitch kamera orbit;
+//! `ducad-ui/src/viewcube.rs`). Berputar mengikuti orientasi kamera orbit;
 //! mengeklik salah satu muka mengembalikan preset pandangan.
 //!
-//! Konvensi kamera sama dengan `h3d_render::OrbitCamera`: Z ke atas,
-//! `arah_mata = (cos p · cos y, cos p · sin y, sin p)` dari target ke mata.
+//! Konvensi kamera sama dengan `h3d_render::OrbitCamera`: kuaternion
+//! `rotation` memetakan basis kamera ke dunia (`+X` = kanan layar, `+Y` =
+//! atas layar, `+Z` = arah target → mata), Z dunia = arah tumpukan.
 //! Crate ini tidak bergantung pada `h3d-render`, jadi preset dinyatakan
 //! sebagai [`ViewCubeAction`] dan dipetakan oleh aplikasi.
 
 use egui::{Color32, FontId, Pos2, Rect, Stroke, Vec2};
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::theme;
 
@@ -85,23 +86,23 @@ impl ViewCube {
         Vec2::splat(self.size * 1.6)
     }
 
-    /// Gambar kubus berpusat di `center`; `Some(aksi)` bila sebuah muka diklik.
+    /// Gambar kubus berpusat di `center` mengikuti orientasi kamera
+    /// `camera_rotation` (basis kamera → dunia); `Some(aksi)` bila sebuah
+    /// muka diklik.
     pub fn show(
         &self,
         ui: &mut egui::Ui,
         center: Pos2,
-        camera_yaw: f32,
-        camera_pitch: f32,
+        camera_rotation: Quat,
     ) -> Option<ViewCubeAction> {
         let rect = Rect::from_center_size(center, self.footprint());
         let response = ui.allocate_rect(rect, egui::Sense::click());
         let painter = ui.painter_at(rect);
 
-        let (sin_y, cos_y) = camera_yaw.sin_cos();
-        let (sin_p, cos_p) = camera_pitch.sin_cos();
-        let eye_dir = Vec3::new(cos_p * cos_y, cos_p * sin_y, sin_p).normalize_or_zero();
-        let cam_right = Vec3::new(-sin_y, cos_y, 0.0);
-        let cam_up = Vec3::new(-sin_p * cos_y, -sin_p * sin_y, cos_p);
+        let rot = camera_rotation.normalize();
+        let eye_dir = (rot * Vec3::Z).normalize_or_zero();
+        let cam_right = (rot * Vec3::X).normalize_or_zero();
+        let cam_up = (rot * Vec3::Y).normalize_or_zero();
 
         // Proyeksi ortografis ke kanvas (y egui ke bawah).
         let project = |p: Vec3| -> (Pos2, f32) {
@@ -338,7 +339,7 @@ mod tests {
         let cube = ViewCube::default();
         let mut out = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                let a = cube.show(ui, Pos2::new(100.0, 100.0), -0.8, 0.5);
+                let a = cube.show(ui, Pos2::new(100.0, 100.0), Quat::from_rotation_x(0.9));
                 assert!(a.is_none());
             });
         });

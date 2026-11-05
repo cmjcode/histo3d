@@ -558,6 +558,58 @@ impl Session {
         Ok(img)
     }
 
+    /// Thumbnail irisan untuk tampilan 3D: seperti [`Session::thumbnail`],
+    /// tetapi kanal alfa diisi masker jaringan (histo3d.md 8.3; 0 di
+    /// kaca/latar putih, tepi dilunakkan [`h3d_imgproc::FEATHER_PX`] piksel).
+    /// Citra sumber dan cache thumbnail biasa tidak diubah. Irisan tanpa mpp
+    /// sah dikembalikan tanpa masker (mpp tidak pernah ditebak).
+    /// Ber-cache di `cache/thumbs/*-tissue.png`.
+    pub fn thumbnail_tissue(
+        &self,
+        slide: SlideId,
+        max_side: u32,
+    ) -> Result<RgbaImage, EngineError> {
+        let entry = self.slide(slide)?;
+        if !entry.has_valid_mpp() {
+            log::debug!("irisan {slide} tanpa mpp: thumbnail 3D tanpa masker jaringan");
+            return self.thumbnail(slide, max_side);
+        }
+        let fp = self.source_fingerprint(entry)?;
+        let path = self.bundle.cache_thumbs_dir().join(format!(
+            "{}-{:016x}-{}-tissue.png",
+            slide_stem(slide),
+            fp,
+            max_side
+        ));
+        if let Ok(img) = image::open(&path) {
+            return Ok(img.to_rgba8());
+        }
+        let mut img = self.thumbnail(slide, max_side)?;
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        if w == 0 || h == 0 {
+            return Ok(img);
+        }
+        // mpp thumbnail = mpp level 0 × faktor penurunan.
+        let mpp_thumb = entry.mpp[0] * f64::from(entry.size_l0[0]) / w as f64;
+        h3d_imgproc::apply_tissue_alpha(img.as_mut(), w, h, mpp_thumb, h3d_imgproc::FEATHER_PX)?;
+        let mut png = Vec::new();
+        let enc = image::codecs::png::PngEncoder::new(&mut png);
+        if image::ImageEncoder::write_image(
+            enc,
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .is_ok()
+        {
+            if let Err(e) = write_atomic(&path, &png) {
+                log::warn!("gagal menulis cache thumbnail jaringan: {e}");
+            }
+        }
+        Ok(img)
+    }
+
     /// Baca seluruh irisan pada resolusi ≈ `target_mpp` (lihat [`read_at_mpp`]).
     pub(crate) fn read_slide_at(
         &self,

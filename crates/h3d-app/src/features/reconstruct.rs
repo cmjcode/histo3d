@@ -114,6 +114,9 @@ pub struct ReconState {
     pub show_grid: bool,
     /// Alfa irisan di 3D.
     pub slice_alpha: f32,
+    /// Sembunyikan latar kaca/putih irisan di 3D (alfa dari masker
+    /// jaringan; tampilan saja, citra tidak diubah).
+    pub hide_background: bool,
     /// Irisan yang disembunyikan dari tumpukan (hanya tampilan).
     pub hidden_slices: BTreeSet<SlideId>,
     /// Irisan yang thumbnailnya sudah diunggah.
@@ -134,8 +137,8 @@ pub struct ReconState {
     pub colormap: Colormap,
     /// Hasil klik terakhir pada mesh.
     pub pick: Option<PickInfo>,
-    /// Id mesh yang ada di GPU.
-    pub gpu_meshes: BTreeSet<LabelId>,
+    /// Kunci mesh `(label, id objek)` yang ada di GPU.
+    pub gpu_meshes: BTreeSet<MeshKey>,
     /// Pilih lapisan skalar pertama begitu tersedia (argumen `--analyze`).
     pub want_first_scalar: bool,
     /// Kubus orientasi.
@@ -159,8 +162,9 @@ impl Default for ReconState {
             clip_offset: 0.5,
             show_slices: true,
             show_meshes: true,
-            show_grid: true,
+            show_grid: false,
             slice_alpha: 0.9,
+            hide_background: true,
             hidden_slices: BTreeSet::new(),
             uploaded_slices: BTreeSet::new(),
             slices: Vec::new(),
@@ -321,6 +325,33 @@ pub fn preset_for(action: ViewCubeAction) -> ViewPreset {
     }
 }
 
+/// Tombol preset pandangan di laci: isometrik, atas, depan, kanan,
+/// tumpukan menyamping (Z mendatar, irisan kiri → kanan), dan "Tegakkan"
+/// yang menyejajarkan atas layar dengan Z lagi setelah orbit bebas.
+pub fn view_preset_buttons(st: &mut ReconState, ui: &mut Ui) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(t!("recon-view-label"));
+        for (key, preset) in [
+            ("recon-view-iso", ViewPreset::Isometric),
+            ("recon-view-top", ViewPreset::Top),
+            ("recon-view-front", ViewPreset::Front),
+            ("recon-view-right", ViewPreset::Right),
+            ("recon-view-side", ViewPreset::Side),
+        ] {
+            if ui.small_button(t!(key)).clicked() {
+                st.camera.set_preset(preset);
+            }
+        }
+        if ui
+            .small_button(t!("recon-view-upright"))
+            .on_hover_text(t!("recon-view-upright-hint"))
+            .clicked()
+        {
+            st.camera.upright();
+        }
+    });
+}
+
 /// Ray di ruang R **sebelum** renggang Z, dari ray layar (yang berada di
 /// ruang berenggang). Parameter `t` tetap sama karena pemetaannya linear.
 pub fn unscale_ray(ray: &Ray, z_scale: f32) -> Ray {
@@ -409,8 +440,16 @@ pub fn slice_items(sess: &Session, preview: Option<&OrderPreview>, alpha: f32) -
         .collect()
 }
 
-fn mesh_id(label: LabelId) -> MeshId {
-    MeshId(u64::from(label.0))
+/// Kunci satu mesh: label dan id objek (rekonstruksi per objek).
+pub type MeshKey = (LabelId, Option<u32>);
+
+fn mesh_key(m: &LabelMesh) -> MeshKey {
+    (m.label, m.instance_id)
+}
+
+/// Id mesh render: 8 bit label, sisanya id objek + 1 (0 = mesh label utuh).
+fn mesh_id(key: MeshKey) -> MeshId {
+    MeshId(u64::from(key.0 .0) | (u64::from(key.1.map_or(0, |i| i + 1)) << 8))
 }
 
 fn reload(app: &mut AppState, sess: &Session) {
@@ -452,7 +491,7 @@ fn mesh_bounds(st: &mut ReconState) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
 fn upload(app: &mut AppState, gpu: &Gpu) {
     let st = &mut app.recon;
     st.needs_upload = false;
-    let stale: Vec<LabelId> = st.gpu_meshes.iter().copied().collect();
+    let stale: Vec<MeshKey> = st.gpu_meshes.iter().copied().collect();
     let Some((center, _, _)) = mesh_bounds(st) else {
         gpu.with(|r, _, _| {
             for l in stale {
@@ -484,8 +523,8 @@ fn upload(app: &mut AppState, gpu: &Gpu) {
                 values,
             ) {
                 Ok(g) => {
-                    r.insert_mesh(mesh_id(m.label), g);
-                    uploaded.insert(m.label);
+                    r.insert_mesh(mesh_id(mesh_key(m)), g);
+                    uploaded.insert(mesh_key(m));
                 }
                 Err(e) => log::warn!("mesh label {} gagal diunggah: {e}", m.label),
             }
@@ -536,7 +575,12 @@ fn refresh_slices(app: &mut AppState, sess: &Session, gpu: Option<&Gpu>, ctx: &e
                 break;
             }
             budget -= 1;
-            match sess.thumbnail(it.id, SLICE_TEX_SIDE) {
+            let thumb = if st.hide_background {
+                sess.thumbnail_tissue(it.id, SLICE_TEX_SIDE)
+            } else {
+                sess.thumbnail(it.id, SLICE_TEX_SIDE)
+            };
+            match thumb {
                 Ok(img) => {
                     let ok = g
                         .with(|r, device, queue| {
@@ -746,19 +790,19 @@ pub fn canvas(
                 let mesh_hit = match (gpu, st.show_meshes) {
                     (Some(g), true) => {
                         let unscaled = unscale_ray(&ray, z_scale);
-                        let labels: Vec<LabelId> = st
+                        let keys: Vec<MeshKey> = st
                             .meshes
                             .iter()
-                            .map(|m| m.label)
-                            .filter(|l| st.gpu_meshes.contains(l) && !st.hidden.contains(l))
+                            .map(mesh_key)
+                            .filter(|k| st.gpu_meshes.contains(k) && !st.hidden.contains(&k.0))
                             .collect();
                         g.with(|r, _, _| {
-                            let mut best: Option<(LabelId, h3d_render::PickHit)> = None;
-                            for l in labels {
-                                if let Some(h) = r.mesh(mesh_id(l)).and_then(|m| m.pick(&unscaled))
+                            let mut best: Option<(MeshKey, h3d_render::PickHit)> = None;
+                            for k in keys {
+                                if let Some(h) = r.mesh(mesh_id(k)).and_then(|m| m.pick(&unscaled))
                                 {
                                     if best.as_ref().is_none_or(|(_, b)| h.t < b.t) {
-                                        best = Some((l, h));
+                                        best = Some((k, h));
                                     }
                                 }
                             }
@@ -769,11 +813,12 @@ pub fn canvas(
                     _ => None,
                 };
                 match (mesh_hit, slice_t) {
-                    (Some((label, h)), s) if s.is_none_or(|t| h.t < t) => {
+                    (Some((key, h)), s) if s.is_none_or(|t| h.t < t) => {
+                        let label = key.0;
                         let center = st.center_um;
                         let point_um = render_to_world_um(h.point_mm.to_array(), center);
                         let value = st.scalar.as_ref().and_then(|name| {
-                            let mesh = st.meshes.iter().find(|m| m.label == label)?;
+                            let mesh = st.meshes.iter().find(|m| mesh_key(m) == key)?;
                             let v = scalar_at(mesh, name, h.tri_index, h.bary)?;
                             Some((v, scalar_unit(&st.meshes, name)))
                         });
@@ -803,7 +848,7 @@ pub fn canvas(
     let mut instances = Vec::new();
     if st.show_meshes && !previewing {
         for m in &st.meshes {
-            if !st.gpu_meshes.contains(&m.label) {
+            if !st.gpu_meshes.contains(&mesh_key(m)) {
                 continue;
             }
             let color = sess
@@ -814,7 +859,7 @@ pub fn canvas(
                 .as_ref()
                 .is_some_and(|n| m.scalars.iter().any(|s| &s.name == n));
             instances.push(MeshInstance {
-                mesh: mesh_id(m.label),
+                mesh: mesh_id(mesh_key(m)),
                 color: [
                     f32::from(color[0]) / 255.0,
                     f32::from(color[1]) / 255.0,
@@ -977,10 +1022,7 @@ pub fn viewcube(app: &mut AppState, ui: &mut Ui, work: egui::Rect) {
         );
     let area = egui::Rect::from_center_size(center, size);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
-    if let Some(action) = st
-        .viewcube
-        .show(&mut child, center, st.camera.yaw, st.camera.pitch)
-    {
+    if let Some(action) = st.viewcube.show(&mut child, center, st.camera.rotation) {
         st.camera.set_preset(preset_for(action));
     }
 }
@@ -1049,7 +1091,8 @@ pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Opti
         .default_open(true)
         .show(ui, |ui| {
             let st = &mut app.recon;
-            let labels: Vec<LabelId> = st.meshes.iter().map(|m| m.label).collect();
+            let mut labels: Vec<LabelId> = st.meshes.iter().map(|m| m.label).collect();
+            labels.dedup();
             if labels.is_empty() {
                 ui.weak(t!("recon-no-mesh"));
             }
@@ -1092,6 +1135,15 @@ pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Opti
             ui.checkbox(&mut st.show_meshes, t!("stack-mesh-visible"));
             ui.checkbox(&mut st.show_grid, t!("stack-grid-visible"));
             ui.add(egui::Slider::new(&mut st.slice_alpha, 0.1..=1.0).text(t!("recon-opacity")));
+            view_preset_buttons(st, ui);
+            if ui
+                .checkbox(&mut st.hide_background, t!("recon-hide-background"))
+                .on_hover_text(t!("recon-hide-background-hint"))
+                .changed()
+            {
+                // Tekstur diunggah ulang dengan/ tanpa alfa masker jaringan.
+                st.uploaded_slices.clear();
+            }
             ui.horizontal(|ui| {
                 ui.label(icon_label(h3d_ui::icons::EXPAND_Z, &t!("stack-expand")));
                 if ui
@@ -1262,6 +1314,7 @@ mod tests {
                 unit: "µm".into(),
                 values: vec![100.0, 200.0, 400.0],
             }],
+            instance_id: None,
         }
     }
 

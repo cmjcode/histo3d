@@ -82,7 +82,10 @@ impl Session {
         match what {
             ExportKind::Glb { scalar } => {
                 let meshes = self.meshes_or_err()?;
-                let names: Vec<String> = meshes.iter().map(|m| self.label_name(m.label)).collect();
+                let names: Vec<String> = meshes
+                    .iter()
+                    .map(|m| m.display_name(&self.label_name(m.label)))
+                    .collect();
                 let items: Vec<GlbMesh<'_>> = meshes
                     .iter()
                     .zip(names.iter())
@@ -146,13 +149,16 @@ impl Session {
                     if m.indices.is_empty() {
                         continue;
                     }
-                    let name = stl_file_name(&self.label_name(m.label), m.label.0);
+                    let name = stl_file_name(&m.display_name(&self.label_name(m.label)), m.label.0);
                     put(&name, &encode_stl(&m)?)?;
                 }
             }
             ExportKind::Obj => {
                 let meshes = self.meshes_or_err()?;
-                let names: Vec<String> = meshes.iter().map(|m| self.label_name(m.label)).collect();
+                let names: Vec<String> = meshes
+                    .iter()
+                    .map(|m| m.display_name(&self.label_name(m.label)))
+                    .collect();
                 let items: Vec<(&str, &LabelMesh)> = names
                     .iter()
                     .map(String::as_str)

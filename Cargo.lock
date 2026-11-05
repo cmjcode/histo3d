@@ -2317,6 +2317,7 @@ version = "0.0.1"
 dependencies = [
  "h3d-core",
  "h3d-imgproc",
+ "image",
  "log",
  "lz4_flex",
  "ndarray",

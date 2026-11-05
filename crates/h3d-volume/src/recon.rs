@@ -24,6 +24,7 @@ use crate::error::VolError;
 use crate::grid::StackGrid;
 use crate::measure::Warning;
 use crate::mesh::LabelMesh;
+use crate::track::{component_masks, instance_masks, link_components, TrackParams, TrackSet};
 
 /// Sumber label raster satu irisan, dibaca di ruang U (µm). Abstraksi atas
 /// `LabelStore` milik `h3d-segment` agar crate ini tidak bergantung padanya.
@@ -655,9 +656,35 @@ pub fn build_label_stack(
     cfg: &ReconConfig,
     progress: &dyn Progress,
 ) -> Result<LabelStack, VolError> {
+    let masks = resample_masks(&plan.grid, inputs, label, progress)?;
+    build_label_stack_from_masks(plan, inputs, label, masks, cfg, progress)
+}
+
+/// Seperti [`build_label_stack`], tetapi masker per irisan sudah tersedia
+/// (mis. masker satu objek dari [`crate::track`]). `masks[i]` harus
+/// `Some` tepat untuk irisan yang memuat `label` (lihat
+/// [`SliceInput::has_label`]) dan berukuran `size.y × size.x` kisi.
+pub fn build_label_stack_from_masks(
+    plan: &GridPlan,
+    inputs: &[SliceInput<'_>],
+    label: u8,
+    masks: Vec<Option<Array2<u8>>>,
+    cfg: &ReconConfig,
+    progress: &dyn Progress,
+) -> Result<LabelStack, VolError> {
     let grid = plan.grid.clone();
     let band_um = (cfg.band_px.max(1.0) * grid.s_xy) as f32;
-    let masks = resample_masks(&grid, inputs, label, progress)?;
+    if masks.len() != inputs.len() {
+        return Err(VolError::InconsistentSizes(
+            "jumlah masker tidak sama dengan jumlah irisan".into(),
+        ));
+    }
+    let want = (grid.size[1] as usize, grid.size[0] as usize);
+    if masks.iter().flatten().any(|m| m.dim() != want) {
+        return Err(VolError::InconsistentSizes(
+            "ukuran masker tidak cocok dengan kisi".into(),
+        ));
+    }
     if progress.is_cancelled() {
         return Err(VolError::Cancelled);
     }
@@ -903,6 +930,53 @@ pub fn reconstruct_label(
     let sub2 = h3d_core::SubProgress::new(progress, 0.3, 1.0);
     let mesh = extract_mesh(&stack, LabelId(label), cfg, &sub2)?;
     Ok((mask, mesh))
+}
+
+/// Rekonstruksi per objek (histo3d.md 8.6.2 + penautan antar irisan):
+/// komponen `label` ditautkan antar irisan ([`crate::track::track_label`]),
+/// lalu tiap objek direkonstruksi lewat jalur SDF/surface-nets yang sama
+/// dengan [`reconstruct_label`]. Mesh diurutkan menurut `instance_id` dan
+/// membawa `instance_id = Some(id)`. Objek tanpa segitiga (terlalu kecil
+/// untuk kisi) tidak dikembalikan.
+pub fn reconstruct_label_objects(
+    plan: &GridPlan,
+    inputs: &[SliceInput<'_>],
+    label: u8,
+    cfg: &ReconConfig,
+    params: &TrackParams,
+    progress: &dyn Progress,
+) -> Result<(TrackSet, Vec<LabelMesh>), VolError> {
+    let sub = h3d_core::SubProgress::new(progress, 0.0, 0.2);
+    let comps = component_masks(plan, inputs, label, &sub)?;
+    let set = link_components(plan, label, &comps, params);
+    let inst = instance_masks(&set, &comps);
+    let n = set.tracks.len().max(1) as f32;
+    let mut meshes = Vec::with_capacity(set.tracks.len());
+    for (k, t) in set.tracks.iter().enumerate() {
+        if progress.is_cancelled() {
+            return Err(VolError::Cancelled);
+        }
+        let lo = 0.2 + 0.8 * k as f32 / n;
+        let hi = 0.2 + 0.8 * (k + 1) as f32 / n;
+        let sub = h3d_core::SubProgress::new(progress, lo, hi);
+        // Masker biner objek ini: `Some` untuk tiap irisan yang memuat label
+        // (kosong bila objek tidak hadir di sana), `None` bila tidak.
+        let masks: Vec<Option<Array2<u8>>> = inst
+            .iter()
+            .map(|m| {
+                m.as_ref()
+                    .map(|ids| ids.mapv(|v| u8::from(v == t.instance_id)))
+            })
+            .collect();
+        let stack = build_label_stack_from_masks(plan, inputs, label, masks, cfg, &sub)?;
+        let mut mesh = extract_mesh(&stack, LabelId(label), cfg, &sub)?;
+        mesh.instance_id = Some(t.instance_id);
+        if !mesh.indices.is_empty() {
+            meshes.push(mesh);
+        }
+    }
+    progress.set(1.0, "Mesh per objek selesai");
+    Ok((set, meshes))
 }
 
 /// SDF analitik bola untuk uji dan bench: pusat dan jari-jari dalam µm.

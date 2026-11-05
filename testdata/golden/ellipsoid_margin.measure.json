@@ -128,7 +128,7 @@
       }
     ]
   },
-  "app_version": "0.1.0",
+  "app_version": "0.0.1",
   "attrs": [],
   "dimension_uncertainty_um": 18.76436,
   "figures": [],
@@ -192,6 +192,7 @@
   ],
   "notes": [],
   "notice": "Hanya untuk riset, bukan untuk diagnosis",
+  "objects": [],
   "orientation": null,
   "provenance": {
     "by_source": [
@@ -246,8 +247,10 @@
     "default_spacing_um": 44.2368,
     "max_gap_um": null,
     "mpp_label": 4.0,
+    "per_object": false,
     "s_xy_um": 16.0,
     "smooth_iterations": 10,
+    "track_min_iou": 0.2,
     "z_factor_max": 2.0
   },
   "sample_name": "p",

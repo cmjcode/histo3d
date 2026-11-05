@@ -1,0 +1,31 @@
+[package]
+name = "h3d-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Pelatihan dan ekspor ONNX model segmentasi H&E untuk HISTO3D (Rust murni, burn)."
+
+[dependencies]
+h3d-core = { workspace = true }
+h3d-imgproc = { workspace = true }
+h3d-segment = { workspace = true }
+burn = { workspace = true }
+tract-onnx = { workspace = true }
+prost = { workspace = true }
+image = { workspace = true }
+ndarray = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -13,8 +13,8 @@ use h3d_core::{
     SlideId, SlideStatus, SubProgress, UndoStack,
 };
 use h3d_segment::{
-    ClassicParams, ImportSummary, LabelEditCommand, LabelStore, PaintMode, Proposal, Segmenter,
-    TractSegmenter,
+    ClassicParams, ImportSummary, LabelEditCommand, LabelStore, PaintMode, Proposal,
+    RasterImportSummary, Segmenter, TractSegmenter,
 };
 
 use super::images::read_region_at_mpp;
@@ -628,11 +628,7 @@ impl Session {
             let key = name.trim().to_lowercase();
             defs.iter().find(|(n, _)| *n == key).map(|(_, id)| *id)
         };
-        let ids: Vec<LabelId> = self.project.labels.iter().map(|l| l.id).collect();
-        let before: Vec<u64> = {
-            let store = &self.ensure_labels(slide)?.store;
-            ids.iter().map(|id| store.area_px(*id)).collect()
-        };
+        let before = self.label_areas(slide)?;
         let mut result: Option<Result<ImportSummary, h3d_segment::SegError>> = None;
         self.edit_labels(slide, None, "Impor GeoJSON", |s| {
             result = Some(h3d_segment::import_geojson(&text, s, mpp, &lookup));
@@ -641,17 +637,34 @@ impl Session {
             Some(r) => r?,
             None => return Err(EngineError::invalid("impor GeoJSON tidak dijalankan")),
         };
+        self.note_imported(slide, path, &before)?;
+        Ok(summary)
+    }
+
+    /// Luas piksel tiap label tabel pada irisan (urutan tabel label); untuk
+    /// mendeteksi label yang berubah oleh sebuah impor.
+    fn label_areas(&mut self, slide: SlideId) -> Result<Vec<(LabelId, u64)>, EngineError> {
+        let ids: Vec<LabelId> = self.project.labels.iter().map(|l| l.id).collect();
+        let store = &self.ensure_labels(slide)?.store;
+        Ok(ids.iter().map(|id| (*id, store.area_px(*id))).collect())
+    }
+
+    /// Provenance impor: label yang luasnya berubah sejak `before` dan kini
+    /// tidak kosong dicatat `Imported { file }` dengan status `Draft`.
+    fn note_imported(
+        &mut self,
+        slide: SlideId,
+        path: &Path,
+        before: &[(LabelId, u64)],
+    ) -> Result<(), EngineError> {
         let file = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let now = self.now();
-        let after: Vec<u64> = {
-            let store = &self.ensure_labels(slide)?.store;
-            ids.iter().map(|id| store.area_px(*id)).collect()
-        };
-        for ((id, b), a) in ids.iter().zip(before).zip(after) {
-            if a != b && a > 0 {
+        let after = self.label_areas(slide)?;
+        for ((id, b), (_, a)) in before.iter().zip(after) {
+            if a != *b && a > 0 {
                 self.project.upsert_annotation(AnnotationRecord {
                     slide,
                     label: *id,
@@ -663,7 +676,58 @@ impl Session {
                 self.project_dirty = true;
             }
         }
+        Ok(())
+    }
+
+    /// Impor masker raster PNG (piksel bukan-nol → `label`) ke irisan sebagai
+    /// satu langkah undo dengan mode `OnlyBackground`: label yang sudah ada
+    /// tidak ditimpa. `mpp_mask` wajib diberikan (mpp tidak pernah ditebak);
+    /// ukuran fisik masker harus ≈ ukuran irisan. Provenance label menjadi
+    /// `Imported { file }`.
+    pub fn import_mask(
+        &mut self,
+        slide: SlideId,
+        path: &Path,
+        mpp_mask: f64,
+        label: LabelId,
+    ) -> Result<RasterImportSummary, EngineError> {
+        self.check_label(label)?;
+        let mask = h3d_segment::load_mask_png(path)?;
+        let before = self.label_areas(slide)?;
+        let mut result: Option<Result<RasterImportSummary, h3d_segment::SegError>> = None;
+        self.edit_labels(slide, None, "Impor masker", |s| {
+            result = Some(h3d_segment::import_mask(
+                s,
+                &mask,
+                mpp_mask,
+                label,
+                PaintMode::OnlyBackground,
+            ));
+        })?;
+        let summary = match result {
+            Some(r) => r?,
+            None => return Err(EngineError::invalid("impor masker tidak dijalankan")),
+        };
+        self.note_imported(slide, path, &before)?;
         Ok(summary)
+    }
+
+    /// Koefisien Dice antara `label` pada irisan dan masker raster PNG pada
+    /// `mpp_mask` (label diresampel ke kisi masker, tetangga terdekat).
+    /// Tidak mengubah apa pun.
+    pub fn dice_against_mask(
+        &mut self,
+        slide: SlideId,
+        label: LabelId,
+        path: &Path,
+        mpp_mask: f64,
+    ) -> Result<f32, EngineError> {
+        self.check_label(label)?;
+        let mask = h3d_segment::load_mask_png(path)?;
+        let store = self.labels(slide)?;
+        Ok(h3d_segment::dice_against_mask(
+            store, label, &mask, mpp_mask,
+        )?)
     }
 
     /// Tandai anotasi `(irisan, label)` sudah ditinjau (8.12.7).

@@ -26,7 +26,10 @@ use crate::compare::{compare_passes, CompareParams, CompareSource, LayerMode};
 use crate::error::RenderError;
 use crate::mesh::{mesh_vertex_layout, sort_back_to_front, GpuMesh, MeshId, MeshInstance};
 use crate::overlay::{create_overlay_pipeline, default_palette, LabelOverlayDraw};
-use crate::slices3d::{slice_model_matrix, slice_texture_layout, SliceDraw, SliceId, SliceTexture};
+use crate::slices3d::{
+    slice_model_matrix, slice_model_matrix_scaled, slice_texture_layout, SliceDraw, SliceId,
+    SliceTexture,
+};
 use crate::tiles::{
     tile_instance_layout, GpuTileCache, TileDraw, TileInstance, TileKey, TileLayerDraw,
     TileTextureKind, UploadStatus,
@@ -1184,7 +1187,12 @@ impl SceneRenderer {
             .filter_map(|i| transparent_cmds[i].take())
             .collect();
 
+        // Irisan memakai alpha blending (latar transparan dari masker
+        // jaringan), jadi digambar belakang ke depan terhadap mata; pusat
+        // quad dihitung dengan `z_scale` yang sama seperti di shader.
         let mut slices = Vec::new();
+        let mut slice_centers = Vec::new();
+        let z_scale = sanitize_z_scale(scene.z_scale);
         for (si, d) in scene.slices.iter().enumerate() {
             if !self.slices.contains_key(&d.slice) {
                 continue;
@@ -1197,17 +1205,26 @@ impl SceneRenderer {
                 std::mem::size_of::<SliceParamsUniform>() as u64,
                 "h3d-slice-params",
             );
+            let model = slice_model_matrix(&d.affine, d.size_um, d.z_um, scene.center_um);
             let u = SliceParamsUniform {
-                model: slice_model_matrix(&d.affine, d.size_um, d.z_um, scene.center_um)
-                    .to_cols_array_2d(),
+                model: model.to_cols_array_2d(),
                 alpha: [d.alpha.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
             };
             queue.write_buffer(&fs.slice_ubos[si].buf, 0, bytemuck::bytes_of(&u));
+            let c = slice_model_matrix_scaled(&model, z_scale)
+                .project_point3(glam::Vec3::new(0.5, 0.5, 0.0));
+            slice_centers.push(c.to_array());
             slices.push(SliceCmd {
                 slice: d.slice,
                 ubo: si,
             });
         }
+        let order = sort_back_to_front(&slice_centers, eye);
+        let mut slice_cmds: Vec<Option<SliceCmd>> = slices.into_iter().map(Some).collect();
+        let slices: Vec<SliceCmd> = order
+            .into_iter()
+            .filter_map(|i| slice_cmds[i].take())
+            .collect();
 
         let grid = match scene
             .grid

@@ -78,6 +78,18 @@ pub const MEASURE_HEADER: [&str; 11] = [
     "Komponen",
     "Irisan (anotasi / interpolasi / ditinjau)",
 ];
+/// Kepala tabel objek (rekonstruksi per objek).
+pub const OBJECT_HEADER: [&str; 7] = [
+    "Objek",
+    "Label",
+    "Volume mesh (mm³)",
+    "Luas permukaan (mm²)",
+    "Diameter maks (mm)",
+    "Irisan",
+    "Rentang z (mm)",
+];
+/// Catatan tabel objek.
+pub const OBJECT_NOTE: &str = "Objek adalah komponen label yang ditautkan antar irisan (IoU ≥ ambang); volume objek berasal dari mesh, bukan Cavalieri.";
 /// Catatan tentang Cavalieri.
 pub const CAVALIERI_NOTE: &str = "Volume Cavalieri (angka utama) hanya memakai irisan yang \
 benar-benar dianotasi; irisan hasil interpolasi tidak ikut dihitung.";

@@ -68,7 +68,11 @@ fn widgets_render_without_panic() {
                 widgets::color_swatch(ui, [220, 40, 40, 255]);
                 let cube = ViewCube::default();
                 assert!(cube
-                    .show(ui, egui::pos2(600.0, 80.0), -0.785, 0.6)
+                    .show(
+                        ui,
+                        egui::pos2(600.0, 80.0),
+                        glam::Quat::from_rotation_x(0.6)
+                    )
                     .is_none());
             });
         });
