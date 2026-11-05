@@ -44,6 +44,12 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# Akar sertifikat Mozilla (data, bukan kode) untuk TLS `histo3d-updater`
+# (K13a). Hanya crate ini; tidak diizinkan global.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
@@ -55,7 +61,10 @@ deny = [
     { crate = "opencv" },
     { crate = "vtk-rs" },
     { crate = "openslide-rs" },
-    { crate = "ureq" },
+    # Pengecualian K13a: ureq hanya boleh dipakai langsung oleh pembaru
+    # terpisah `h3d-updater`; `h3d-app` tetap tanpa HTTP (tes
+    # `app_has_no_http_dependency`).
+    { crate = "ureq", wrappers = ["h3d-updater"] },
     { crate = "reqwest" },
     { crate = "hyper" },
 ]

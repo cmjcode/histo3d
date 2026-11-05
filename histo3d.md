@@ -42,6 +42,7 @@ kanker. Dari tumpukan irisan itu ia ingin memodelkan **bentuk 3D tumor**.
 | K11 | **Tidak ada kuas sculpt** untuk mengubah bentuk hasil | Mengubah bentuk hasil ukur dengan tangan merusak nilai ilmiahnya. Penghalusan hanya lewat parameter yang tercatat. |
 | K12 | Semua langkah **deterministik** dan bisa dijalankan headless lewat CLI | Hasil riset harus bisa diulang; GUI dan CLI memakai mesin yang sama. |
 | K13 | Aplikasi **sepenuhnya offline**, tanpa jaringan | Data medis; tidak ada alasan mengirimnya keluar perangkat. |
+| K13a | Satu pengecualian K13: **pembaruan dari GitHub Release** lewat biner terpisah `histo3d-updater` (crate `h3d-updater`), hanya saat pengguna menekan "Periksa pembaruan" / "Unduh pembaruan" di dialog Tentang. Hanya GET HTTPS ke `api.github.com`/aset rilis tanpa data proyek; aset dicocokkan dengan `.sha256` rilis, dan di macOS tanda tangan Developer ID tim diperiksa sebelum bundel ditukar. Tidak ada di iPadOS. | Pengguna desktop butuh cara memperbarui yang mudah, tetapi `h3d-app` sendiri tetap tanpa crate HTTP (tes `app_has_no_http_dependency`, `deny.toml` bans.wrappers) dan tidak pernah menghubungi jaringan tanpa diminta. |
 | K14 | Usulan otomatis **urutan dan orientasi irisan** memakai kemiripan gambar klasik (R1–R2), bukan model terlatih | Tidak butuh data latih, tetap deterministik (K12) dan offline (K13). Hasilnya selalu **usulan**; pengguna yang memutuskan. Lihat 8.4.7. |
 | K15 | Data medis disimpan **terstruktur di tiga level** (sampel, irisan, region/voxel), dan analisis spasial 3D menghasilkan **pengukuran dengan ketidakpastian**, bukan rekomendasi | Angka seperti jarak margin dan skor IHC per region baru berguna untuk keputusan bila bisa dihitung dan divisualisasikan di 3D; kalimat rekomendasi akan mengubah status alat menjadi alat diagnosis (2.2). Lihat 8.12. |
 | K16 | Data klinis pasien **pseudonim** dan disimpan di berkas terpisah `clinical.json`, tidak pernah ikut ekspor tanpa flag eksplisit | Data klinis dibutuhkan untuk konteks laporan, tetapi bundel proyek sering dibagikan antar peneliti; memisahkannya membuat pembuangan data identitas menjadi satu operasi yang bisa diuji. Lihat 8.12.9. |
@@ -359,6 +360,7 @@ Panah = "bergantung pada".
 | `h3d-i18n` | Terjemahan Fluent (id, en) | — |
 | `h3d-ui` | Widget egui, cakupan glyph | core, i18n |
 | `h3d-app` | Binary GUI, macOS + iPadOS | semua |
+| `h3d-updater` | Binary `histo3d-updater`: pembaruan dari GitHub Release (K13a); satu-satunya crate ber-HTTP, tidak pernah jadi dependensi `h3d-app` | — |
 
 ### 7.3 Aturan ketergantungan
 
@@ -2166,6 +2168,7 @@ Salin ke `CLAUDE.md` repo baru.
    urutan tetap.
 10. **Tulis atomik** untuk semua berkas proyek.
 11. **Tanpa jaringan.** Tidak ada crate HTTP di pohon dependensi `h3d-app`.
+    Satu-satunya pengecualian: biner terpisah `histo3d-updater` (K13a).
 12. **Komentar dan pesan pengguna berbahasa Indonesia; identifier Inggris.**
 13. **Ikon dari `egui_icons`**, bukan glyph Unicode/emoji; jalankan
     `cargo test -p h3d-ui --test ui_glyph_coverage` setelah menambah teks UI.

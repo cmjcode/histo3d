@@ -211,6 +211,8 @@ pub struct AppState {
     pub show_about: bool,
     /// Dialog Pengaturan terbuka.
     pub show_settings: bool,
+    /// Pemeriksa pembaruan (dialog Tentang).
+    pub update: crate::update::UpdateState,
     /// Peramban Documents (iPad; juga bisa dibuka di desktop).
     pub browser: Option<BrowserState>,
     /// Dialog isian mpp (impor melaporkan mpp hilang).
@@ -263,6 +265,7 @@ impl AppState {
             report: Default::default(),
             show_about: false,
             show_settings: false,
+            update: Default::default(),
             browser: None,
             mpp_prompt: None,
             pending_import: None,

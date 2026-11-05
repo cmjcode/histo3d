@@ -31,7 +31,10 @@ cargo check --target aarch64-apple-ios -p h3d-app
 9. **Deterministik**: tanpa acak tak berbenih; hasil paralel digabung dalam
    urutan tetap.
 10. **Tulis atomik** (`.tmp` lalu `rename`) untuk semua berkas proyek.
-11. **Tanpa jaringan.** Tidak ada crate HTTP di pohon dependensi `h3d-app`.
+11. **Tanpa jaringan.** Tidak ada crate HTTP di pohon dependensi `h3d-app`
+    (tes `app_has_no_http_dependency`). Satu-satunya pengecualian: biner
+    terpisah `histo3d-updater` (crate `h3d-updater`), hanya atas klik
+    pengguna (histo3d.md K13a).
 12. **Komentar dan pesan pengguna berbahasa Indonesia; identifier Inggris.**
 13. **Ikon dari `egui_icons::icons::ICON_*`**, bukan glyph Unicode/emoji;
     jalankan `cargo test -p h3d-ui --test ui_glyph_coverage` setelah menambah

@@ -12,6 +12,22 @@ about-research-only = Hanya untuk riset, bukan untuk diagnosis
 about-version = Version { $version }
 about-license = MIT or Apache-2.0 license
 
+# --- Updates (histo3d-updater) ---
+update-check = Check for updates
+update-checking = Checking GitHub for updates...
+update-up-to-date = Version { $version } is the latest
+update-available = Version { $version } is available
+update-download = Download update
+update-downloading = Downloading and verifying version { $version }...
+update-ready = Version { $version } is ready to install
+update-install = Install and restart
+update-install-hint = The project is saved first, then HISTO3D closes and reopens.
+update-busy-job = Wait for the job to finish before installing the update.
+update-unsupported = Version { $version } is not yet available for this system
+update-failed = Update failed: { $error }
+update-release-notes = Release notes:
+update-network-note = HISTO3D contacts GitHub only when an update button is clicked; no project data is sent.
+
 # --- Language and theme ---
 lang-current = Language
 lang-id = Bahasa Indonesia

@@ -307,6 +307,18 @@ fn menu(app: &mut AppState, sess: Option<&mut Session>, ui: &mut Ui, busy: bool)
                 app.show_about = true;
                 ui.close();
             }
+            if crate::update::updater_path().is_some()
+                && ui
+                    .add_enabled(
+                        !app.update.is_busy(),
+                        egui::Button::new(icon_label(h3d_ui::icons::UPDATE, &t!("update-check"))),
+                    )
+                    .clicked()
+            {
+                app.show_about = true;
+                app.update.start_check();
+                ui.close();
+            }
         });
 }
 

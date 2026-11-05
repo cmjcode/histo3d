@@ -15,9 +15,11 @@ for a in "$@"; do [ "$a" = "--debug" ] && { FLAG=""; SUB="debug"; }; done
 DIST="$SCRIPT_DIR/dist/macos"; mkdir -p "$DIST"
 
 build_app() {
-  cargo build $FLAG -p h3d-app
+  cargo build $FLAG -p h3d-app -p h3d-updater
   local b="$DIST/$APP_NAME.app"; rm -rf "$b"; mkdir -p "$b/Contents/MacOS" "$b/Contents/Resources"
   cp "target/$SUB/$BIN_NAME" "$b/Contents/MacOS/"
+  # Pembaru (proses terpisah; h3d-app sendiri tanpa HTTP, aturan 11).
+  cp "target/$SUB/histo3d-updater" "$b/Contents/MacOS/"
   sed -e "s/__BUNDLE_ID__/$APPLE_BUNDLE_ID/g" -e "s/__VERSION__/$VERSION/g" -e "s/__BUILD__/$BUILD_NUMBER/g" \
       -e "s/__BIN__/$BIN_NAME/g" -e "s/__APP__/$APP_NAME/g" apple/macos/Info.plist.template > "$b/Contents/Info.plist"
   codesign --force --sign "${APPLE_SIGN_IDENTITY:--}" "$b" 2>/dev/null || true

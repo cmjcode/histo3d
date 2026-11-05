@@ -76,8 +76,8 @@ jobs:
       - name: Uji
         run: cargo test --workspace --locked
 
-      - name: Build aplikasi + CLI
-        run: cargo build --release --locked -p h3d-app -p h3d-cli
+      - name: Build aplikasi + CLI + updater
+        run: cargo build --release --locked -p h3d-app -p h3d-cli -p h3d-updater
 
       - name: Paket (+ sha256)
         shell: bash
@@ -89,12 +89,12 @@ jobs:
           mkdir -p "$stage"
           cp LICENSE README.md "$stage/"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cp target/release/histo3d.exe target/release/h3d.exe "$stage/"
+            cp target/release/histo3d.exe target/release/h3d.exe target/release/histo3d-updater.exe "$stage/"
             (cd dist && 7z a "$name.zip" "$name")
             archive="$name.zip"
           else
-            cp target/release/histo3d target/release/h3d "$stage/"
-            chmod +x "$stage/histo3d" "$stage/h3d"
+            cp target/release/histo3d target/release/h3d target/release/histo3d-updater "$stage/"
+            chmod +x "$stage/histo3d" "$stage/h3d" "$stage/histo3d-updater"
             printf '%s\n' \
               '[Desktop Entry]' \
               'Type=Application' \

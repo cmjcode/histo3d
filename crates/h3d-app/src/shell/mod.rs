@@ -48,6 +48,9 @@ impl AppState {
             g.with(|r, _, _| r.begin_frame());
         }
         let job_running = self.poll_job();
+        if self.update.poll() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
 
         // Sesi dikunci tanpa memblokir; selama job berjalan kunci dipegang
         // thread job dan kanvas menggambar dari cache.
@@ -315,7 +318,10 @@ impl AppState {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .show(ctx, about_ui);
+            .show(ctx, |ui| {
+                about_ui(ui);
+                self.update_section(ui);
+            });
         self.show_about = open;
 
         let mut open = self.show_settings;

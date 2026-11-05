@@ -12,6 +12,7 @@
 //! - [`tiles`], [`viewer`], [`gpu`]: aliran tile dan viewer 2D.
 //! - [`features`]: potongan UI per fitur; [`panels`]: panel dan dialog bersama.
 //! - [`geom`]: logika murni (konversi koordinat, landmark, usulan urutan).
+//! - [`update`]: pembaruan lewat proses terpisah `histo3d-updater`.
 
 pub mod app;
 #[cfg(target_vendor = "apple")]
@@ -29,6 +30,7 @@ pub mod shell;
 pub mod state;
 pub mod tiles;
 pub mod ui_util;
+pub mod update;
 pub mod viewer;
 
 pub use app::{native_options, run, H3dApp};

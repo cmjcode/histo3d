@@ -13,9 +13,11 @@ for a in "$@"; do [ "$a" = "--debug" ] && { FLAG=""; SUB="debug"; }; done
 DIST="$SCRIPT_DIR/dist/linux"; mkdir -p "$DIST"
 
 build_app() {
-  cargo build $FLAG -p h3d-app
+  cargo build $FLAG -p h3d-app -p h3d-updater
   cp "target/$SUB/$BIN_NAME" "$DIST/$BIN_NAME"
-  chmod +x "$DIST/$BIN_NAME"
+  # Pembaru (proses terpisah; h3d-app sendiri tanpa HTTP, aturan 11).
+  cp "target/$SUB/histo3d-updater" "$DIST/histo3d-updater"
+  chmod +x "$DIST/$BIN_NAME" "$DIST/histo3d-updater"
   cat > "$DIST/$BIN_NAME.desktop" <<EOF
 [Desktop Entry]
 Type=Application

@@ -206,9 +206,13 @@ pub const CHEVRON_DOWN: MaterialIcon = icons::ICON_EXPAND_MORE;
 pub const FULLSCREEN: MaterialIcon = icons::ICON_OPEN_IN_FULL;
 /// Kecilkan panel.
 pub const EXIT_FULLSCREEN: MaterialIcon = icons::ICON_CLOSE_FULLSCREEN;
+/// Periksa/pasang pembaruan.
+pub const UPDATE: MaterialIcon = icons::ICON_SYSTEM_UPDATE_ALT;
+/// Pasang dan mulai ulang.
+pub const RESTART: MaterialIcon = icons::ICON_RESTART_ALT;
 
 /// Semua ikon bernama (dipakai tes `named_icons_render`).
-pub const ALL: [MaterialIcon; 95] = [
+pub const ALL: [MaterialIcon; 97] = [
     MENU,
     BACK,
     STACK_3D,
@@ -304,4 +308,6 @@ pub const ALL: [MaterialIcon; 95] = [
     KIND_MARGIN,
     KIND_SURFACE,
     KIND_OTHER,
+    UPDATE,
+    RESTART,
 ];

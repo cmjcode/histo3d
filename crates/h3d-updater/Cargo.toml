@@ -1,0 +1,33 @@
+[package]
+name = "h3d-updater"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Pembaru HISTO3D dari GitHub Release (proses terpisah dari h3d-app)"
+
+# Satu-satunya crate yang boleh memakai HTTP (K13a, aturan keras 11): biner
+# terpisah yang hanya dijalankan saat pengguna menekan "Periksa pembaruan".
+# `h3d-app` TIDAK boleh bergantung pada crate ini (tes
+# `app_has_no_http_dependency`, `deny.toml` bans.wrappers).
+
+[lib]
+name = "h3d_updater"
+path = "src/lib.rs"
+
+[[bin]]
+name = "histo3d-updater"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+# rustls + akar sertifikat webpki tertanam: tanpa OpenSSL, sama di semua OS.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
