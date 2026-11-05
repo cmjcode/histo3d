@@ -1,0 +1,129 @@
+# Build & rilis HISTO3D (Windows + Linux) setiap ada tag vX.Y.Z.
+# Build macOS/iPad dilakukan lokal lewat build_macos.sh / build_ipad.sh dan
+# di-upload ke release yang sama.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cek versi tag sama dengan Cargo.toml
+        run: |
+          want="${TAG#v}"
+          have=$(awk -F'"' '/^\[/{s=($0=="[workspace.package]")} s && /^version *=/{print $2; exit}' Cargo.toml)
+          if [ "$want" != "$have" ]; then
+            echo "::error::Tag $TAG tidak cocok dengan versi Cargo.toml ($have)"
+            exit 1
+          fi
+
+      - name: Buat release (kalau belum ada)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "$TAG" \
+                 --notes "Hanya untuk riset, bukan untuk diagnosis." --generate-notes
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kosongkan ruang disk (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # eframe (wgpu, x11 + wayland) dan rfd (dialog berkas).
+      - name: Pasang dependensi sistem (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config clang \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libgtk-3-dev libssl-dev
+
+      # Versi & komponen dibaca dari rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      - name: Uji
+        run: cargo test --workspace --locked
+
+      - name: Build aplikasi + CLI
+        run: cargo build --release --locked -p h3d-app -p h3d-cli
+
+      - name: Paket (+ sha256)
+        shell: bash
+        run: |
+          ver="${TAG#v}"
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          name="histo3d-$ver-$target"
+          stage="dist/$name"
+          mkdir -p "$stage"
+          cp LICENSE README.md "$stage/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/histo3d.exe target/release/h3d.exe "$stage/"
+            (cd dist && 7z a "$name.zip" "$name")
+            archive="$name.zip"
+          else
+            cp target/release/histo3d target/release/h3d "$stage/"
+            chmod +x "$stage/histo3d" "$stage/h3d"
+            printf '%s\n' \
+              '[Desktop Entry]' \
+              'Type=Application' \
+              'Version=1.0' \
+              'Name=HISTO3D' \
+              'Comment=Rekonstruksi 3D tumor dari irisan histologi serial (hanya untuk riset, bukan untuk diagnosis)' \
+              'Exec=histo3d' \
+              'Terminal=false' \
+              'Categories=Science;MedicalSoftware;Graphics;' \
+              'StartupWMClass=HISTO3D' \
+              "X-HISTO3D-Version=$ver" > "$stage/histo3d.desktop"
+            tar -czf "dist/$name.tar.gz" -C dist "$name"
+            archive="$name.tar.gz"
+          fi
+          (cd dist && sha256sum "$archive" > "$archive.sha256")
+          ls -la dist
+
+      - name: Upload ke GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          files=(dist/*.zip dist/*.tar.gz dist/*.sha256)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::tidak ada paket untuk diunggah"; exit 1; }
+          for f in "${files[@]}"; do
+            for attempt in 1 2 3 4 5; do
+              gh release upload "$TAG" "$f" -R "$GITHUB_REPOSITORY" --clobber && break
+              [ "$attempt" -lt 5 ] || exit 1
+              sleep $((attempt * 3))
+            done
+          done
