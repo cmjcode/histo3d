@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-app"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "log",
  "proptest",
@@ -2217,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-engine"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "h3d-core",
@@ -2240,7 +2240,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-i18n"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "fluent-bundle",
  "fluent-syntax",
@@ -2251,7 +2251,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-imgproc"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "criterion",
  "h3d-core",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-io"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "flate2",
  "h3d-core",
@@ -2284,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-register"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "criterion",
  "h3d-core",
@@ -2300,7 +2300,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-render"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-segment"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "h3d-core",
  "h3d-imgproc",
@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-slide"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "h3d-core",
  "image",
@@ -2347,7 +2347,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-ui"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "egui",
  "egui_icons",
@@ -2359,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-updater"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2372,7 +2372,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-volume"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "criterion",
  "fast-surface-nets",
