@@ -86,6 +86,44 @@ impl Default for Lighting {
     }
 }
 
+/// Grid tak terbatas di bidang horizontal `z = z_mm` (ruang R, mm, setelah
+/// `z_scale`). Jarak garis menyesuaikan zoom berjenjang kelipatan 10
+/// (… 0,1 / 1 / 10 mm …) dengan peralihan halus; garis menerus sampai
+/// cakrawala lalu memudar. Hanya hiasan tampilan, tidak pernah dipakai untuk
+/// pengukuran.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grid3D {
+    /// Tinggi bidang grid (mm, ruang R berenggang).
+    pub z_mm: f32,
+    /// Jarak garis terkecil yang masih digambar (piksel fisik); jenjang yang
+    /// lebih rapat dipudarkan.
+    pub min_cell_px: f32,
+    /// Jarak pudar penuh, kelipatan jarak kamera ke target.
+    pub fade_distance: f32,
+    /// Warna garis minor (RGBA linear, alfa = kekuatan).
+    pub minor: [f32; 4],
+    /// Warna garis mayor.
+    pub major: [f32; 4],
+    /// Warna sumbu X (garis `y = 0`).
+    pub axis_x: [f32; 4],
+    /// Warna sumbu Y (garis `x = 0`).
+    pub axis_y: [f32; 4],
+}
+
+impl Default for Grid3D {
+    fn default() -> Self {
+        Self {
+            z_mm: 0.0,
+            min_cell_px: 14.0,
+            fade_distance: 40.0,
+            minor: [0.55, 0.55, 0.58, 0.22],
+            major: [0.65, 0.65, 0.68, 0.50],
+            axis_x: [0.85, 0.30, 0.30, 0.75],
+            axis_y: [0.40, 0.75, 0.35, 0.75],
+        }
+    }
+}
+
 /// Adegan 2D (viewer slide / pembanding registrasi).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scene2D {
@@ -122,6 +160,8 @@ pub struct Scene3D {
     /// perenggangan terjadi mengelilingi pusat volume). `1.0` = skala
     /// sebenarnya. Tidak pernah memengaruhi pengukuran.
     pub z_scale: f32,
+    /// Grid tak terbatas; `None` = tidak digambar.
+    pub grid: Option<Grid3D>,
 }
 
 /// Snapshot adegan yang dibawa paint callback.
@@ -170,6 +210,53 @@ struct MeshParamsUniform {
 struct SliceParamsUniform {
     model: [[f32; 4]; 4],
     alpha: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GridUniform {
+    view_proj: [[f32; 4]; 4],
+    inv_view_proj: [[f32; 4]; 4],
+    /// `xyz` = mata (mm), `w` = jarak kamera ke target (mm).
+    eye: [f32; 4],
+    /// `(z_mm, min_cell_px, fade_distance, 0)`.
+    params: [f32; 4],
+    minor: [f32; 4],
+    major: [f32; 4],
+    axis_x: [f32; 4],
+    axis_y: [f32; 4],
+}
+
+/// Uniform grid dari kamera; `None` bila matriks pandang-proyeksi tidak
+/// dapat dibalik atau parameter tidak finit (grid lalu dilewati).
+fn grid_uniform(camera: &OrbitCamera, aspect: f32, grid: &Grid3D) -> Option<GridUniform> {
+    let view_proj = camera.view_proj(aspect.max(0.01));
+    // Invers dihitung dalam f64: rasio near/far kamera (1 : 100 000) membuat
+    // invers f32 kehilangan presisi di translasi.
+    let vp64 = view_proj.as_dmat4();
+    let det = vp64.determinant();
+    if !det.is_finite() || det.abs() < f64::MIN_POSITIVE {
+        return None;
+    }
+    let inv = vp64.inverse().as_mat4();
+    let eye = camera.eye();
+    let params = [
+        grid.z_mm,
+        grid.min_cell_px.max(1.0),
+        grid.fade_distance.max(1.0),
+        0.0,
+    ];
+    let finite = inv.is_finite() && eye.is_finite() && params.iter().all(|v| v.is_finite());
+    finite.then(|| GridUniform {
+        view_proj: view_proj.to_cols_array_2d(),
+        inv_view_proj: inv.to_cols_array_2d(),
+        eye: [eye.x, eye.y, eye.z, camera.distance],
+        params,
+        minor: grid.minor,
+        major: grid.major,
+        axis_x: grid.axis_x,
+        axis_y: grid.axis_y,
+    })
 }
 
 /// Bidang potong nonaktif: normal nol, d sangat besar → tidak pernah memotong.
@@ -312,6 +399,8 @@ enum Prepared {
         opaque: Vec<MeshCmd>,
         transparent: Vec<MeshCmd>,
         slices: Vec<SliceCmd>,
+        /// Grid tak terbatas siap digambar (uniform di `FrameSlot::grid`).
+        grid: bool,
     },
 }
 
@@ -321,6 +410,7 @@ struct FrameSlot {
     globals: Vec<UniformSlot>,
     mesh_ubos: Vec<UniformSlot>,
     slice_ubos: Vec<UniformSlot>,
+    grid: Vec<UniformSlot>,
     prepared: Prepared,
 }
 
@@ -332,6 +422,7 @@ impl FrameSlot {
             globals: Vec::new(),
             mesh_ubos: Vec::new(),
             slice_ubos: Vec::new(),
+            grid: Vec::new(),
             prepared: Prepared::None,
         }
     }
@@ -358,6 +449,7 @@ pub struct SceneRenderer {
     slice_params_layout: wgpu::BindGroupLayout,
     slice_tex_layout: wgpu::BindGroupLayout,
     slice_sampler: wgpu::Sampler,
+    grid_layout: wgpu::BindGroupLayout,
 
     tile_pipeline: wgpu::RenderPipeline,
     tile_additive_pipeline: wgpu::RenderPipeline,
@@ -366,6 +458,7 @@ pub struct SceneRenderer {
     mesh_opaque_pipeline: wgpu::RenderPipeline,
     mesh_transparent_pipeline: wgpu::RenderPipeline,
     slice_pipeline: wgpu::RenderPipeline,
+    grid_pipeline: wgpu::RenderPipeline,
 
     /// Cache tile RGBA.
     pub tiles: GpuTileCache,
@@ -668,6 +761,49 @@ impl SceneRenderer {
             cache: None,
         });
 
+        // --- grid tak terbatas ---
+        // Diuji depth tanpa menulisnya: mesh opak menutupi grid, grid tidak
+        // menutupi irisan/mesh tembus pandang yang digambar sesudahnya.
+        let grid_layout = uniform_layout(device, "h3d-grid", wgpu::ShaderStages::VERTEX_FRAGMENT);
+        let grid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("h3d-grid"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/grid.wgsl").into()),
+        });
+        let grid_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("h3d-grid"),
+            bind_group_layouts: &[Some(&grid_layout)],
+            immediate_size: 0,
+        });
+        let grid_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("h3d-grid"),
+            layout: Some(&grid_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &grid_shader,
+                entry_point: Some("vs_grid"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &grid_shader,
+                entry_point: Some("fs_grid"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: depth_state(false),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let palette = LutTexture::from_palette(device, queue, &lut_layout, &default_palette());
 
         Self {
@@ -680,6 +816,7 @@ impl SceneRenderer {
             slice_params_layout,
             slice_tex_layout,
             slice_sampler,
+            grid_layout,
             tile_pipeline,
             tile_additive_pipeline,
             solid_pipeline,
@@ -687,6 +824,7 @@ impl SceneRenderer {
             mesh_opaque_pipeline,
             mesh_transparent_pipeline,
             slice_pipeline,
+            grid_pipeline,
             tiles,
             labels,
             palette,
@@ -1071,10 +1209,31 @@ impl SceneRenderer {
             });
         }
 
+        let grid = match scene
+            .grid
+            .as_ref()
+            .and_then(|g| grid_uniform(&scene.camera, scene.aspect, g))
+        {
+            Some(u) => {
+                ensure_uniform(
+                    device,
+                    &self.grid_layout,
+                    &mut fs.grid,
+                    0,
+                    std::mem::size_of::<GridUniform>() as u64,
+                    "h3d-grid",
+                );
+                queue.write_buffer(&fs.grid[0].buf, 0, bytemuck::bytes_of(&u));
+                true
+            }
+            None => false,
+        };
+
         fs.prepared = Prepared::ThreeD {
             opaque,
             transparent,
             slices,
+            grid,
         };
     }
 
@@ -1091,7 +1250,8 @@ impl SceneRenderer {
                 opaque,
                 transparent,
                 slices,
-            } => self.paint_3d(fs, opaque, transparent, slices, rpass),
+                grid,
+            } => self.paint_3d(fs, opaque, transparent, slices, *grid, rpass),
         }
     }
 
@@ -1157,16 +1317,33 @@ impl SceneRenderer {
         opaque: &[MeshCmd],
         transparent: &[MeshCmd],
         slices: &[SliceCmd],
+        grid: bool,
         rpass: &mut wgpu::RenderPass<'_>,
     ) {
         let Some(globals) = fs.globals.first() else {
             return;
         };
+        let grid_slot = fs.grid.first().filter(|_| grid);
+        // Tanpa depth buffer grid digambar paling awal supaya mesh menimpanya.
+        let grid_first = self.depth_format.is_none();
+        if let (Some(g), true) = (grid_slot, grid_first) {
+            rpass.set_pipeline(&self.grid_pipeline);
+            rpass.set_bind_group(0, &g.bind, &[]);
+            rpass.draw(0..3, 0..1);
+        }
         rpass.set_bind_group(0, &globals.bind, &[]);
 
         // 1. Mesh opak (tulis depth).
         rpass.set_pipeline(&self.mesh_opaque_pipeline);
         self.paint_meshes(fs, opaque, rpass);
+
+        // 1b. Grid (uji depth terhadap mesh opak, tanpa tulis depth).
+        if let (Some(g), false) = (grid_slot, grid_first) {
+            rpass.set_pipeline(&self.grid_pipeline);
+            rpass.set_bind_group(0, &g.bind, &[]);
+            rpass.draw(0..3, 0..1);
+            rpass.set_bind_group(0, &globals.bind, &[]);
+        }
 
         // 2. Irisan (depth test, tanpa tulis depth).
         if !slices.is_empty() {
@@ -1269,6 +1446,47 @@ mod tests {
         validate_wgsl("overlay.wgsl", include_str!("shaders/overlay.wgsl"));
         validate_wgsl("mesh.wgsl", include_str!("shaders/mesh.wgsl"));
         validate_wgsl("slices.wgsl", include_str!("shaders/slices.wgsl"));
+        validate_wgsl("grid.wgsl", include_str!("shaders/grid.wgsl"));
+    }
+
+    #[test]
+    fn grid_uniform_layout_and_inverse() {
+        assert_eq!(std::mem::size_of::<GridUniform>(), 224);
+        let cam = OrbitCamera::default();
+        let g = Grid3D {
+            z_mm: -1.5,
+            ..Default::default()
+        };
+        let u = grid_uniform(&cam, 1.6, &g).expect("kamera bawaan dapat dibalik");
+        assert_eq!(u.params[0], -1.5);
+        assert_eq!(u.eye[3], cam.distance);
+        // Seperti shader: sinar dari depth 0 ke depth 1 dipotong dengan bidang
+        // grid. Titik tengah layar harus mengenai bidang tepat di bawah target
+        // kamera (target bawaan di asal, pitch 30°).
+        let inv = glam::Mat4::from_cols_array_2d(&u.inv_view_proj);
+        let near = inv.project_point3(glam::Vec3::new(0.0, 0.0, 0.0));
+        let far = inv.project_point3(glam::Vec3::new(0.0, 0.0, 1.0));
+        let t = (g.z_mm - near.z) / (far.z - near.z);
+        assert!((0.0..=1.0).contains(&t));
+        let hit = near + t * (far - near);
+        let eye = cam.eye();
+        // Mata → target → bidang segaris: titik kena = mata + (target − mata) × k.
+        let k = (g.z_mm - eye.z) / (cam.target.z - eye.z);
+        let expect = eye + (cam.target - eye) * k;
+        assert!(
+            (hit - expect).length() < 1e-3 * cam.distance,
+            "{hit} vs {expect}"
+        );
+    }
+
+    #[test]
+    fn grid_uniform_rejects_non_finite() {
+        let cam = OrbitCamera::default();
+        let g = Grid3D {
+            z_mm: f32::NAN,
+            ..Default::default()
+        };
+        assert!(grid_uniform(&cam, 1.0, &g).is_none());
     }
 
     #[test]

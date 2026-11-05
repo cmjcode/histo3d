@@ -76,6 +76,8 @@ pub const CUBE: MaterialIcon = icons::ICON_VIEW_IN_AR;
 pub const REPORT: MaterialIcon = icons::ICON_TABLE_CHART;
 /// Kisi thumbnail (mode Irisan).
 pub const GRID: MaterialIcon = icons::ICON_GRID_VIEW;
+/// Grid tak terbatas di kanvas 3D.
+pub const GRID_ON: MaterialIcon = icons::ICON_GRID_ON;
 /// Pembanding (mode Registrasi).
 pub const COMPARE: MaterialIcon = icons::ICON_COMPARE;
 /// Menggambar (mode Segmentasi).
@@ -206,7 +208,7 @@ pub const FULLSCREEN: MaterialIcon = icons::ICON_OPEN_IN_FULL;
 pub const EXIT_FULLSCREEN: MaterialIcon = icons::ICON_CLOSE_FULLSCREEN;
 
 /// Semua ikon bernama (dipakai tes `named_icons_render`).
-pub const ALL: [MaterialIcon; 94] = [
+pub const ALL: [MaterialIcon; 95] = [
     MENU,
     BACK,
     STACK_3D,
@@ -254,6 +256,7 @@ pub const ALL: [MaterialIcon; 94] = [
     CUBE,
     REPORT,
     GRID,
+    GRID_ON,
     COMPARE,
     DRAW,
     FLIP,

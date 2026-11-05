@@ -110,6 +110,8 @@ pub struct ReconState {
     pub show_slices: bool,
     /// Tampilkan mesh di 3D.
     pub show_meshes: bool,
+    /// Tampilkan grid lantai tak terbatas di 3D.
+    pub show_grid: bool,
     /// Alfa irisan di 3D.
     pub slice_alpha: f32,
     /// Irisan yang disembunyikan dari tumpukan (hanya tampilan).
@@ -157,6 +159,7 @@ impl Default for ReconState {
             clip_offset: 0.5,
             show_slices: true,
             show_meshes: true,
+            show_grid: true,
             slice_alpha: 0.9,
             hidden_slices: BTreeSet::new(),
             uploaded_slices: BTreeSet::new(),
@@ -563,6 +566,21 @@ fn refresh_slices(app: &mut AppState, sess: &Session, gpu: Option<&Gpu>, ctx: &e
 }
 
 /// Kotak pembatas seluruh isi kanvas (mm, ruang R, **setelah** renggang Z).
+/// Tinggi grid lantai (mm, ruang R berenggang): sedikit di bawah dasar isi
+/// kanvas supaya tidak berimpit dengan irisan terbawah; `0` bila kanvas kosong.
+pub fn grid_height_mm(bounds: Option<(Vec3, Vec3)>) -> f32 {
+    match bounds {
+        Some((lo, hi)) => {
+            let extent = (hi - lo).max_element().max(0.0);
+            lo.z - GRID_GAP_RATIO * extent
+        }
+        None => 0.0,
+    }
+}
+
+/// Jarak grid di bawah dasar isi, pecahan sisi terpanjang kotak pembatas.
+const GRID_GAP_RATIO: f32 = 0.02;
+
 fn canvas_bounds(st: &ReconState) -> Option<(Vec3, Vec3)> {
     let s = h3d_render::sanitize_z_scale(st.z_scale);
     let mut lo = Vec3::splat(f32::INFINITY);
@@ -839,6 +857,10 @@ pub fn canvas(
             clip_plane,
             lighting: Default::default(),
             z_scale,
+            grid: st.show_grid.then(|| h3d_render::Grid3D {
+                z_mm: grid_height_mm(canvas_bounds(st)),
+                ..Default::default()
+            }),
         };
         ui.painter_at(rect)
             .add(H3dPaintCallback::new(Scene::ThreeD(scene)).into_egui(rect));
@@ -1068,6 +1090,7 @@ pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Opti
             let st = &mut app.recon;
             ui.checkbox(&mut st.show_slices, t!("stack-slices-visible"));
             ui.checkbox(&mut st.show_meshes, t!("stack-mesh-visible"));
+            ui.checkbox(&mut st.show_grid, t!("stack-grid-visible"));
             ui.add(egui::Slider::new(&mut st.slice_alpha, 0.1..=1.0).text(t!("recon-opacity")));
             ui.horizontal(|ui| {
                 ui.label(icon_label(h3d_ui::icons::EXPAND_Z, &t!("stack-expand")));
@@ -1217,6 +1240,16 @@ pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Opti
 mod tests {
     use super::*;
     use h3d_volume::MeshScalars;
+
+    #[test]
+    fn grid_sits_just_below_canvas_floor() {
+        assert_eq!(grid_height_mm(None), 0.0);
+        let lo = Vec3::new(-10.0, -5.0, -2.0);
+        let hi = Vec3::new(10.0, 5.0, 2.0);
+        let z = grid_height_mm(Some((lo, hi)));
+        assert!(z < lo.z);
+        assert!((z - (lo.z - GRID_GAP_RATIO * 20.0)).abs() < 1e-6);
+    }
 
     fn tri_mesh() -> LabelMesh {
         LabelMesh {

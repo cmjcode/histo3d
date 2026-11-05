@@ -61,6 +61,7 @@ stack-fit = Pas ke layar
 stack-selected-none = Klik irisan di tumpukan untuk melihat rinciannya
 stack-slices-visible = Irisan di 3D
 stack-mesh-visible = Mesh tumor di 3D
+stack-grid-visible = Grid lantai
 slice-mode-annotate = Tandai
 slice-mode-annotate-hint = Kuas, laso, poligon, penghapus, dan usulan untuk label pada irisan ini
 slice-mode-align = Sejajarkan

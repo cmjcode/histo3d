@@ -29,6 +29,7 @@ enum RailAction {
     FitView,
     ToggleSlices,
     ToggleMeshes,
+    ToggleGrid,
     ToggleClip,
     Mode(SliceMode),
     Annotate(segment::Tool),
@@ -71,6 +72,7 @@ pub fn show(app: &mut AppState, sess: Option<&mut Session>, ui: &mut Ui, work: R
             app.recon.show_meshes = !app.recon.show_meshes;
             app.recon.fitted = false;
         }
+        RailAction::ToggleGrid => app.recon.show_grid = !app.recon.show_grid,
         RailAction::ToggleClip => app.recon.clip_enabled = !app.recon.clip_enabled,
         RailAction::Mode(m) => {
             app.slice_mode = m;
@@ -182,6 +184,12 @@ fn stack_items(app: &AppState, busy: bool) -> Vec<RailItem<RailAction>> {
         )
         .selected(st.show_meshes)
         .enabled(!st.meshes.is_empty()),
+        RailItem::tool(
+            RailAction::ToggleGrid,
+            h3d_ui::icons::GRID_ON,
+            t!("stack-grid-visible"),
+        )
+        .selected(st.show_grid),
         RailItem::tool(
             RailAction::ToggleClip,
             h3d_ui::icons::CLIP,

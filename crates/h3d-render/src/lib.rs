@@ -38,7 +38,7 @@ pub use mesh::{
 };
 pub use overlay::{default_palette, LabelOverlayDraw};
 pub use scene::{
-    sanitize_z_scale, H3dPaintCallback, Lighting, RenderBudgets, Scene, Scene2D, Scene3D,
+    sanitize_z_scale, Grid3D, H3dPaintCallback, Lighting, RenderBudgets, Scene, Scene2D, Scene3D,
     SceneRenderer,
 };
 pub use slices3d::{

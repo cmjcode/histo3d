@@ -61,6 +61,7 @@ stack-fit = Fit to screen
 stack-selected-none = Click a slice in the stack to see its details
 stack-slices-visible = Slices in 3D
 stack-mesh-visible = Tumor mesh in 3D
+stack-grid-visible = Floor grid
 slice-mode-annotate = Annotate
 slice-mode-annotate-hint = Brush, lasso, polygon, eraser, and proposals for labels on this slice
 slice-mode-align = Align

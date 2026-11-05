@@ -205,6 +205,10 @@ fn headless_renders_2d_and_3d_without_validation_errors() {
         clip_plane: Some([0.0, 0.0, 1.0, 0.3]),
         lighting: Default::default(),
         z_scale: 2.5,
+        grid: Some(h3d_render::Grid3D {
+            z_mm: -2.0,
+            ..Default::default()
+        }),
     });
     render(&device, &queue, &mut renderer, 0, &scene3d);
 
