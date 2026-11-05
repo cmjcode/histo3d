@@ -3150,7 +3150,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "log",
  "serde",
@@ -3160,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-imgproc"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "h3d-core",
  "log",
@@ -3172,7 +3172,7 @@ dependencies = [
 
 [[package]]
 name = "h3d-segment"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "h3d-core",
  "h3d-imgproc",

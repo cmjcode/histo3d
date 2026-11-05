@@ -525,9 +525,22 @@ Backend, dicoba berurutan oleh `open_slide`:
 
 1. `WsiBackend` — `wsi-rs` (SVS, NDPI, dan lainnya). **[BELUM DIVERIFIKASI]**
 2. `TiffBackend` — crate `tiff`: TIFF piramida bertile dan TIFF datar.
-3. `FlatBackend` — crate `image`: JPEG/PNG. Membangun piramida sendiri
-   dengan penurunan 2× (rata-rata kotak) sampai sisi terpanjang ≤ 512 px,
-   lalu menyimpannya di cache proyek.
+3. `FlatBackend` — crate `image`: JPEG/PNG kecil, seluruhnya di memori
+   (tes, gambar kecil). Gambar biasa yang diimpor ke proyek **tidak** dibaca
+   lewat jalur ini, melainkan lewat `TiledPyramid`: piramida bertile 256 px
+   (PNG per tile, penurunan 2× rata-rata kotak sampai sisi terpanjang ≤ 512
+   px) yang dibangun **sekali saat impor** secara streaming per pita baris
+   (PNG didekode baris demi baris; memori tidak ikut ukuran gambar) dan
+   disimpan di `cache/pyramid/<slide>-<sidik jari>/`. Setelah itu tidak ada
+   level yang pernah dimuat utuh ke RAM: tile dibaca sesuai permintaan.
+   TIFF datar (satu IFD besar) diperlakukan sama. `TiffBackend` memakai kolam
+   dekoder per thread dan cache chunk berbatas byte
+   (`Budgets::wsi_internal_cache_bytes`).
+
+`Session::open_source` membagikan satu sumber terbuka per irisan (LRU
+`Budgets::max_open_slides`) ke thumbnail, registrasi, segmentasi, atribut,
+dan viewer; sidik jari berkas dihitung ulang hanya bila ukuran/mtime berkas
+berubah.
 
 **mpp.** Bila `info().mpp` kosong (umum pada foto kamera mikroskop), impor
 **berhenti dan meminta pengguna mengisi** mpp. Tidak ada nilai tebakan,
@@ -1039,7 +1052,7 @@ sampel-01.h3d/
 │   └── 0007.ki67.atr       # AttrStore per (irisan, atribut) (8.12.5, 8.12.9)
 ├── models/                 # model ONNX + model.json (opsional)
 ├── cache/                  # bisa dihapus kapan saja
-│   ├── pyramid/            # piramida untuk gambar biasa
+│   ├── pyramid/            # piramida bertile gambar biasa (level_NN.tiles + pyramid.json)
 │   ├── reg/                # gambar registrasi
 │   └── thumbs/
 └── out/

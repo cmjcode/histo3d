@@ -2231,11 +2231,13 @@ dependencies = [
  "log",
  "lz4_flex",
  "ndarray",
+ "prost",
  "rayon",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tract-onnx",
 ]
 
 [[package]]
@@ -2338,6 +2340,8 @@ dependencies = [
  "h3d-core",
  "image",
  "log",
+ "png",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",

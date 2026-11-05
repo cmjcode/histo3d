@@ -4,11 +4,19 @@
 //! rasio aspeknya berbeda dari level 0 (label, makro) dibuang. mpp diambil
 //! dari `ImageDescription` Aperio (`MPP = x`) atau dari
 //! `XResolution`/`YResolution` + `ResolutionUnit`; selain itu `None`.
+//!
+//! Pembacaan paralel: tiap thread pemanggil memakai dekoder sendiri dari
+//! kolam (`pool`), sehingga thread dekode tidak saling menunggu. Chunk yang
+//! sudah didekode disimpan di cache LRU berbatas byte (anggaran dari
+//! `Budgets::wsi_internal_cache_bytes`) — penting untuk TIFF berstrip, yang
+//! satu strip-nya selebar gambar dan dibaca ulang oleh tiap tile dalam satu
+//! baris.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use image::RgbaImage;
 use tiff::decoder::{ChunkType, Decoder, DecodingResult};
@@ -42,17 +50,62 @@ struct TiffLevel {
     color: ColorType,
 }
 
+/// Cache LRU chunk terdekode, berbatas byte.
+struct ChunkCache {
+    max_bytes: u64,
+    bytes: u64,
+    tick: u64,
+    map: HashMap<(usize, u32), (Arc<RgbaImage>, u64)>,
+}
+
+impl ChunkCache {
+    fn get(&mut self, key: (usize, u32)) -> Option<Arc<RgbaImage>> {
+        self.tick += 1;
+        let tick = self.tick;
+        let e = self.map.get_mut(&key)?;
+        e.1 = tick;
+        Some(Arc::clone(&e.0))
+    }
+
+    fn insert(&mut self, key: (usize, u32), img: Arc<RgbaImage>) {
+        let size = u64::from(img.width()) * u64::from(img.height()) * 4;
+        if size > self.max_bytes {
+            return;
+        }
+        while self.bytes + size > self.max_bytes {
+            let Some((&victim, _)) = self.map.iter().min_by_key(|(_, (_, t))| *t) else {
+                break;
+            };
+            if let Some((old, _)) = self.map.remove(&victim) {
+                self.bytes -= u64::from(old.width()) * u64::from(old.height()) * 4;
+            }
+        }
+        self.tick += 1;
+        if self.map.insert(key, (img, self.tick)).is_none() {
+            self.bytes += size;
+        }
+    }
+}
+
 /// Sumber slide TIFF.
 pub struct TiffBackend {
     path: PathBuf,
     info: SlideInfo,
     levels: Vec<TiffLevel>,
-    decoder: Mutex<Decoder<BufReader<File>>>,
+    /// Kolam dekoder; satu dipinjam per pembacaan.
+    pool: Mutex<Vec<Decoder<BufReader<File>>>>,
+    chunks: Mutex<ChunkCache>,
 }
 
 impl TiffBackend {
-    /// Buka berkas TIFF.
+    /// Buka berkas TIFF tanpa cache chunk (pemakaian sekali baca).
     pub fn open(path: &Path) -> Result<Self, SlideError> {
+        Self::open_with_cache_bytes(path, 0)
+    }
+
+    /// Buka berkas TIFF dengan cache chunk terdekode sebesar `cache_bytes`
+    /// (dari `Budgets::wsi_internal_cache_bytes`).
+    pub fn open_with_cache_bytes(path: &Path, cache_bytes: u64) -> Result<Self, SlideError> {
         let file = File::open(path).map_err(|e| SlideError::io(path, e))?;
         let mut dec = Decoder::new(BufReader::new(file))?;
 
@@ -122,13 +175,73 @@ impl TiffBackend {
                 vendor,
             },
             levels,
-            decoder: Mutex::new(dec),
+            pool: Mutex::new(vec![dec]),
+            chunks: Mutex::new(ChunkCache {
+                max_bytes: cache_bytes,
+                bytes: 0,
+                tick: 0,
+                map: HashMap::new(),
+            }),
         })
     }
 
     /// Path berkas sumber.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Jalankan `f` dengan dekoder dari kolam (dibuat baru bila kolam
+    /// kosong) lalu kembalikan dekodernya.
+    fn with_decoder<R>(
+        &self,
+        f: impl FnOnce(&mut Decoder<BufReader<File>>) -> Result<R, SlideError>,
+    ) -> Result<R, SlideError> {
+        let taken = self
+            .pool
+            .lock()
+            .map_err(|_| SlideError::backend("tiff", "kolam dekoder rusak"))?
+            .pop();
+        let mut dec = match taken {
+            Some(d) => d,
+            None => {
+                let file = File::open(&self.path).map_err(|e| SlideError::io(&self.path, e))?;
+                Decoder::new(BufReader::new(file))?
+            }
+        };
+        let out = f(&mut dec);
+        if let Ok(mut pool) = self.pool.lock() {
+            let cap = std::thread::available_parallelism().map_or(4, |n| n.get());
+            if pool.len() < cap {
+                pool.push(dec);
+            }
+        }
+        out
+    }
+
+    /// Chunk `idx` IFD `lvl` sebagai RGBA (dari cache bila ada).
+    fn chunk(
+        &self,
+        lvl: &TiffLevel,
+        idx: u32,
+        dw: u32,
+        dh: u32,
+    ) -> Result<Arc<RgbaImage>, SlideError> {
+        let key = (lvl.ifd, idx);
+        if let Ok(mut c) = self.chunks.lock() {
+            if let Some(img) = c.get(key) {
+                return Ok(img);
+            }
+        }
+        let img = self.with_decoder(|dec| {
+            dec.seek_to_image(lvl.ifd)?;
+            let data = dec.read_chunk(idx)?;
+            to_rgba(data, lvl.color, dw, dh)
+        })?;
+        let img = Arc::new(img);
+        if let Ok(mut c) = self.chunks.lock() {
+            c.insert(key, Arc::clone(&img));
+        }
+        Ok(img)
     }
 
     /// Baca geometri IFD yang sedang aktif. `Ok(None)` bila tipe piksel atau
@@ -208,12 +321,6 @@ impl SlideSource for TiffBackend {
                 count: self.levels.len() as u32,
             })?;
         compose_on_white(lvl.size, x, y, w, h, |s| {
-            let mut dec = self
-                .decoder
-                .lock()
-                .map_err(|_| SlideError::backend("tiff", "mutex dekoder rusak"))?;
-            dec.seek_to_image(lvl.ifd)?;
-
             let [iw, ih] = lvl.size;
             let chunks_across = iw.div_ceil(lvl.chunk_w);
             let cx0 = s.x / lvl.chunk_w;
@@ -228,8 +335,7 @@ impl SlideSource for TiffBackend {
                     // Ukuran data chunk (tanpa padding tepi).
                     let dw = lvl.chunk_w.min(iw - cx * lvl.chunk_w);
                     let dh = lvl.chunk_h.min(ih - cy * lvl.chunk_h);
-                    let data = dec.read_chunk(idx)?;
-                    let rgba = to_rgba(data, lvl.color, dw, dh)?;
+                    let rgba = self.chunk(&lvl, idx, dw, dh)?;
                     blit_chunk(&rgba, (cx * lvl.chunk_w, cy * lvl.chunk_h), &mut out, s);
                 }
             }

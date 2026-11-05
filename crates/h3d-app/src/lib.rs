@@ -28,6 +28,7 @@ pub mod platform;
 pub mod settings;
 pub mod shell;
 pub mod state;
+pub mod thumbs;
 pub mod tiles;
 pub mod ui_util;
 pub mod update;

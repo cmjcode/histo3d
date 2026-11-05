@@ -4,6 +4,7 @@
 //! Konvensi: posisi µm `f64`; segitiga berlawanan arah jarum jam dilihat
 //! dari luar sehingga volume bertanda positif; normal menghadap ke luar.
 
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
@@ -298,25 +299,32 @@ impl LabelMesh {
         let mut next = self.positions_um.clone();
         for _ in 0..iters {
             for &f in &[lambda, mu] {
-                for (i, nb) in adj.iter().enumerate() {
-                    if nb.is_empty() {
-                        continue;
-                    }
-                    let mut m = [0.0f64; 3];
-                    for &j in nb {
-                        let q = self.positions_um[j as usize];
-                        m[0] += q[0];
-                        m[1] += q[1];
-                        m[2] += q[2];
-                    }
-                    let n = nb.len() as f64;
-                    let p = self.positions_um[i];
-                    next[i] = [
-                        p[0] + f * (m[0] / n - p[0]),
-                        p[1] + f * (m[1] / n - p[1]),
-                        p[2] + f * (m[2] / n - p[2]),
-                    ];
-                }
+                // Tiap verteks hanya membaca posisi langkah sebelumnya:
+                // paralel per verteks, hasil identik dengan versi berurutan.
+                let cur = &self.positions_um;
+                next.par_iter_mut()
+                    .zip(adj.par_iter())
+                    .enumerate()
+                    .for_each(|(i, (out, nb))| {
+                        if nb.is_empty() {
+                            *out = cur[i];
+                            return;
+                        }
+                        let mut m = [0.0f64; 3];
+                        for &j in nb {
+                            let q = cur[j as usize];
+                            m[0] += q[0];
+                            m[1] += q[1];
+                            m[2] += q[2];
+                        }
+                        let n = nb.len() as f64;
+                        let p = cur[i];
+                        *out = [
+                            p[0] + f * (m[0] / n - p[0]),
+                            p[1] + f * (m[1] / n - p[1]),
+                            p[2] + f * (m[2] / n - p[2]),
+                        ];
+                    });
                 std::mem::swap(&mut self.positions_um, &mut next);
             }
         }

@@ -43,6 +43,9 @@ pub enum SlideError {
     /// Argumen tidak sah (mis. ukuran nol, nilai tidak terhingga).
     #[error("argumen tidak sah: {0}")]
     InvalidArgument(String),
+    /// Operasi dibatalkan oleh pemanggil (mis. pembangunan piramida).
+    #[error("dibatalkan")]
+    Cancelled,
     /// Error spesifik backend.
     #[error("backend {backend}: {message}")]
     Backend {

@@ -12,7 +12,6 @@
 //! "Terima" (aturan keras 8).
 
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
 
 use egui::Ui;
 use h3d_core::{
@@ -26,7 +25,7 @@ use h3d_segment::StainChannel;
 use crate::geom::{brush_radius_um, navigate, screen_to_slide_um};
 use crate::gpu::Gpu;
 use crate::panels::sample::combo;
-use crate::state::{AppState, JobOutput};
+use crate::state::{AppState, Drawer, JobOutput};
 use crate::tiles::{label_tiles_touched, palette_from_labels};
 use crate::ui_util::{icon_label, icon_text_button, icon_text_button_enabled};
 use crate::viewer::{label_layer, paint_background, slide_layer, Viewer2D};
@@ -132,12 +131,6 @@ pub struct SegmentState {
     pub classic_params: ClassicParams,
     /// Ambang klasik otomatis (Otsu).
     pub classic_otsu: bool,
-    /// Folder model AI di `models/` bundel.
-    pub models: Vec<PathBuf>,
-    /// Daftar model sudah dipindai.
-    pub models_scanned: bool,
-    /// Model terpilih.
-    pub model_index: usize,
     /// Overlay inti untuk kalibrasi.
     pub nuclei: Option<NucleiOverlay>,
     /// Ambang OD kromogen `t_D`.
@@ -168,9 +161,6 @@ impl Default for SegmentState {
             classic: None,
             classic_params: ClassicParams::default(),
             classic_otsu: true,
-            models: Vec::new(),
-            models_scanned: false,
-            model_index: 0,
             nuclei: None,
             t_d: h3d_imgproc::ihc::IhcThresholds::default().t_d,
             proposal_tex: None,
@@ -334,21 +324,6 @@ pub fn detect_nuclei_region(
         })
         .collect();
     Ok(NucleiOverlay { slide, points, mpp })
-}
-
-/// Folder model di `models/` bundel (subfolder berisi `model.json`).
-pub fn scan_models(sess: &Session) -> Vec<PathBuf> {
-    let dir = sess.bundle().models_dir();
-    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.join("model.json").is_file())
-                .collect()
-        })
-        .unwrap_or_default();
-    out.sort();
-    out
 }
 
 fn palette_hash(labels: &[LabelDef]) -> u64 {
@@ -529,10 +504,10 @@ pub fn tool_options(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
 
 /// Setelah suntingan label non-goresan: segarkan tile, simpan (9.4).
 pub fn after_edit(app: &mut AppState, sess: &mut Session, slide: SlideId) {
+    // Label ditulis ke disk oleh simpan otomatis (satu `project.json` per
+    // selang, bukan satu per goresan); provenance tetap tercatat di sesi.
+    let _ = sess;
     app.labels_changed(slide);
-    if let Err(e) = sess.save_labels(slide) {
-        app.toasts.engine_error(&e);
-    }
 }
 
 fn label_panel(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
@@ -785,55 +760,14 @@ fn proposals_panel(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
         }
     });
 
-    // --- AI ---
+    // --- AI: alur lengkap ada di laci Deteksi AI ---
     egui::CollapsingHeader::new(icon_label(h3d_ui::icons::AI, &t!("segment-proposal-ai")))
         .default_open(false)
         .show(ui, |ui| {
-            if !app.segment.models_scanned {
-                app.segment.models = scan_models(sess);
-                app.segment.models_scanned = true;
+            ui.small(t!("segment-ai-see-detect"));
+            if icon_text_button(ui, h3d_ui::icons::AI, &t!("drawer-detect")).clicked() {
+                app.toggle_drawer(Drawer::Detect);
             }
-            let st = &mut app.segment;
-            if st.models.is_empty() {
-                ui.weak(t!("segment-ai-no-models"));
-            } else {
-                st.model_index = st.model_index.min(st.models.len() - 1);
-                let name = |p: &PathBuf| {
-                    p.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                };
-                egui::ComboBox::from_id_salt("ai-model")
-                    .selected_text(name(&st.models[st.model_index]))
-                    .show_ui(ui, |ui| {
-                        for (i, m) in st.models.iter().enumerate() {
-                            ui.selectable_value(&mut st.model_index, i, name(m));
-                        }
-                    });
-            }
-            let model = st.models.get(st.model_index).cloned();
-            ui.horizontal(|ui| {
-                if h3d_ui::widgets::icon_button(ui, h3d_ui::icons::REFRESH, &t!("action-refresh"))
-                    .clicked()
-                {
-                    app.segment.models_scanned = false;
-                }
-                if icon_text_button_enabled(
-                    ui,
-                    model.is_some(),
-                    h3d_ui::icons::PLAY,
-                    &t!("action-run"),
-                )
-                .clicked()
-                {
-                    if let Some(model) = model {
-                        app.start_job(t!("segment-proposal-ai"), move |s, p| {
-                            s.segment_ai(&model, &[slide], p)?;
-                            Ok(JobOutput::PendingProposals)
-                        });
-                    }
-                }
-            });
         });
 
     // --- Interpolasi ---

@@ -417,7 +417,6 @@ impl TileStreamer {
             let entry = session.slide(slide).ok()?;
             match session.open_source(slide) {
                 Ok(src) => {
-                    let src: Arc<dyn h3d_slide::SlideSource> = Arc::from(src);
                     let meta = SlideMeta {
                         info: src.info().clone(),
                         mpp: entry.mpp,

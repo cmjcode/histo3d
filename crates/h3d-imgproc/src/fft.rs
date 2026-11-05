@@ -1,24 +1,29 @@
 //! Pembungkus tipis `rustfft`: FFT 2D dan korelasi fase (histo3d.md 8.4.2 R2).
 
+use std::cell::RefCell;
+
 use ndarray::Array2;
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 
 use crate::error::ImgError;
 
+thread_local! {
+    /// Perencana FFT per thread: rencana (twiddle, algoritma) untuk ukuran
+    /// yang sama dipakai ulang, bukan dibangun ulang tiap panggilan.
+    static PLANNER: RefCell<FftPlanner<f32>> = RefCell::new(FftPlanner::new());
+}
+
 /// FFT 2D in-place pada buffer `(h, w)` row-major; `inverse` memilih arah.
 fn fft2_inplace(buf: &mut [Complex<f32>], w: usize, h: usize, inverse: bool) {
-    let mut planner = FftPlanner::<f32>::new();
-    let fx = if inverse {
-        planner.plan_fft_inverse(w)
-    } else {
-        planner.plan_fft_forward(w)
-    };
-    let fy = if inverse {
-        planner.plan_fft_inverse(h)
-    } else {
-        planner.plan_fft_forward(h)
-    };
+    let (fx, fy) = PLANNER.with(|p| {
+        let mut planner = p.borrow_mut();
+        if inverse {
+            (planner.plan_fft_inverse(w), planner.plan_fft_inverse(h))
+        } else {
+            (planner.plan_fft_forward(w), planner.plan_fft_forward(h))
+        }
+    });
     // Baris.
     let mut scratch = vec![Complex::new(0.0, 0.0); fx.get_inplace_scratch_len()];
     for row in buf.chunks_mut(w) {

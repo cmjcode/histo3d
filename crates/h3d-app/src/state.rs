@@ -23,7 +23,7 @@ use h3d_engine::{
 };
 use h3d_i18n::t;
 
-use crate::features::{reconstruct, register, report, segment, slides};
+use crate::features::{detect, reconstruct, register, report, segment, slides};
 use crate::gpu::Gpu;
 use crate::panels::browser::BrowserState;
 use crate::panels::mpp_prompt::MppPrompt;
@@ -78,14 +78,17 @@ pub enum Drawer {
     Labels,
     /// Daftar QC dan pengaturan banding.
     Align,
+    /// Deteksi AI: model ML, cakupan, jalankan, tinjau usulan.
+    Detect,
 }
 
 impl Drawer {
     /// Semua laci, urutan tombol di bilah atas.
-    pub const ALL: [Drawer; 5] = [
+    pub const ALL: [Drawer; 6] = [
         Drawer::Layers,
         Drawer::Sample,
         Drawer::Labels,
+        Drawer::Detect,
         Drawer::Align,
         Drawer::Tumor3D,
     ];
@@ -98,6 +101,7 @@ impl Drawer {
             Drawer::Tumor3D => "drawer-tumor3d",
             Drawer::Labels => "drawer-labels",
             Drawer::Align => "drawer-align",
+            Drawer::Detect => "drawer-detect",
         }
     }
 
@@ -110,9 +114,14 @@ impl Drawer {
             Drawer::Tumor3D => icons::CUBE,
             Drawer::Labels => icons::DRAW,
             Drawer::Align => icons::COMPARE,
+            Drawer::Detect => icons::AI,
         }
     }
 }
+
+/// Jeda setelah suntingan label terakhir sebelum mesh/laporan dihitung
+/// ulang (milidetik).
+pub const DERIVED_DEBOUNCE_MS: u64 = 400;
 
 /// Hasil job latar.
 pub enum JobOutput {
@@ -135,10 +144,14 @@ pub enum JobOutput {
     ClassicProposal(SlideId, Box<Proposal>),
     /// Usulan tertunda (AI/interpolasi) sudah masuk antrean sesi.
     PendingProposals,
+    /// Deteksi AI dari laci Deteksi selesai; usulan masuk antrean sesi.
+    Detected(detect::DetectSummary),
     /// Atribut dihitung.
     AttrComputed(AttrId),
     /// Berkas ekspor ditulis.
     Exported(Vec<PathBuf>),
+    /// Piramida bertile untuk gambar biasa selesai dibangun.
+    PyramidsPrepared,
     /// Inti terdeteksi untuk kalibrasi ambang IHC.
     Nuclei(Box<segment::NucleiOverlay>),
 }
@@ -193,6 +206,11 @@ pub struct AppState {
     pub tiles: TileStreamer,
     /// Thumbnail irisan.
     pub thumbs: ThumbCache,
+    /// Pembuat thumbnail di thread latar.
+    pub thumb_worker: crate::thumbs::ThumbWorker,
+    /// Suntingan label terakhir; turunan (mesh, laporan) dihitung ulang
+    /// setelah jeda singkat, bukan di tengah rangkaian goresan.
+    pub last_edit: Option<std::time::Instant>,
     /// Irisan terpilih (di tumpukan 3D, laci, dan tampilan 2D).
     pub current: Option<SlideId>,
     /// Pelacak Pencil/jari.
@@ -205,6 +223,8 @@ pub struct AppState {
     pub segment: segment::SegmentState,
     /// Keadaan kanvas 3D dan rekonstruksi.
     pub recon: reconstruct::ReconState,
+    /// Keadaan laci Deteksi AI.
+    pub detect: detect::DetectState,
     /// Keadaan laporan.
     pub report: report::ReportState,
     /// Dialog Tentang terbuka.
@@ -256,12 +276,15 @@ impl AppState {
             job: None,
             toasts: Toasts::default(),
             thumbs: ThumbCache::default(),
+            thumb_worker: crate::thumbs::ThumbWorker::new(),
+            last_edit: None,
             current: None,
             touch: TouchTracker::default(),
             slides: Default::default(),
             register: Default::default(),
             segment: Default::default(),
             recon: Default::default(),
+            detect: Default::default(),
             report: Default::default(),
             show_about: false,
             show_settings: false,
@@ -300,6 +323,8 @@ impl AppState {
             .or_else(|| session.slides().first().map(|s| s.id));
         self.tiles.reset();
         self.thumbs.clear();
+        self.thumb_worker.clear();
+        self.last_edit = None;
         self.slides = Default::default();
         self.register = Default::default();
         self.segment = Default::default();
@@ -312,6 +337,7 @@ impl AppState {
         self.mpp_prompt = None;
         self.pending_import = None;
         self.palette_key = 0;
+        self.detect = Default::default();
         self.session = Some(Arc::new(Mutex::new(session)));
     }
 
@@ -374,6 +400,8 @@ impl AppState {
                         },
                         None,
                     );
+                } else {
+                    self.start_prepare_pyramids();
                 }
                 true
             }
@@ -544,6 +572,41 @@ impl AppState {
         });
     }
 
+    /// Bangun piramida bertile untuk gambar biasa yang belum punya (proyek
+    /// lama atau cache terhapus) sebagai job, agar pembukaan irisan pertama
+    /// tidak memblokir UI. Tidak melakukan apa-apa bila semua sudah ada.
+    /// Mengembalikan `true` bila job dimulai.
+    pub fn start_prepare_pyramids(&mut self) -> bool {
+        let Some(shared) = self.session.clone() else {
+            return false;
+        };
+        let needing = match try_lock_session(&shared) {
+            Some(s) => s.slides_needing_pyramid(),
+            None => return false,
+        };
+        if needing.is_empty() {
+            return false;
+        }
+        self.start_job(t!("job-pyramid"), move |s, p| {
+            let n = needing.len().max(1) as f32;
+            for (i, id) in needing.iter().enumerate() {
+                if p.is_cancelled() {
+                    return Err(EngineError::Cancelled);
+                }
+                let sub = h3d_core::SubProgress::new(p, i as f32 / n, (i + 1) as f32 / n);
+                s.prepare_pyramid(*id, &sub)?;
+            }
+            Ok(JobOutput::PyramidsPrepared)
+        })
+    }
+
+    /// Turunan (mesh 3D, laporan) boleh dihitung ulang sekarang: tidak ada
+    /// suntingan label dalam jeda terakhir.
+    pub fn derived_ready(&self) -> bool {
+        self.last_edit
+            .is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(DERIVED_DEBOUNCE_MS))
+    }
+
     /// Periksa job; bila selesai, terapkan hasilnya ke keadaan UI.
     /// Mengembalikan `true` selama job masih berjalan.
     pub fn poll_job(&mut self) -> bool {
@@ -605,6 +668,10 @@ impl AppState {
                 }
                 self.view = View::Stack3D;
                 self.recon.fitted = false;
+                // Irisan lama tanpa piramida (proyek lama): bangun dulu.
+                if self.start_prepare_pyramids() {
+                    return;
+                }
                 // Susun otomatis: usulan urutan (≥ 3 irisan) lalu registrasi.
                 if self.settings.auto_stack && !ids.is_empty() {
                     let n = self.usable_slide_count();
@@ -653,7 +720,14 @@ impl AppState {
                 self.segment.set_classic(slide, *proposal);
             }
             JobOutput::PendingProposals => self.toasts.info(t!("segment-proposals-ready")),
+            JobOutput::Detected(summary) => {
+                self.toasts
+                    .info(t!("detect-done", n = summary.slides.to_string()));
+                self.detect.last = Some(summary);
+                self.drawer = Some(Drawer::Detect);
+            }
             JobOutput::AttrComputed(_) => self.toasts.info(t!("attr-done")),
+            JobOutput::PyramidsPrepared => {}
             JobOutput::Exported(paths) => {
                 let dir = paths
                     .first()
@@ -719,6 +793,7 @@ impl AppState {
         self.tiles.invalidate_labels(slide);
         self.recon.needs_reload = true;
         self.report.needs_refresh = true;
+        self.last_edit = Some(std::time::Instant::now());
     }
 
     /// Kait peringatan memori (9.4): kosongkan cache tile CPU dan GPU serta

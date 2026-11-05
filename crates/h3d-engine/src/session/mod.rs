@@ -1,8 +1,9 @@
 //! `Session`: proyek terbuka + bundel + cache + undo (8.8).
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use h3d_core::{
@@ -22,6 +23,7 @@ mod figures;
 mod images;
 mod import;
 mod labels;
+mod models;
 mod recon;
 mod register;
 mod spatial;
@@ -29,9 +31,10 @@ mod spatial;
 pub use attrs::AttrParams;
 pub use export::ExportKind;
 pub use figures::{MarginFigure, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE};
-pub use images::REG_IMAGE_MPP;
+pub use images::{ThumbTask, REG_IMAGE_MPP};
 pub use import::ImportOptions;
 pub use labels::PendingProposal;
+pub use models::{kind_for_class, ModelEntry, ModelLabelSetup, MODEL_ONNX_FILE, MODEL_SPEC_FILE};
 pub use register::{QcRow, RegSummary, RegisterRun};
 
 /// Versi aplikasi yang dicetak di laporan.
@@ -42,6 +45,36 @@ pub(crate) struct LabelSlot {
     pub(crate) store: LabelStore,
     pub(crate) dirty: bool,
     pub(crate) undo: UndoStack<LabelStore>,
+    /// Hash isi (`encode_lbl`) untuk kunci cache rekonstruksi; 0 = belum
+    /// dihitung sejak suntingan terakhir. Dihitung malas oleh
+    /// [`Session::label_content_hash`].
+    pub(crate) content_hash: AtomicU64,
+}
+
+impl LabelSlot {
+    pub(crate) fn new(store: LabelStore) -> Self {
+        LabelSlot {
+            store,
+            dirty: false,
+            undo: UndoStack::default(),
+            content_hash: AtomicU64::new(0),
+        }
+    }
+
+    /// Tandai label berubah (hash isi dibuang).
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+        *self.content_hash.get_mut() = 0;
+    }
+}
+
+/// Hash isi berkas label di disk, dikunci metadata berkas (ukuran, mtime)
+/// agar tidak dibaca ulang tiap kali.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FileHash {
+    pub(crate) len: u64,
+    pub(crate) modified: Option<std::time::SystemTime>,
+    pub(crate) hash: u64,
 }
 
 /// Hasil rekonstruksi terakhir (juga tersimpan di `cache/vox/`).
@@ -72,12 +105,28 @@ pub struct Session {
     /// impor (diisi saat proyek dibuka dan tiap kali pembacaan mendapati
     /// ketidakcocokan). `Mutex` karena pembacaan piksel berjalan lewat `&self`.
     pub(crate) changed: Mutex<BTreeSet<SlideId>>,
+    /// Sumber piksel yang sedang terbuka (LRU, paling banyak
+    /// `Budgets::max_open_slides`); thumbnail, registrasi, segmentasi dan
+    /// atribut berbagi satu backend per irisan.
+    pub(crate) sources: Mutex<images::SourceCache>,
+    /// Sidik jari berkas slide yang sudah dihitung, dikunci metadata berkas
+    /// (ukuran + mtime): berkas tidak dibaca ulang 2 MB tiap akses piksel.
+    pub(crate) fingerprints: Mutex<HashMap<SlideId, FileHash>>,
+    /// Hash berkas label di disk (lihat [`FileHash`]), untuk kunci cache
+    /// rekonstruksi tanpa mengompres ulang label.
+    pub(crate) label_hashes: Mutex<HashMap<SlideId, FileHash>>,
+    /// Label yang ada per irisan, berkunci hash isi label.
+    pub(crate) present_cache: Mutex<HashMap<SlideId, (u64, Vec<h3d_core::LabelId>)>>,
+    /// Model segmentasi AI terakhir yang dimuat (folder → model), agar
+    /// klik "Segmentasi" berikutnya tidak memuat ulang dan mengoptimasi ONNX.
+    pub(crate) segmenter: Mutex<Option<(PathBuf, Arc<h3d_segment::TractSegmenter>)>>,
 }
 
-// Jaminan waktu-kompilasi bahwa sesi boleh dipindah ke thread job.
+// Jaminan waktu-kompilasi bahwa sesi boleh dipindah ke thread job dan
+// dibaca dari banyak thread rayon sekaligus (`&Session` di `par_iter`).
 const _: fn() = || {
-    fn assert_send<T: Send>() {}
-    assert_send::<Session>();
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Session>();
 };
 
 impl Session {
@@ -94,6 +143,13 @@ impl Session {
             attr_notes: Vec::new(),
             project_dirty: false,
             changed: Mutex::new(BTreeSet::new()),
+            sources: Mutex::new(images::SourceCache::new(
+                Budgets::for_platform().max_open_slides,
+            )),
+            fingerprints: Mutex::new(HashMap::new()),
+            label_hashes: Mutex::new(HashMap::new()),
+            present_cache: Mutex::new(HashMap::new()),
+            segmenter: Mutex::new(None),
         }
     }
 
@@ -140,8 +196,9 @@ impl Session {
             .map(|(id, _)| *id)
             .collect();
         for id in dirty {
-            self.save_labels(id)?;
+            self.write_labels(id)?;
         }
+        // `project.json` ditulis sekali, bukan sekali per irisan kotor.
         self.bundle.save_project(&self.project)?;
         self.project_dirty = false;
         Ok(())
@@ -201,6 +258,9 @@ impl Session {
     /// Ganti anggaran (dipilih `h3d-app` saat mulai).
     pub fn set_budgets(&mut self, budgets: Budgets) {
         self.budgets = budgets;
+        if let Ok(mut c) = self.sources.lock() {
+            c.set_max(budgets.max_open_slides);
+        }
     }
 
     /// Ganti sumber waktu provenance (tes, jalan emas CLI).
@@ -246,6 +306,7 @@ impl Session {
             )));
         }
         self.labels.remove(&slide);
+        self.invalidate_source(slide);
         let s = self.slide_mut(slide)?;
         s.mpp = mpp;
         s.reg = None;
@@ -462,6 +523,7 @@ impl Session {
         self.labels.remove(&slide);
         self.pending.remove(&slide);
         self.changed_set().remove(&slide);
+        self.invalidate_source(slide);
         h3d_io::remove_if_exists(&self.bundle.label_path(slide))?;
         for a in &self.project.attrs {
             self.bundle.remove_attr(slide, &a.file_stem())?;

@@ -217,7 +217,7 @@ fn key_values(ui: &mut Ui, id: &str, rows: &[(String, String)]) {
 
 /// Hitung ulang laporan bila kotor.
 fn refresh(app: &mut AppState, sess: &mut Session) {
-    if app.report.needs_refresh {
+    if app.report.needs_refresh && app.derived_ready() {
         app.report.needs_refresh = false;
         match sess.measure() {
             Ok(r) => app.report.report = Some(r),

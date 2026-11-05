@@ -1,4 +1,4 @@
-//! Uji integrasi backend `h3d-slide`: piramida datar, cache piramida, TIFF
+//! Uji integrasi backend `h3d-slide`: piramida datar, piramida bertile, TIFF
 //! multi-IFD, berkas rusak, cache tile, pemuat tile, thumbnail, sidik jari.
 
 use std::fs;
@@ -8,8 +8,10 @@ use std::time::Duration;
 
 use h3d_core::SlideId;
 use h3d_slide::{
-    fingerprint, open_slide, parse_aperio_mpp, thumbnail, FlatBackend, SlideError, SlideInfo,
-    SlideSource, TiffBackend, TileCache, TileKey, TileLoader, TileRequest, BACKGROUND,
+    build_tiled_pyramid, build_tiled_pyramid_from_path, build_tiled_pyramid_from_source,
+    fingerprint, open_slide, parse_aperio_mpp, thumbnail, tiled_pyramid_exists, FlatBackend,
+    SlideError, SlideInfo, SlideSource, TiffBackend, TileCache, TileKey, TileLoader, TileRequest,
+    TiledPyramid, BACKGROUND,
 };
 use image::{Rgba, RgbaImage};
 use tiff::encoder::colortype::RGB8;
@@ -109,43 +111,102 @@ fn flat_read_region_matches_source_and_fills_white_outside() {
     assert!(b.read_region(0, 0, 0, 0, 5).is_err());
 }
 
-#[test]
-fn flat_pyramid_cache_roundtrip_is_identical() {
-    let dir = tempfile::tempdir().unwrap();
-    let img = test_image(1100, 900);
-    let b = FlatBackend::from_image(img).unwrap();
-    b.write_pyramid_cache(dir.path()).unwrap();
+// ---------------------------------------------------------------- Tiled
 
-    let loaded = FlatBackend::load_pyramid_cache(dir.path()).unwrap();
-    assert_eq!(loaded.info(), b.info());
-    for l in 0..b.info().levels.len() as u32 {
-        assert_same_pixels(loaded.level_image(l).unwrap(), b.level_image(l).unwrap());
-    }
+#[test]
+fn tiled_pyramid_matches_in_memory_pyramid_pixel_exact() {
+    let dir = tempfile::tempdir().unwrap();
+    // 1100×900 → tiga level; lebar bukan kelipatan 256 (tile tepi), tinggi
+    // bukan kelipatan pita.
+    let img = test_image(1100, 900);
+    let flat = FlatBackend::from_image(img.clone()).unwrap();
+    let mut rows = h3d_slide::tiled::ImageRows::new(img);
+    let mut calls = 0;
+    build_tiled_pyramid(dir.path(), &mut rows, |done, total| {
+        calls += 1;
+        assert!(done <= total);
+        true
+    })
+    .unwrap();
+    assert!(calls >= 4);
+    assert!(tiled_pyramid_exists(dir.path()));
     // Tidak ada berkas .tmp tersisa (penulisan atomik).
     assert!(fs::read_dir(dir.path()).unwrap().all(|e| !e
         .unwrap()
         .path()
         .to_string_lossy()
         .ends_with(".tmp")));
+
+    let tiled = TiledPyramid::open(dir.path()).unwrap();
+    assert_eq!(tiled.info().levels, flat.info().levels);
+    assert_eq!(tiled.info().tile_size, 256);
+    for l in 0..flat.info().levels.len() as u32 {
+        let size = flat.info().levels[l as usize].size;
+        let whole = tiled.read_region(l, 0, 0, size[0], size[1]).unwrap();
+        assert_same_pixels(&whole, flat.level_image(l).unwrap());
+    }
+    // Wilayah lintas tile, sebagian di luar gambar: sama dengan sumber memori.
+    let a = tiled.read_region(0, 200, 700, 400, 300).unwrap();
+    let b = flat.read_region(0, 200, 700, 400, 300).unwrap();
+    assert_same_pixels(&a, &b);
+    let a = tiled.read_region(1, -10, -10, 50, 50).unwrap();
+    let b = flat.read_region(1, -10, -10, 50, 50).unwrap();
+    assert_same_pixels(&a, &b);
+    // Satu tile persis (jalur viewer).
+    let a = tiled.read_region(0, 256, 256, 256, 256).unwrap();
+    let b = flat.read_region(0, 256, 256, 256, 256).unwrap();
+    assert_same_pixels(&a, &b);
+    assert!(matches!(
+        tiled.read_region(9, 0, 0, 1, 1),
+        Err(SlideError::LevelOutOfRange { level: 9, .. })
+    ));
 }
 
 #[test]
-fn flat_open_with_cache_uses_cache_on_second_open() {
+fn tiled_pyramid_from_png_streams_rows_and_survives_source_removal() {
     let dir = tempfile::tempdir().unwrap();
     let png = dir.path().join("foto.png");
     let cache = dir.path().join("cache");
-    test_image(900, 700).save(&png).unwrap();
+    let img = test_image(900, 700);
+    // PNG RGB (tanpa alfa) agar jalur konversi 3 kanal teruji.
+    image::DynamicImage::ImageRgba8(img.clone())
+        .to_rgb8()
+        .save(&png)
+        .unwrap();
 
-    let first = FlatBackend::open_with_cache(&png, &cache).unwrap();
-    assert!(cache.join("pyramid.json").is_file());
-    // Hapus berkas asal: pembukaan kedua harus tetap berhasil dari cache.
+    build_tiled_pyramid_from_path(&cache, &png, |_, _| true).unwrap();
     fs::remove_file(&png).unwrap();
-    let second = FlatBackend::open_with_cache(&png, &cache).unwrap();
-    assert_eq!(first.info(), second.info());
-    assert_same_pixels(
-        first.level_image(1).unwrap(),
-        second.level_image(1).unwrap(),
-    );
+    let tiled = TiledPyramid::open(&cache).unwrap();
+    let flat = FlatBackend::from_image(img).unwrap();
+    assert_eq!(tiled.info(), flat.info());
+    let a = tiled.read_region(0, 0, 0, 900, 700).unwrap();
+    assert_same_pixels(&a, flat.level_image(0).unwrap());
+}
+
+#[test]
+fn tiled_pyramid_cancel_leaves_no_manifest_or_tmp() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rows = h3d_slide::tiled::ImageRows::new(test_image(700, 1000));
+    let err = build_tiled_pyramid(dir.path(), &mut rows, |done, _| done < 512).unwrap_err();
+    assert!(matches!(err, SlideError::Cancelled));
+    assert!(!tiled_pyramid_exists(dir.path()));
+    assert!(fs::read_dir(dir.path()).unwrap().all(|e| !e
+        .unwrap()
+        .path()
+        .to_string_lossy()
+        .ends_with(".tmp")));
+    assert!(TiledPyramid::open(dir.path()).is_err());
+}
+
+#[test]
+fn tiled_pyramid_from_source_uses_level0_bands() {
+    let dir = tempfile::tempdir().unwrap();
+    let flat = FlatBackend::from_image(test_image(600, 520)).unwrap();
+    build_tiled_pyramid_from_source(dir.path(), &flat, |_, _| true).unwrap();
+    let tiled = TiledPyramid::open(dir.path()).unwrap();
+    assert_eq!(tiled.info().levels, flat.info().levels);
+    let a = tiled.read_region(1, 0, 0, 300, 260).unwrap();
+    assert_same_pixels(&a, flat.level_image(1).unwrap());
 }
 
 #[test]
@@ -255,6 +316,40 @@ fn tiff_multi_ifd_levels_regions_and_mpp() {
     assert_eq!(s.info().level0_size(), [300, 200]);
     let r = s.read_region(0, 0, 0, 4, 4).unwrap();
     assert_eq!(r.get_pixel(3, 3), img.get_pixel(3, 3));
+}
+
+#[test]
+fn tiff_parallel_reads_with_chunk_cache_are_consistent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("par.tif");
+    let img = test_image(400, 300);
+    write_striped_pyramid(&path, &img, None, None);
+    let b = Arc::new(TiffBackend::open_with_cache_bytes(&path, 8 * 1024 * 1024).unwrap());
+    // Banyak thread membaca region tumpang tindih bersamaan: hasil harus
+    // identik dengan sumber (kolam dekoder + cache chunk tidak merusak data).
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let b = Arc::clone(&b);
+            let img = img.clone();
+            std::thread::spawn(move || {
+                for k in 0..20u32 {
+                    let x = (i * 37 + k * 11) % 380;
+                    let y = (i * 13 + k * 7) % 280;
+                    let r = b
+                        .read_region(0, i64::from(x), i64::from(y), 20, 20)
+                        .unwrap();
+                    for yy in 0..20u32 {
+                        for xx in 0..20u32 {
+                            assert_eq!(r.get_pixel(xx, yy), img.get_pixel(x + xx, y + yy));
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
 }
 
 #[test]

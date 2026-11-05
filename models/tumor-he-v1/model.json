@@ -1,0 +1,31 @@
+{
+  "name": "tumor-he-v1",
+  "version": "0.1.0",
+  "input_size": 512,
+  "mpp": 1.84,
+  "mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "classes": [
+    {
+      "index": 0,
+      "label": null
+    },
+    {
+      "index": 1,
+      "label": "Jaringan"
+    },
+    {
+      "index": 2,
+      "label": "Tumor"
+    }
+  ],
+  "task": "segmentation"
+}

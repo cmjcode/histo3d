@@ -3,6 +3,8 @@
 //! Menyediakan trait [`SlideSource`] dengan tiga backend yang dicoba
 //! berurutan oleh [`open_slide`]: [`WsiBackend`] (`wsi-rs`; fitur `wsi`),
 //! [`TiffBackend`] (crate `tiff`), lalu [`FlatBackend`] (crate `image`).
+//! Gambar tanpa piramida (PNG/JPEG, TIFF datar) dibaca lewat piramida
+//! bertile di disk ([`TiledPyramid`]) yang dibangun sekali saat impor.
 //! Juga cache tile CPU berbatas byte ([`TileCache`]), pemuat tile
 //! berprioritas ([`TileLoader`]), sidik jari berkas ([`fingerprint`]),
 //! thumbnail ([`thumbnail`]) dan alat bantu koordinat ([`coords`]).
@@ -17,6 +19,7 @@ pub mod flat;
 pub mod loader;
 pub mod source;
 pub mod tiff_backend;
+pub mod tiled;
 #[cfg(feature = "wsi")]
 pub mod wsi;
 
@@ -36,6 +39,10 @@ pub use source::{
     BACKGROUND,
 };
 pub use tiff_backend::{mpp_from_resolution, parse_aperio_mpp, TiffBackend};
+pub use tiled::{
+    build_tiled_pyramid, build_tiled_pyramid_from_path, build_tiled_pyramid_from_source,
+    tiled_pyramid_exists, RowSource, TiledPyramid,
+};
 #[cfg(feature = "wsi")]
 pub use wsi::WsiBackend;
 
@@ -48,9 +55,9 @@ pub fn open_slide(path: &Path) -> Result<Box<dyn SlideSource>, SlideError> {
     open_slide_impl(path, None)
 }
 
-/// Seperti [`open_slide`], tetapi cache internal `wsi-rs` dibatasi
-/// `wsi_cache_bytes` (dari `h3d_core::Budgets::wsi_internal_cache_bytes`).
-/// Backend lain tidak punya cache internal sehingga nilai ini diabaikan.
+/// Seperti [`open_slide`], tetapi cache internal backend (`wsi-rs`, atau
+/// cache chunk [`TiffBackend`]) dibatasi `wsi_cache_bytes` (dari
+/// `h3d_core::Budgets::wsi_internal_cache_bytes`).
 pub fn open_slide_with_cache_bytes(
     path: &Path,
     wsi_cache_bytes: u64,
@@ -86,7 +93,11 @@ fn open_slide_impl(
         });
     }
 
-    match TiffBackend::open(path) {
+    let tiff = match wsi_cache_bytes {
+        Some(bytes) => TiffBackend::open_with_cache_bytes(path, bytes),
+        None => TiffBackend::open(path),
+    };
+    match tiff {
         Ok(b) => return Ok(Box::new(b)),
         Err(e) => attempts.push(format!("tiff: {e}")),
     }

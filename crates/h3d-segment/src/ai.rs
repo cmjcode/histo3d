@@ -12,14 +12,14 @@
 //! dalam kelompok sebesar jumlah thread, lalu dijumlahkan dalam urutan tetap
 //! (deterministik).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use h3d_core::{AnnotationSource, LabelId, Progress};
 use h3d_imgproc::filters::hann_window_2d;
 use ndarray::Array2;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tract_onnx::prelude::*;
 use tract_onnx::tract_hir::internal::DimLike;
@@ -652,29 +652,62 @@ pub fn infer_slide(
                 keep
             })
             .collect();
-        for chunk in todo.chunks(group) {
-            let outputs: Vec<Result<Vec<f32>, SegError>> = chunk
-                .par_iter()
-                .map(|&x0| {
-                    let rgba = read_tile(x0 as f64 * mpp, y0 as f64 * mpp, s, s)?;
-                    let input = normalize(&rgba)?;
-                    let logits = seg.infer(&input)?;
-                    if logits.len() < c_min * s * s {
-                        return Err(SegError::Model(format!(
-                            "keluaran {} nilai < {}×{s}×{s}",
-                            logits.len(),
-                            c_min
-                        )));
-                    }
-                    Ok(logits)
-                })
-                .collect();
-            for (k, out) in outputs.into_iter().enumerate() {
-                let logits = out?;
-                band.add(chunk[k], &logits, &win);
-                tiles_run += 1;
+        // Pipeline: `group` pekerja mengambil tile berikutnya dari penghitung
+        // bersama (urutan hampir berurutan, tanpa barrier per kelompok),
+        // sementara thread ini menjumlahkan logit ke band **dalam urutan
+        // tile** (penjumlahan f32 deterministik, aturan keras 9). Penyangga
+        // hasil yang menunggu gilirannya paling banyak ≈ `group` tile.
+        let infer_one = |x0: usize| -> Result<Vec<f32>, SegError> {
+            let rgba = read_tile(x0 as f64 * mpp, y0 as f64 * mpp, s, s)?;
+            let input = normalize(&rgba)?;
+            let logits = seg.infer(&input)?;
+            if logits.len() < c_min * s * s {
+                return Err(SegError::Model(format!(
+                    "keluaran {} nilai < {}×{s}×{s}",
+                    logits.len(),
+                    c_min
+                )));
             }
-        }
+            Ok(logits)
+        };
+        let counter = AtomicUsize::new(0);
+        let (tx, rx) =
+            std::sync::mpsc::sync_channel::<(usize, Result<Vec<f32>, SegError>)>(group * 2);
+        let row_result: Result<(), SegError> = rayon::scope(|sc| {
+            for _ in 0..group.min(todo.len().max(1)) {
+                let tx = tx.clone();
+                let counter = &counter;
+                let todo = &todo;
+                let infer_one = &infer_one;
+                sc.spawn(move |_| loop {
+                    if progress.is_cancelled() {
+                        break;
+                    }
+                    let k = counter.fetch_add(1, Ordering::SeqCst);
+                    let Some(&x0) = todo.get(k) else { break };
+                    if tx.send((k, infer_one(x0))).is_err() {
+                        break;
+                    }
+                });
+            }
+            drop(tx);
+            let mut next = 0usize;
+            let mut waiting: BTreeMap<usize, Result<Vec<f32>, SegError>> = BTreeMap::new();
+            for (k, r) in rx {
+                waiting.insert(k, r);
+                while let Some(r) = waiting.remove(&next) {
+                    let logits = r?;
+                    band.add(todo[next], &logits, &win);
+                    tiles_run += 1;
+                    next += 1;
+                }
+            }
+            if progress.is_cancelled() {
+                return Err(SegError::Cancelled);
+            }
+            Ok(())
+        });
+        row_result?;
         // Baris yang tidak lagi tersentuh baris tile berikutnya.
         let rows_done = match ys.get(ri + 1) {
             Some(&y_next) => y_next - y0,

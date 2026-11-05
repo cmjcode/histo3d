@@ -2,6 +2,7 @@
 //! dipakai semua backend.
 
 use image::{Rgba, RgbaImage};
+use rayon::prelude::*;
 
 use crate::error::SlideError;
 
@@ -223,38 +224,48 @@ pub fn half_size(size: [u32; 2]) -> [u32; 2] {
 
 /// Penurunan 2× dengan rata-rata kotak. Ukuran keluaran `ceil(prev / 2)`;
 /// pada tepi ganjil kotak hanya berisi piksel yang ada (1 atau 2 piksel).
-/// Deterministik: pembulatan ke terdekat.
+/// Deterministik: pembulatan ke terdekat; baris dihitung paralel.
 pub fn downsample_2x(src: &RgbaImage) -> RgbaImage {
-    let [ow, oh] = half_size([src.width(), src.height()]);
-    let sw = src.width();
-    let sh = src.height();
-    let raw = src.as_raw();
-    let mut out = RgbaImage::new(ow, oh);
-    let dst = out.as_mut();
-    for oy in 0..oh {
-        let y0 = oy * 2;
-        let y1 = (y0 + 1).min(sh - 1);
-        for ox in 0..ow {
-            let x0 = ox * 2;
-            let x1 = (x0 + 1).min(sw - 1);
-            let mut acc = [0u32; 4];
-            let mut n = 0u32;
-            for yy in y0..=y1 {
-                for xx in x0..=x1 {
-                    let i = ((yy * sw + xx) * 4) as usize;
-                    for c in 0..4 {
-                        acc[c] += u32::from(raw[i + c]);
+    let (raw, ow, oh) = downsample_2x_raw(src.as_raw(), src.width(), src.height());
+    RgbaImage::from_raw(ow, oh, raw).unwrap_or_default()
+}
+
+/// [`downsample_2x`] pada buffer RGBA8 mentah `sw × sh` (panjang
+/// `sw·sh·4`). Mengembalikan `(buffer, lebar, tinggi)` keluaran.
+pub fn downsample_2x_raw(raw: &[u8], sw: u32, sh: u32) -> (Vec<u8>, u32, u32) {
+    let [ow, oh] = half_size([sw, sh]);
+    if sw == 0 || sh == 0 {
+        return (vec![0u8; (ow * oh * 4) as usize], ow, oh);
+    }
+    let ostride = ow as usize * 4;
+    let mut out = vec![0u8; ostride * oh as usize];
+    out.par_chunks_mut(ostride)
+        .enumerate()
+        .for_each(|(oy, dst)| {
+            let oy = oy as u32;
+            let y0 = oy * 2;
+            let y1 = (y0 + 1).min(sh - 1);
+            for ox in 0..ow {
+                let x0 = ox * 2;
+                let x1 = (x0 + 1).min(sw - 1);
+                let mut acc = [0u32; 4];
+                let mut n = 0u32;
+                for yy in y0..=y1 {
+                    for xx in x0..=x1 {
+                        let i = ((yy * sw + xx) * 4) as usize;
+                        for c in 0..4 {
+                            acc[c] += u32::from(raw[i + c]);
+                        }
+                        n += 1;
                     }
-                    n += 1;
+                }
+                let o = ox as usize * 4;
+                for c in 0..4 {
+                    dst[o + c] = ((acc[c] + n / 2) / n) as u8;
                 }
             }
-            let o = ((oy * ow + ox) * 4) as usize;
-            for c in 0..4 {
-                dst[o + c] = ((acc[c] + n / 2) / n) as u8;
-            }
-        }
-    }
-    out
+        });
+    (out, ow, oh)
 }
 
 /// Penurunan rata-rata kotak ke ukuran `ow × oh` (harus ≤ ukuran sumber

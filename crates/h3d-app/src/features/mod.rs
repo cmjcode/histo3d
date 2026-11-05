@@ -7,7 +7,9 @@
 //! - [`segment`]: penandaan — viewer + overlay label, alat gambar, usulan.
 //! - [`reconstruct`]: kanvas tumpukan 3D, picking irisan, mesh, laci Tumor 3D.
 //! - [`report`]: lembar laporan dan ekspor.
+//! - [`detect`]: laci Deteksi AI — model ML, cakupan, jalankan, tinjau usulan.
 
+pub mod detect;
 pub mod reconstruct;
 pub mod register;
 pub mod report;

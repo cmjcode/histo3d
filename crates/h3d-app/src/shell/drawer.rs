@@ -10,13 +10,14 @@
 //! - Penyejajaran ← daftar QC dan Sejajarkan semua (mode Registrasi).
 //! - Tumor 3D ← parameter, visibilitas/opasitas, bidang potong, irisan di 3D,
 //!   lapisan skalar, titik terpilih (mode Rekonstruksi).
+//! - Deteksi AI ← model ML di bundel, cakupan, jalankan, tinjau usulan.
 
 use egui::{Rect, Ui};
 use h3d_core::SlideId;
 use h3d_engine::Session;
 use h3d_i18n::t;
 
-use crate::features::{reconstruct, register, segment, slides};
+use crate::features::{detect, reconstruct, register, segment, slides};
 use crate::panels::sample::sample_ui;
 use crate::panels::slide_meta::{slide_meta_ui, SlideMetaAction};
 use crate::state::{AppState, Drawer};
@@ -86,6 +87,7 @@ fn body(app: &mut AppState, sess: &mut Session, ui: &mut Ui, drawer: Drawer) -> 
             None
         }
         Drawer::Tumor3D => reconstruct::tumor_drawer(app, sess, ui),
+        Drawer::Detect => detect::detect_drawer(app, sess, ui),
     }
 }
 
@@ -112,6 +114,7 @@ fn sample_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
             SlideMetaAction::Removed => {
                 app.tiles.forget_slide(id);
                 app.thumbs.forget(id);
+                app.thumb_worker.forget(id);
                 app.recon.uploaded_slices.remove(&id);
                 app.current = None;
                 app.fix_current(sess);

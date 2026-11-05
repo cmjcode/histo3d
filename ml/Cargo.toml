@@ -13,9 +13,11 @@ authors = ["Yulius Jayuda <yulius.jayuda@gmail.com>"]
 rust-version = "1.96"
 
 [workspace.dependencies]
-h3d-core = { path = "../crates/h3d-core", version = "0.0.1" }
-h3d-imgproc = { path = "../crates/h3d-imgproc", version = "0.0.1" }
-h3d-segment = { path = "../crates/h3d-segment", version = "0.0.1" }
+# `version` harus mengikuti `workspace.package.version` di ../Cargo.toml
+# (cargo deny menolak dependensi path tanpa versi).
+h3d-core = { path = "../crates/h3d-core", version = "0.0.2" }
+h3d-imgproc = { path = "../crates/h3d-imgproc", version = "0.0.2" }
+h3d-segment = { path = "../crates/h3d-segment", version = "0.0.2" }
 burn = { version = "0.22", default-features = false, features = ["std", "optim", "wgpu", "metal", "autotune", "flex", "autodiff"] }
 tract-onnx = "0.23"
 prost = "0.14"

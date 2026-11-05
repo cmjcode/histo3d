@@ -307,6 +307,19 @@ pub fn pick_slides() -> Vec<PathBuf> {
     }
 }
 
+/// Pilih folder model AI (`model.json` + `model.onnx`) untuk dipasang ke
+/// bundel (desktop). Di iPad model disalin lewat Files.app ke `models/`.
+pub fn pick_model_dir() -> Option<PathBuf> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        rfd::FileDialog::new().pick_folder()
+    }
+    #[cfg(target_os = "ios")]
+    {
+        None
+    }
+}
+
 /// Pilih folder tujuan ekspor (desktop). Di iPad ekspor selalu ke `out/`
 /// di dalam bundel (terlihat di Files.app).
 pub fn pick_export_dir() -> Option<PathBuf> {

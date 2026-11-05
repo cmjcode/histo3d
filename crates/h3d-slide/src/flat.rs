@@ -1,14 +1,13 @@
-//! `FlatBackend`: gambar datar (JPEG/PNG/TIFF biasa) lewat crate `image`.
-//! Piramida dibangun sendiri dengan penurunan 2× (rata-rata kotak) sampai
-//! sisi terpanjang ≤ [`FlatBackend::MIN_TOP_SIDE`] px dan disimpan di memori.
-//! mpp selalu `None` (foto kamera tidak membawa skala; aturan keras 7).
+//! `FlatBackend`: gambar datar (JPEG/PNG/TIFF biasa) lewat crate `image`,
+//! **seluruhnya di memori**. Piramida dibangun dengan penurunan 2× (rata-rata
+//! kotak) sampai sisi terpanjang ≤ [`FlatBackend::MIN_TOP_SIDE`] px.
+//! Cocok untuk gambar kecil dan tes; gambar besar memakai piramida bertile
+//! di disk ([`crate::tiled::TiledPyramid`]) agar RAM tidak ikut ukuran
+//! gambar. mpp selalu `None` (foto kamera tidak membawa skala; aturan keras 7).
 
-use std::fs;
-use std::io::{Cursor, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use image::{ImageFormat, ImageReader, RgbaImage};
-use serde::{Deserialize, Serialize};
+use image::{ImageReader, RgbaImage};
 
 use crate::error::SlideError;
 use crate::source::{
@@ -21,20 +20,6 @@ pub struct FlatBackend {
     info: SlideInfo,
     levels: Vec<RgbaImage>,
 }
-
-/// Manifes cache piramida (`pyramid.json`).
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct PyramidManifest {
-    /// Versi format manifes.
-    version: u32,
-    /// Ukuran tiap level `[lebar, tinggi]`, indeks 0 = resolusi penuh.
-    level_sizes: Vec<[u32; 2]>,
-    /// Ukuran tile yang dilaporkan `SlideInfo`.
-    tile_size: u32,
-}
-
-const MANIFEST_VERSION: u32 = 1;
-const MANIFEST_NAME: &str = "pyramid.json";
 
 impl FlatBackend {
     /// Sisi terpanjang level teratas tidak melebihi nilai ini.
@@ -107,81 +92,6 @@ impl FlatBackend {
         })
     }
 
-    /// Buka lewat cache: bila `cache_dir` berisi piramida yang sah, muat
-    /// darinya; bila tidak, dekode `path`, bangun piramida, lalu simpan ke
-    /// `cache_dir`. Kegagalan menulis cache hanya dicatat (log), tidak
-    /// menggagalkan pembukaan.
-    pub fn open_with_cache(path: &Path, cache_dir: &Path) -> Result<Self, SlideError> {
-        match Self::load_pyramid_cache(cache_dir) {
-            Ok(b) => return Ok(b),
-            Err(e) => log::debug!("cache piramida {} tidak dipakai: {e}", cache_dir.display()),
-        }
-        let backend = Self::open(path)?;
-        if let Err(e) = backend.write_pyramid_cache(cache_dir) {
-            log::warn!("gagal menulis cache piramida {}: {e}", cache_dir.display());
-        }
-        Ok(backend)
-    }
-
-    /// Simpan semua level sebagai PNG (`level_00.png`, …) plus `pyramid.json`
-    /// ke `dir`. Penulisan atomik: `.tmp` lalu `rename` (aturan keras 10).
-    pub fn write_pyramid_cache(&self, dir: &Path) -> Result<(), SlideError> {
-        fs::create_dir_all(dir).map_err(|e| SlideError::io(dir, e))?;
-        for (i, img) in self.levels.iter().enumerate() {
-            let mut buf = Cursor::new(Vec::new());
-            img.write_to(&mut buf, ImageFormat::Png)?;
-            write_atomic(&dir.join(level_file_name(i)), buf.get_ref())?;
-        }
-        let manifest = PyramidManifest {
-            version: MANIFEST_VERSION,
-            level_sizes: self.info.levels.iter().map(|l| l.size).collect(),
-            tile_size: self.info.tile_size,
-        };
-        let json = serde_json::to_vec_pretty(&manifest)
-            .map_err(|e| SlideError::Decode(format!("serialisasi manifes: {e}")))?;
-        write_atomic(&dir.join(MANIFEST_NAME), &json)
-    }
-
-    /// Muat piramida dari `dir` yang ditulis [`Self::write_pyramid_cache`].
-    pub fn load_pyramid_cache(dir: &Path) -> Result<Self, SlideError> {
-        let manifest_path = dir.join(MANIFEST_NAME);
-        let json = fs::read(&manifest_path).map_err(|e| SlideError::io(&manifest_path, e))?;
-        let manifest: PyramidManifest = serde_json::from_slice(&json)
-            .map_err(|e| SlideError::Decode(format!("manifes cache rusak: {e}")))?;
-        if manifest.version != MANIFEST_VERSION {
-            return Err(SlideError::Decode(format!(
-                "versi manifes cache {} tidak didukung",
-                manifest.version
-            )));
-        }
-        if manifest.level_sizes.is_empty() {
-            return Err(SlideError::Decode("manifes cache tanpa level".into()));
-        }
-        let mut levels = Vec::with_capacity(manifest.level_sizes.len());
-        for (i, size) in manifest.level_sizes.iter().enumerate() {
-            let p = dir.join(level_file_name(i));
-            let img = ImageReader::open(&p)
-                .map_err(|e| SlideError::io(&p, e))?
-                .with_guessed_format()
-                .map_err(|e| SlideError::io(&p, e))?
-                .decode()?
-                .into_rgba8();
-            if [img.width(), img.height()] != *size {
-                return Err(SlideError::Decode(format!(
-                    "level cache {i} berukuran {}x{}, manifes menyebut {}x{}",
-                    img.width(),
-                    img.height(),
-                    size[0],
-                    size[1]
-                )));
-            }
-            levels.push(img);
-        }
-        let mut backend = Self::from_levels(levels)?;
-        backend.info.tile_size = manifest.tile_size.max(1);
-        Ok(backend)
-    }
-
     /// Akses langsung ke gambar level `level`.
     pub fn level_image(&self, level: u32) -> Result<&RgbaImage, SlideError> {
         self.levels
@@ -211,25 +121,4 @@ impl SlideSource for FlatBackend {
             Ok(crop(img, s.x, s.y, s.w, s.h))
         })
     }
-}
-
-fn level_file_name(i: usize) -> String {
-    format!("level_{i:02}.png")
-}
-
-/// Tulis `bytes` ke `path` secara atomik (`.tmp` lalu `rename`).
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), SlideError> {
-    let tmp: PathBuf = {
-        let mut name = path
-            .file_name()
-            .map(|n| n.to_os_string())
-            .unwrap_or_default();
-        name.push(".tmp");
-        path.with_file_name(name)
-    };
-    let mut f = fs::File::create(&tmp).map_err(|e| SlideError::io(&tmp, e))?;
-    f.write_all(bytes).map_err(|e| SlideError::io(&tmp, e))?;
-    f.sync_all().map_err(|e| SlideError::io(&tmp, e))?;
-    drop(f);
-    fs::rename(&tmp, path).map_err(|e| SlideError::io(path, e))
 }

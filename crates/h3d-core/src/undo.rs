@@ -1,7 +1,7 @@
 //! Tumpukan undo berbasis command (8.1), pola `ducad-ink/src/commands.rs`.
 
 /// Satu perubahan yang bisa diterapkan dan dibatalkan atas keadaan `S`.
-pub trait Command<S>: Send {
+pub trait Command<S>: Send + Sync {
     /// Terapkan perubahan.
     fn apply(&mut self, state: &mut S);
     /// Batalkan perubahan (keadaan harus kembali persis).

@@ -294,14 +294,20 @@ impl Session {
             // setengah langkah pasangan berikutnya dan bisa dibatalkan.
             let base = done.load(Ordering::SeqCst) as f32 / total as f32;
             let load_p = SubProgress::new(p, base, base + 0.5 / total as f32);
+            let needed: std::collections::BTreeSet<SlideId> =
+                chunk.iter().flat_map(|&(m, f)| [m, f]).collect();
+            load_p.set(0.0, "memuat gambar registrasi");
+            // Pemuatan (dekode slide bila cache `.reg` belum ada) paralel;
+            // hasil digabung dalam urutan id yang tetap (aturan keras 9).
+            let loaded: Vec<(SlideId, Result<Arc<RegImage>, EngineError>)> = needed
+                .iter()
+                .collect::<Vec<_>>()
+                .par_iter()
+                .map(|&&id| (id, self.registration_image_with_progress(id, &load_p)))
+                .collect();
             let mut images: HashMap<SlideId, Arc<RegImage>> = HashMap::new();
-            for &(m, f) in chunk {
-                for id in [m, f] {
-                    if let std::collections::hash_map::Entry::Vacant(e) = images.entry(id) {
-                        load_p.set(0.0, "memuat gambar registrasi");
-                        e.insert(self.registration_image_with_progress(id, &load_p)?);
-                    }
-                }
+            for (id, r) in loaded {
+                images.insert(id, r?);
             }
             let jobs: Vec<(SlideId, SlideId, Option<Affine2>)> = chunk
                 .iter()
@@ -401,16 +407,30 @@ impl Session {
     pub fn suggest_order(&self, p: &dyn Progress) -> Result<OrderSuggestion, EngineError> {
         let slides = self.project.slides_ordered();
         let n = slides.len().max(1) as f32;
+        let done = AtomicUsize::new(0);
+        // Citra disiapkan paralel (dekode slide bila cache belum ada);
+        // `inputs` tetap dalam urutan tumpukan.
+        let prepared: Vec<Result<Option<Arc<RegImage>>, EngineError>> = slides
+            .par_iter()
+            .map(|s| {
+                if p.is_cancelled() {
+                    return Err(EngineError::Cancelled);
+                }
+                if s.status != SlideStatus::Ok {
+                    return Ok(None);
+                }
+                let full = self.registration_image_with_progress(s.id, &CancelOnly(p))?;
+                let k = done.fetch_add(1, Ordering::SeqCst) + 1;
+                p.set(0.5 * k as f32 / n, "menyiapkan citra urutan");
+                Ok(Some(Arc::new(
+                    full.downsample_to(h3d_register::SIMILARITY_MPP),
+                )))
+            })
+            .collect();
         let mut inputs = Vec::with_capacity(slides.len());
-        for (i, s) in slides.iter().enumerate() {
-            if p.is_cancelled() {
-                return Err(EngineError::Cancelled);
-            }
-            let image = if s.status == SlideStatus::Ok {
-                let sub = SubProgress::new(p, 0.5 * i as f32 / n, 0.5 * (i + 1) as f32 / n);
-                sub.set(0.0, "menyiapkan citra urutan");
-                let full = self.registration_image_with_progress(s.id, &sub)?;
-                Arc::new(full.downsample_to(h3d_register::SIMILARITY_MPP))
+        for (s, prepared) in slides.iter().zip(prepared) {
+            let image = if let Some(img) = prepared? {
+                img
             } else {
                 // Irisan non-Ok tidak dihitung; cukup citra pengganti mungil.
                 Arc::new(RegImage::new(

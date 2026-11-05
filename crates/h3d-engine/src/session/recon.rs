@@ -50,6 +50,30 @@ pub(crate) struct SliceData<'a> {
     /// `(label, interpolasi?)`.
     pub annotated: Vec<(u8, bool)>,
     pub reviewed: Vec<u8>,
+    /// Hash isi label (lihat [`Session::label_content_hash`]).
+    pub hash: u64,
+}
+
+/// Bagian [`SliceData`] yang menentukan kunci cache rekonstruksi, tanpa
+/// penyimpanan labelnya; bisa dibangun dari cache tanpa membaca `.lbl`.
+pub(crate) struct SliceMeta {
+    pub id: SlideId,
+    pub z_um: f64,
+    pub transform: SlideTransform,
+    pub annotated: Vec<(u8, bool)>,
+    pub hash: u64,
+}
+
+impl SliceData<'_> {
+    fn meta(&self) -> SliceMeta {
+        SliceMeta {
+            id: self.id,
+            z_um: self.z_um,
+            transform: self.transform.clone(),
+            annotated: self.annotated.clone(),
+            hash: self.hash,
+        }
+    }
 }
 
 /// `SliceInput` untuk `h3d-volume` dari data irisan dan adaptornya.
@@ -125,19 +149,9 @@ impl Session {
             if entry.status != SlideStatus::Ok {
                 continue;
             }
-            let mut annotated = Vec::new();
-            let mut reviewed = Vec::new();
-            for l in store.labels_present() {
-                // Piksel berlabel tanpa definisi di tabel label diabaikan.
-                if self.project.label(l).is_none() {
-                    continue;
-                }
-                let rec = self.project.annotation(id, l);
-                annotated.push((l.0, rec.is_some_and(|a| a.source.is_interpolated())));
-                if rec.is_some_and(|a| a.review.is_reviewed()) {
-                    reviewed.push(l.0);
-                }
-            }
+            let hash = self.label_content_hash(id, Some(&store))?;
+            let present = self.labels_present_cached(id, hash, || store.labels_present());
+            let (annotated, reviewed) = self.annotation_flags(id, &present);
             if annotated.is_empty() {
                 continue;
             }
@@ -148,6 +162,105 @@ impl Session {
                 store,
                 annotated,
                 reviewed,
+                hash,
+            });
+        }
+        Ok(out)
+    }
+
+    /// `(annotated, reviewed)` untuk label `present` pada irisan `id`.
+    fn annotation_flags(&self, id: SlideId, present: &[LabelId]) -> (Vec<(u8, bool)>, Vec<u8>) {
+        let mut annotated = Vec::new();
+        let mut reviewed = Vec::new();
+        for &l in present {
+            // Piksel berlabel tanpa definisi di tabel label diabaikan.
+            if self.project.label(l).is_none() {
+                continue;
+            }
+            let rec = self.project.annotation(id, l);
+            annotated.push((l.0, rec.is_some_and(|a| a.source.is_interpolated())));
+            if rec.is_some_and(|a| a.review.is_reviewed()) {
+                reviewed.push(l.0);
+            }
+        }
+        (annotated, reviewed)
+    }
+
+    /// Label yang ada di irisan `id`, dari cache bila hash isinya sama;
+    /// `compute` dipanggil hanya saat cache tidak berlaku.
+    fn labels_present_cached(
+        &self,
+        id: SlideId,
+        hash: u64,
+        compute: impl FnOnce() -> Vec<LabelId>,
+    ) -> Vec<LabelId> {
+        if let Ok(c) = self.present_cache.lock() {
+            if let Some((h, v)) = c.get(&id) {
+                if *h == hash {
+                    return v.clone();
+                }
+            }
+        }
+        let v = compute();
+        if let Ok(mut c) = self.present_cache.lock() {
+            c.insert(id, (hash, v.clone()));
+        }
+        v
+    }
+
+    /// Seperti [`Self::slice_data`] tetapi hanya metadata kunci: label yang
+    /// tidak berubah sejak panggilan terakhir tidak dibaca dari disk, sehingga
+    /// `meshes()`/`voxel_masks()` murah saat dipanggil berulang oleh GUI.
+    pub(crate) fn slice_metas(&self) -> Result<Vec<SliceMeta>, EngineError> {
+        let mut out = Vec::new();
+        for entry in self.project.slides_ordered() {
+            if entry.status != SlideStatus::Ok {
+                continue;
+            }
+            let id = entry.id;
+            let (hash, present) = if let Some(slot) = self.labels.get(&id) {
+                if slot.store.is_empty() {
+                    continue;
+                }
+                let hash = self.label_content_hash(id, Some(&slot.store))?;
+                (
+                    hash,
+                    self.labels_present_cached(id, hash, || slot.store.labels_present()),
+                )
+            } else {
+                if !self.bundle.label_path(id).is_file() {
+                    continue;
+                }
+                let hash = self.label_content_hash(id, None)?;
+                let cached = self.present_cache.lock().ok().and_then(|c| {
+                    c.get(&id)
+                        .filter(|(h, _)| *h == hash)
+                        .map(|(_, v)| v.clone())
+                });
+                let present = match cached {
+                    Some(v) => v,
+                    None => {
+                        let Some(store) = self.bundle.load_labels(id)? else {
+                            continue;
+                        };
+                        self.labels_present_cached(id, hash, || store.labels_present())
+                    }
+                };
+                if present.is_empty() {
+                    continue;
+                }
+                (hash, present)
+            };
+            let (annotated, _) = self.annotation_flags(id, &present);
+            if annotated.is_empty() {
+                continue;
+            }
+            out.push(SliceMeta {
+                id,
+                z_um: entry.z_um,
+                transform: entry.transform.clone(),
+                annotated,
+                hash,
             });
         }
         Ok(out)
@@ -155,26 +268,96 @@ impl Session {
 
     /// Label (terdefinisi) yang muncul di data irisan, terurut id.
     fn present_labels(&self, data: &[SliceData<'_>]) -> Vec<LabelDef> {
+        let metas: Vec<SliceMeta> = data.iter().map(SliceData::meta).collect();
+        self.present_labels_meta(&metas)
+    }
+
+    fn present_labels_meta(&self, metas: &[SliceMeta]) -> Vec<LabelDef> {
         self.project
             .labels
             .iter()
             .filter(|l| {
-                data.iter()
+                metas
+                    .iter()
                     .any(|d| d.annotated.iter().any(|(id, _)| *id == l.id.0))
             })
             .cloned()
             .collect()
     }
 
+    /// Hash isi label satu irisan (FNV atas byte `.lbl`). Irisan yang
+    /// disunting di memori: dihitung dari `encode_lbl` sekali per suntingan;
+    /// selain itu dari byte berkas di disk, dikunci metadata berkas, sehingga
+    /// `meshes()`/`measure()` tidak mengompres ulang semua label tiap panggilan.
+    pub(crate) fn label_content_hash(
+        &self,
+        id: SlideId,
+        store: Option<&LabelStore>,
+    ) -> Result<u64, EngineError> {
+        use std::sync::atomic::Ordering;
+        if let Some(slot) = self.labels.get(&id) {
+            if slot.dirty {
+                let cached = slot.content_hash.load(Ordering::Relaxed);
+                if cached != 0 {
+                    return Ok(cached);
+                }
+                let h = Fnv1a64::new()
+                    .bytes(&h3d_segment::encode_lbl(&slot.store))
+                    .finish();
+                slot.content_hash.store(h, Ordering::Relaxed);
+                return Ok(h);
+            }
+        }
+        let path = self.bundle.label_path(id);
+        let meta = match (std::fs::metadata(&path), store) {
+            (Ok(m), _) => m,
+            // Tidak ada berkas: label hanya di memori (belum pernah disimpan).
+            (Err(_), Some(store)) => {
+                return Ok(Fnv1a64::new()
+                    .bytes(&h3d_segment::encode_lbl(store))
+                    .finish())
+            }
+            (Err(e), None) => return Err(h3d_io::IoError::io(&path, e).into()),
+        };
+        let (len, modified) = (meta.len(), meta.modified().ok());
+        if let Ok(cache) = self.label_hashes.lock() {
+            if let Some(fh) = cache.get(&id) {
+                if fh.len == len && fh.modified == modified {
+                    return Ok(fh.hash);
+                }
+            }
+        }
+        let bytes = std::fs::read(&path).map_err(|e| h3d_io::IoError::io(&path, e))?;
+        let hash = Fnv1a64::new().bytes(&bytes).finish();
+        if let Ok(mut cache) = self.label_hashes.lock() {
+            cache.insert(
+                id,
+                super::FileHash {
+                    len,
+                    modified,
+                    hash,
+                },
+            );
+        }
+        Ok(hash)
+    }
+
     /// Kunci cache voxel: hash atas label (byte `.lbl`), transformasi, `z`,
     /// tanda provenance, definisi label terkait, `ReconConfig`, dan anggaran
     /// (yang menentukan kenaikan `s_xy`). Berubah salah satunya → cache basi.
     pub(crate) fn recon_key(&self, data: &[SliceData<'_>]) -> Result<u64, EngineError> {
+        let metas: Vec<SliceMeta> = data.iter().map(SliceData::meta).collect();
+        self.recon_key_meta(&metas)
+    }
+
+    /// [`Self::recon_key`] atas metadata irisan ([`Self::slice_metas`]);
+    /// nilainya identik dengan kunci dari [`Self::slice_data`].
+    pub(crate) fn recon_key_meta(&self, data: &[SliceMeta]) -> Result<u64, EngineError> {
         let mut h = Fnv1a64::new();
-        h.str("h3d-recon-v1");
+        h.str("h3d-recon-v2");
         h.chunk(&json_bytes(&self.project.recon)?);
         h.u64(self.budgets.recon_working_set_bytes);
-        for l in self.present_labels(data) {
+        for l in self.present_labels_meta(data) {
             h.u64(u64::from(l.id.0));
             h.u64(u64::from(l.reconstruct));
             h.chunk(&json_bytes(&l.kind)?);
@@ -188,7 +371,7 @@ impl Session {
                 h.u64(u64::from(*l));
                 h.u64(u64::from(*interp));
             }
-            h.chunk(&h3d_segment::encode_lbl(&d.store));
+            h.u64(d.hash);
         }
         Ok(h.finish())
     }
@@ -440,11 +623,11 @@ impl Session {
     /// memanggilnya sendiri; berguna pula untuk menulis ulang berkas yang
     /// terhapus. Galat bila belum ada rekonstruksi untuk keadaan saat ini.
     pub fn write_label_volume(&self) -> Result<PathBuf, EngineError> {
-        let data = self.slice_data()?;
+        let data = self.slice_metas()?;
         let recon = if data.is_empty() {
             None
         } else {
-            self.recon_for_key(self.recon_key(&data)?)
+            self.recon_for_key(self.recon_key_meta(&data)?)
         };
         let recon = recon.ok_or_else(|| {
             EngineError::invalid(
@@ -472,11 +655,11 @@ impl Session {
     /// Mesh hasil rekonstruksi terakhir yang masih sah (memori atau cache);
     /// kosong bila belum direkonstruksi atau sudah basi.
     pub fn meshes(&self) -> Result<Vec<LabelMesh>, EngineError> {
-        let data = self.slice_data()?;
+        let data = self.slice_metas()?;
         if data.is_empty() {
             return Ok(Vec::new());
         }
-        let key = self.recon_key(&data)?;
+        let key = self.recon_key_meta(&data)?;
         Ok(self
             .recon_for_key(key)
             .map(|r| r.meshes.clone())
@@ -485,11 +668,11 @@ impl Session {
 
     /// Masker voxel hasil rekonstruksi terakhir yang masih sah.
     pub fn voxel_masks(&self) -> Result<Vec<(LabelId, VoxelMask)>, EngineError> {
-        let data = self.slice_data()?;
+        let data = self.slice_metas()?;
         if data.is_empty() {
             return Ok(Vec::new());
         }
-        let key = self.recon_key(&data)?;
+        let key = self.recon_key_meta(&data)?;
         Ok(self
             .recon_for_key(key)
             .map(|r| r.masks.clone())

@@ -3,7 +3,9 @@
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use h3d_core::{OrderSource, Progress, SlideEntry, SlideId, SlideSourceRef, SlideStatus};
+use h3d_core::{
+    OrderSource, Progress, SlideEntry, SlideId, SlideSourceRef, SlideStatus, SubProgress,
+};
 use h3d_io::EmbedMode;
 
 use super::Session;
@@ -129,9 +131,26 @@ impl Session {
             if p.is_cancelled() {
                 return Err(EngineError::Cancelled);
             }
-            p.set(i as f32 / total * 0.8, "membaca metadata slide");
-            let src = h3d_slide::open_slide(path)?;
-            let info = src.info();
+            p.set(i as f32 / total * 0.2, "membaca metadata slide");
+            // Gambar biasa: cukup header (tanpa mendekode); piramidanya
+            // dibangun pada tahap 3. Format lain lewat backend slide.
+            let info = if super::images::has_flat_extension(path) {
+                let (w, h) = image::image_dimensions(path).map_err(|e| {
+                    h3d_slide::SlideError::Decode(format!("{}: {e}", path.display()))
+                })?;
+                h3d_slide::SlideInfo {
+                    levels: vec![h3d_slide::LevelInfo {
+                        size: [w, h],
+                        downsample: 1.0,
+                    }],
+                    mpp: None,
+                    tile_size: h3d_slide::tiled::TILE_SIZE,
+                    vendor: None,
+                }
+            } else {
+                h3d_slide::open_slide(path)?.info().clone()
+            };
+            let info = &info;
             let mpp = match (info.mpp, opts.mpp) {
                 (Some(m), _) if m.iter().all(|v| v.is_finite() && *v > 0.0) => m,
                 (_, Some(m)) => m,
@@ -207,7 +226,7 @@ impl Session {
                 failure = Some(EngineError::Cancelled);
                 break;
             }
-            p.set(0.8 + i as f32 / total * 0.2, "menambahkan irisan");
+            p.set(0.2 + i as f32 / total * 0.05, "menambahkan irisan");
             let next_order = first_order + i as u32;
             let id = self.project.next_slide_id();
             let source = if opts.embed {
@@ -280,6 +299,28 @@ impl Session {
         self.drop_stale_registrations();
         self.recompose_chain();
         self.save_project()?;
+
+        // Tahap 3: piramida bertile untuk gambar biasa, sekali di sini agar
+        // setiap pembukaan berikutnya (thumbnail, viewer, registrasi) tidak
+        // pernah mendekode gambar utuh. Proyek sudah tersimpan; pembatalan
+        // atau kegagalan di tahap ini tidak membatalkan impor (piramida yang
+        // belum ada dibangun saat pertama dibutuhkan).
+        let n = ids.len().max(1) as f32;
+        for (i, &id) in ids.iter().enumerate() {
+            if p.is_cancelled() {
+                log::info!("pembangunan piramida dihentikan oleh pengguna");
+                break;
+            }
+            let sub = SubProgress::new(
+                p,
+                0.25 + 0.75 * i as f32 / n,
+                0.25 + 0.75 * (i + 1) as f32 / n,
+            );
+            match self.prepare_pyramid(id, &sub) {
+                Ok(()) | Err(EngineError::Cancelled) => {}
+                Err(e) => log::warn!("piramida irisan {id} tidak bisa dibangun: {e}"),
+            }
+        }
         p.set(1.0, "impor selesai");
         Ok(ids)
     }

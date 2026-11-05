@@ -1,19 +1,74 @@
 //! Akses piksel slide: pembukaan sumber, thumbnail, pembacaan pada resolusi
 //! kerja (dalam strip), dan gambar registrasi ber-cache (`cache/reg/`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, MutexGuard};
 
 use h3d_core::{Progress, SlideEntry, SlideId, SlideSourceRef};
 use h3d_io::{slide_stem, write_atomic};
 use h3d_register::RegImage;
-use h3d_slide::{FlatBackend, SlideSource};
+use h3d_slide::{SlideSource, TiledPyramid};
 use image::RgbaImage;
 use ndarray::Array2;
+use rayon::prelude::*;
 
-use super::Session;
+use super::{FileHash, Session};
 use crate::error::EngineError;
+
+/// Sumber piksel terbuka per irisan: LRU berbatas jumlah
+/// (`Budgets::max_open_slides`).
+pub(crate) struct SourceCache {
+    max: usize,
+    tick: u64,
+    map: HashMap<SlideId, (Arc<dyn SlideSource>, u64)>,
+}
+
+impl SourceCache {
+    pub(crate) fn new(max: usize) -> Self {
+        Self {
+            max: max.max(1),
+            tick: 0,
+            map: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn set_max(&mut self, max: usize) {
+        self.max = max.max(1);
+        self.evict();
+    }
+
+    fn get(&mut self, id: SlideId) -> Option<Arc<dyn SlideSource>> {
+        self.tick += 1;
+        let e = self.map.get_mut(&id)?;
+        e.1 = self.tick;
+        Some(Arc::clone(&e.0))
+    }
+
+    fn insert(&mut self, id: SlideId, src: Arc<dyn SlideSource>) {
+        self.tick += 1;
+        self.map.insert(id, (src, self.tick));
+        self.evict();
+    }
+
+    fn remove(&mut self, id: SlideId) {
+        self.map.remove(&id);
+    }
+
+    fn evict(&mut self) {
+        while self.map.len() > self.max {
+            let Some(&victim) = self
+                .map
+                .iter()
+                .min_by_key(|(id, (_, t))| (*t, id.0))
+                .map(|(id, _)| id)
+            else {
+                break;
+            };
+            self.map.remove(&victim);
+        }
+    }
+}
 
 /// Resolusi gambar registrasi (µm/px) = level terhalus bawaan registrasi.
 pub const REG_IMAGE_MPP: f64 = 16.0;
@@ -150,26 +205,31 @@ pub(crate) fn read_at_mpp_strips(
         let strip = src.read_region(lc.level, 0, i64::from(y0), lw, y1 - y0)?;
         let raw = strip.as_raw();
         let stride = lw as usize * 4;
-        for o in oy..oy_end {
-            let (ya, yb) = bound(o, ry, lh);
-            for (ox, &(xa, xb_)) in xb.iter().enumerate() {
-                let mut acc = [0u64; 3];
-                for yy in ya..yb {
-                    let row = (yy - y0) as usize * stride;
-                    for xx in xa..xb_ {
-                        let i = row + xx as usize * 4;
-                        acc[0] += u64::from(raw[i]);
-                        acc[1] += u64::from(raw[i + 1]);
-                        acc[2] += u64::from(raw[i + 2]);
+        // Baris keluaran saling bebas: dihitung paralel, hasil deterministik.
+        rgba[oy * ow * 4..oy_end * ow * 4]
+            .par_chunks_mut(ow * 4)
+            .enumerate()
+            .for_each(|(k, out_row)| {
+                let o = oy + k;
+                let (ya, yb) = bound(o, ry, lh);
+                for (ox, &(xa, xb_)) in xb.iter().enumerate() {
+                    let mut acc = [0u64; 3];
+                    for yy in ya..yb {
+                        let row = (yy - y0) as usize * stride;
+                        for xx in xa..xb_ {
+                            let i = row + xx as usize * 4;
+                            acc[0] += u64::from(raw[i]);
+                            acc[1] += u64::from(raw[i + 1]);
+                            acc[2] += u64::from(raw[i + 2]);
+                        }
+                    }
+                    let n = u64::from(yb - ya) * u64::from(xb_ - xa);
+                    let d = ox * 4;
+                    for k in 0..3 {
+                        out_row[d + k] = ((acc[k] + n / 2) / n) as u8;
                     }
                 }
-                let n = u64::from(yb - ya) * u64::from(xb_ - xa);
-                let d = (o * ow + ox) * 4;
-                for k in 0..3 {
-                    rgba[d + k] = ((acc[k] + n / 2) / n) as u8;
-                }
-            }
-        }
+            });
         oy = oy_end;
         p.set(oy as f32 / oh as f32, "membaca slide");
     }
@@ -179,6 +239,105 @@ pub(crate) fn read_at_mpp_strips(
         h: oh,
         mpp: mpp_out,
     })
+}
+
+/// Pembuatan thumbnail yang mandiri dari `Session` (lihat
+/// [`Session::thumbnail_task`]).
+pub struct ThumbTask {
+    source: Option<Arc<dyn SlideSource>>,
+    max_side: u32,
+    plain_path: PathBuf,
+    tissue_path: Option<PathBuf>,
+    mpp_l0: [f64; 2],
+    size_l0: [u32; 2],
+}
+
+impl ThumbTask {
+    /// Jalankan: pakai cache disk bila ada, selain itu baca level piramida
+    /// terkecil yang cukup, turunkan, (beri masker jaringan), dan simpan ke
+    /// cache. Gagal menulis cache hanya dicatat.
+    pub fn run(&self) -> Result<RgbaImage, EngineError> {
+        let final_path = self.tissue_path.as_ref().unwrap_or(&self.plain_path);
+        if let Ok(img) = image::open(final_path) {
+            return Ok(img.to_rgba8());
+        }
+        let mut img = match image::open(&self.plain_path) {
+            Ok(i) => i.to_rgba8(),
+            Err(_) => {
+                let src = self
+                    .source
+                    .as_ref()
+                    .ok_or_else(|| EngineError::invalid("sumber thumbnail tidak dibuka"))?;
+                let img = h3d_slide::thumbnail(src.as_ref(), self.max_side)?;
+                write_png_cache(&self.plain_path, &img, "thumbnail");
+                img
+            }
+        };
+        let Some(tissue_path) = &self.tissue_path else {
+            return Ok(img);
+        };
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        if w == 0 || h == 0 {
+            return Ok(img);
+        }
+        // mpp thumbnail = mpp level 0 × faktor penurunan.
+        let mpp_thumb = self.mpp_l0[0] * f64::from(self.size_l0[0]) / w as f64;
+        h3d_imgproc::apply_tissue_alpha(img.as_mut(), w, h, mpp_thumb, h3d_imgproc::FEATHER_PX)?;
+        write_png_cache(tissue_path, &img, "thumbnail jaringan");
+        Ok(img)
+    }
+}
+
+fn write_png_cache(path: &Path, img: &RgbaImage, what: &str) {
+    let mut png = Vec::new();
+    let enc = image::codecs::png::PngEncoder::new(&mut png);
+    if image::ImageEncoder::write_image(
+        enc,
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        image::ExtendedColorType::Rgba8,
+    )
+    .is_ok()
+    {
+        // Gagal menulis cache bukan galat bagi pemanggil.
+        if let Err(e) = write_atomic(path, &png) {
+            log::warn!("gagal menulis cache {what}: {e}");
+        }
+    }
+}
+
+fn build_pyramid_from_path(dir: &Path, path: &Path, p: &dyn Progress) -> Result<(), EngineError> {
+    log::info!(
+        "membangun piramida bertile {} → {}",
+        path.display(),
+        dir.display()
+    );
+    h3d_slide::build_tiled_pyramid_from_path(dir, path, |done, total| {
+        p.set(done as f32 / total.max(1) as f32, "membangun piramida");
+        !p.is_cancelled()
+    })
+    .map_err(map_build_err)
+}
+
+fn build_pyramid_from_source(
+    dir: &Path,
+    src: &dyn SlideSource,
+    p: &dyn Progress,
+) -> Result<(), EngineError> {
+    log::info!("membangun piramida bertile dari sumber → {}", dir.display());
+    h3d_slide::build_tiled_pyramid_from_source(dir, src, |done, total| {
+        p.set(done as f32 / total.max(1) as f32, "membangun piramida");
+        !p.is_cancelled()
+    })
+    .map_err(map_build_err)
+}
+
+fn map_build_err(e: h3d_slide::SlideError) -> EngineError {
+    match e {
+        h3d_slide::SlideError::Cancelled => EngineError::Cancelled,
+        other => other.into(),
+    }
 }
 
 /// Baca wilayah `w_px × h_px` yang pojok kiri-atasnya di `(x_um, y_um)` pada
@@ -216,26 +375,28 @@ pub(crate) fn read_region_at_mpp(
         (a, b)
     };
     let mut out = vec![255u8; w_px * h_px * 4];
-    for oy in 0..h_px {
-        let (ya, yb) = span(oy, fy0, ry, sh);
-        for ox in 0..w_px {
-            let (xa, xb) = span(ox, fx0, rx, sw);
-            let mut acc = [0u64; 3];
-            for yy in ya..yb {
-                for xx in xa..xb {
-                    let i = yy * stride + xx * 4;
-                    acc[0] += u64::from(raw[i]);
-                    acc[1] += u64::from(raw[i + 1]);
-                    acc[2] += u64::from(raw[i + 2]);
+    out.par_chunks_mut(w_px * 4)
+        .enumerate()
+        .for_each(|(oy, out_row)| {
+            let (ya, yb) = span(oy, fy0, ry, sh);
+            for ox in 0..w_px {
+                let (xa, xb) = span(ox, fx0, rx, sw);
+                let mut acc = [0u64; 3];
+                for yy in ya..yb {
+                    for xx in xa..xb {
+                        let i = yy * stride + xx * 4;
+                        acc[0] += u64::from(raw[i]);
+                        acc[1] += u64::from(raw[i + 1]);
+                        acc[2] += u64::from(raw[i + 2]);
+                    }
+                }
+                let n = ((yb - ya) * (xb - xa)) as u64;
+                let d = ox * 4;
+                for k in 0..3 {
+                    out_row[d + k] = ((acc[k] + n / 2) / n) as u8;
                 }
             }
-            let n = ((yb - ya) * (xb - xa)) as u64;
-            let d = (oy * w_px + ox) * 4;
-            for k in 0..3 {
-                out[d + k] = ((acc[k] + n / 2) / n) as u8;
-            }
-        }
-    }
+        });
     Ok(out)
 }
 
@@ -305,10 +466,21 @@ fn decode_reg(bytes: &[u8], fingerprint: u64, mpp_l0: [f64; 2]) -> Option<RegIma
     RegImage::new(gray, mask, mpp, origin).ok()
 }
 
-fn has_flat_extension(path: &Path) -> bool {
+/// Gambar biasa (tanpa piramida) menurut ekstensi; dibaca lewat piramida
+/// bertile di `cache/pyramid/`.
+pub(crate) fn has_flat_extension(path: &Path) -> bool {
     path.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .is_some_and(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"))
+}
+
+/// Sumber yang level teratasnya masih besar (TIFF datar / piramida dangkal)
+/// perlu piramida bertile agar tampilan jauh tidak membaca level 0.
+fn needs_tiled_pyramid(src: &dyn SlideSource) -> bool {
+    src.info()
+        .levels
+        .last()
+        .is_some_and(|top| top.size[0].max(top.size[1]) > 2 * h3d_slide::tiled::MIN_TOP_SIDE)
 }
 
 impl Session {
@@ -347,31 +519,75 @@ impl Session {
     /// dibuka; GUI boleh memanggilnya lagi (mis. saat aplikasi kembali aktif).
     /// Berkas yang hilang atau tidak terbaca tidak dihitung "berubah".
     pub fn recheck_slides(&self) -> Vec<SlideId> {
-        let mut found = BTreeSet::new();
-        for s in &self.project.slides {
-            let SlideSourceRef::External {
-                size_bytes,
-                fingerprint,
-                ..
-            } = &s.source
-            else {
-                continue;
-            };
-            let path = self.bundle.resolve_slide_path(&s.source);
-            if !path.is_file() {
-                continue;
-            }
-            match h3d_slide::fingerprint(&path) {
-                Ok(now) if now != (*size_bytes, *fingerprint) => {
-                    found.insert(s.id);
+        // Sidik jari (2 MB per berkas) dihitung paralel; hasil dikumpulkan
+        // ke himpunan terurut sehingga deterministik.
+        let found: BTreeSet<SlideId> = self
+            .project
+            .slides
+            .par_iter()
+            .filter_map(|s| {
+                let SlideSourceRef::External {
+                    size_bytes,
+                    fingerprint,
+                    ..
+                } = &s.source
+                else {
+                    return None;
+                };
+                let path = self.bundle.resolve_slide_path(&s.source);
+                if !path.is_file() {
+                    return None;
                 }
-                Ok(_) => {}
-                Err(e) => log::warn!("sidik jari {} tidak bisa dihitung: {e}", path.display()),
-            }
-        }
+                match self.cached_fingerprint(s.id, &path) {
+                    Ok(now) if now != (*size_bytes, *fingerprint) => Some(s.id),
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::warn!("sidik jari {} tidak bisa dihitung: {e}", path.display());
+                        None
+                    }
+                }
+            })
+            .collect();
         let list: Vec<SlideId> = found.iter().copied().collect();
         *self.changed_set() = found;
         list
+    }
+
+    /// Sidik jari `path` untuk irisan `slide`, dihitung ulang hanya bila
+    /// ukuran atau mtime berkas berubah sejak perhitungan terakhir.
+    fn cached_fingerprint(&self, slide: SlideId, path: &Path) -> Result<(u64, u64), EngineError> {
+        let meta = std::fs::metadata(path).map_err(|e| h3d_io::IoError::io(path, e))?;
+        let (len, modified) = (meta.len(), meta.modified().ok());
+        if let Ok(cache) = self.fingerprints.lock() {
+            if let Some(fh) = cache.get(&slide) {
+                if fh.len == len && fh.modified == modified {
+                    return Ok((len, fh.hash));
+                }
+            }
+        }
+        let now = h3d_slide::fingerprint(path)?;
+        if let Ok(mut cache) = self.fingerprints.lock() {
+            cache.insert(
+                slide,
+                FileHash {
+                    len,
+                    modified,
+                    hash: now.1,
+                },
+            );
+        }
+        Ok(now)
+    }
+
+    /// Lupakan sumber terbuka dan sidik jari irisan (berkas diganti,
+    /// ditautkan ulang, atau irisan dihapus).
+    pub(crate) fn invalidate_source(&self, slide: SlideId) {
+        if let Ok(mut c) = self.sources.lock() {
+            c.remove(slide);
+        }
+        if let Ok(mut c) = self.fingerprints.lock() {
+            c.remove(&slide);
+        }
     }
 
     /// Path dan sidik jari berkas slide **yang sudah diverifikasi**: berkas
@@ -386,7 +602,7 @@ impl Session {
         if !path.is_file() {
             return Err(h3d_io::IoError::MissingFile(path).into());
         }
-        let now = h3d_slide::fingerprint(&path)?;
+        let now = self.cached_fingerprint(entry.id, &path)?;
         if let SlideSourceRef::External {
             size_bytes,
             fingerprint,
@@ -443,6 +659,7 @@ impl Session {
             )));
         }
         let (size_bytes, fingerprint) = h3d_slide::fingerprint(&path)?;
+        self.invalidate_source(slide);
         let rel = rel.clone();
         self.slide_mut(slide)?.source = SlideSourceRef::External {
             path: rel,
@@ -475,6 +692,7 @@ impl Session {
             return Err(h3d_io::IoError::MissingFile(path.to_path_buf()).into());
         }
         let now = h3d_slide::fingerprint(path)?;
+        self.invalidate_source(slide);
         let rel = self.bundle.make_relative(path);
         let duplicate = self.project.slides.iter().any(|s| {
             s.id != slide
@@ -501,61 +719,104 @@ impl Session {
         Ok(matches)
     }
 
-    /// Buka sumber piksel sebuah irisan. Gambar biasa (PNG/JPEG) memakai
-    /// cache piramida di `cache/pyramid/`. Berkas hilang →
-    /// `IoError::MissingFile`; berkas berubah → [`EngineError::SlideChanged`].
-    pub fn open_source(&self, slide: SlideId) -> Result<Box<dyn SlideSource>, EngineError> {
+    /// Folder piramida bertile irisan (berkunci sidik jari berkas).
+    fn pyramid_dir(&self, slide: SlideId, fp: u64) -> PathBuf {
+        self.bundle
+            .cache_pyramid_dir()
+            .join(format!("{}-{:016x}", slide_stem(slide), fp))
+    }
+
+    /// Buka sumber piksel sebuah irisan. Sumber yang sudah terbuka dipakai
+    /// bersama (cache LRU `Budgets::max_open_slides`): thumbnail, registrasi,
+    /// segmentasi, atribut, dan viewer tidak membuka backend masing-masing.
+    /// Gambar biasa (PNG/JPEG) dan TIFF datar dibaca lewat piramida bertile
+    /// di `cache/pyramid/` (dibangun saat impor; bila belum ada, dibangun di
+    /// sini tanpa progres). Berkas hilang → `IoError::MissingFile`; berkas
+    /// berubah → [`EngineError::SlideChanged`].
+    pub fn open_source(&self, slide: SlideId) -> Result<Arc<dyn SlideSource>, EngineError> {
         let entry = self.slide(slide)?;
         let (path, fp) = self.verified_source(entry)?;
-        if has_flat_extension(&path) {
-            let dir =
-                self.bundle
-                    .cache_pyramid_dir()
-                    .join(format!("{}-{:016x}", slide_stem(slide), fp));
-            match FlatBackend::open_with_cache(&path, &dir) {
-                Ok(b) => return Ok(Box::new(b)),
-                Err(e) => log::debug!("FlatBackend gagal, mencoba backend lain: {e}"),
+        if let Ok(mut c) = self.sources.lock() {
+            if let Some(src) = c.get(slide) {
+                return Ok(src);
             }
         }
-        Ok(h3d_slide::open_slide_with_cache_bytes(
-            &path,
+        let src = self.open_source_uncached(slide, &path, fp, &h3d_core::NoProgress)?;
+        if let Ok(mut c) = self.sources.lock() {
+            c.insert(slide, Arc::clone(&src));
+        }
+        Ok(src)
+    }
+
+    fn open_source_uncached(
+        &self,
+        slide: SlideId,
+        path: &Path,
+        fp: u64,
+        p: &dyn Progress,
+    ) -> Result<Arc<dyn SlideSource>, EngineError> {
+        let dir = self.pyramid_dir(slide, fp);
+        if h3d_slide::tiled_pyramid_exists(&dir) {
+            match TiledPyramid::open(&dir) {
+                Ok(t) => return Ok(Arc::new(t)),
+                Err(e) => log::warn!(
+                    "cache piramida {} rusak, dibangun ulang: {e}",
+                    dir.display()
+                ),
+            }
+        }
+        if has_flat_extension(path) {
+            build_pyramid_from_path(&dir, path, p)?;
+            return Ok(Arc::new(TiledPyramid::open(&dir)?));
+        }
+        let src: Arc<dyn SlideSource> = Arc::from(h3d_slide::open_slide_with_cache_bytes(
+            path,
             self.budgets.wsi_internal_cache_bytes,
-        )?)
+        )?);
+        if needs_tiled_pyramid(src.as_ref()) {
+            build_pyramid_from_source(&dir, src.as_ref(), p)?;
+            return Ok(Arc::new(TiledPyramid::open(&dir)?));
+        }
+        Ok(src)
+    }
+
+    /// Irisan yang masih memerlukan pembangunan piramida bertile (gambar
+    /// biasa tanpa cache), terurut; GUI menjalankannya sebagai job saat
+    /// proyek dibuka agar pembukaan pertama tidak memblokir.
+    pub fn slides_needing_pyramid(&self) -> Vec<SlideId> {
+        self.project
+            .slides_ordered()
+            .iter()
+            .filter(|s| {
+                let path = self.bundle.resolve_slide_path(&s.source);
+                if !has_flat_extension(&path) || !path.is_file() {
+                    return false;
+                }
+                match self.cached_fingerprint(s.id, &path) {
+                    Ok((_, fp)) => !h3d_slide::tiled_pyramid_exists(&self.pyramid_dir(s.id, fp)),
+                    Err(_) => false,
+                }
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Bangun piramida bertile irisan bila belum ada (dengan progres dan
+    /// pembatalan), lalu daftarkan sumbernya ke cache.
+    pub fn prepare_pyramid(&self, slide: SlideId, p: &dyn Progress) -> Result<(), EngineError> {
+        let entry = self.slide(slide)?;
+        let (path, fp) = self.verified_source(entry)?;
+        let src = self.open_source_uncached(slide, &path, fp, p)?;
+        if let Ok(mut c) = self.sources.lock() {
+            c.insert(slide, src);
+        }
+        Ok(())
     }
 
     /// Thumbnail irisan dengan sisi terpanjang ≤ `max_side`, ber-cache di
     /// `cache/thumbs/`.
     pub fn thumbnail(&self, slide: SlideId, max_side: u32) -> Result<RgbaImage, EngineError> {
-        let entry = self.slide(slide)?;
-        let fp = self.source_fingerprint(entry)?;
-        let path = self.bundle.cache_thumbs_dir().join(format!(
-            "{}-{:016x}-{}.png",
-            slide_stem(slide),
-            fp,
-            max_side
-        ));
-        if let Ok(img) = image::open(&path) {
-            return Ok(img.to_rgba8());
-        }
-        let src = self.open_source(slide)?;
-        let img = h3d_slide::thumbnail(src.as_ref(), max_side)?;
-        let mut png = Vec::new();
-        let enc = image::codecs::png::PngEncoder::new(&mut png);
-        if image::ImageEncoder::write_image(
-            enc,
-            img.as_raw(),
-            img.width(),
-            img.height(),
-            image::ExtendedColorType::Rgba8,
-        )
-        .is_ok()
-        {
-            // Gagal menulis cache bukan galat bagi pemanggil.
-            if let Err(e) = write_atomic(&path, &png) {
-                log::warn!("gagal menulis cache thumbnail: {e}");
-            }
-        }
-        Ok(img)
+        self.thumbnail_task(slide, max_side, false)?.run()
     }
 
     /// Thumbnail irisan untuk tampilan 3D: seperti [`Session::thumbnail`],
@@ -569,45 +830,66 @@ impl Session {
         slide: SlideId,
         max_side: u32,
     ) -> Result<RgbaImage, EngineError> {
+        self.thumbnail_task(slide, max_side, true)?.run()
+    }
+
+    /// Thumbnail dari cache disk saja (tanpa membaca slide); `None` bila
+    /// belum dibuat. Murah: dipanggil GUI tiap frame.
+    pub fn thumbnail_cached(
+        &self,
+        slide: SlideId,
+        max_side: u32,
+        tissue: bool,
+    ) -> Result<Option<RgbaImage>, EngineError> {
         let entry = self.slide(slide)?;
-        if !entry.has_valid_mpp() {
-            log::debug!("irisan {slide} tanpa mpp: thumbnail 3D tanpa masker jaringan");
-            return self.thumbnail(slide, max_side);
-        }
+        let tissue = tissue && entry.has_valid_mpp();
         let fp = self.source_fingerprint(entry)?;
-        let path = self.bundle.cache_thumbs_dir().join(format!(
-            "{}-{:016x}-{}-tissue.png",
+        let path = self.thumb_path(slide, fp, max_side, tissue);
+        Ok(image::open(&path).ok().map(|i| i.to_rgba8()))
+    }
+
+    fn thumb_path(&self, slide: SlideId, fp: u64, max_side: u32, tissue: bool) -> PathBuf {
+        let suffix = if tissue { "-tissue" } else { "" };
+        self.bundle.cache_thumbs_dir().join(format!(
+            "{}-{:016x}-{}{suffix}.png",
             slide_stem(slide),
             fp,
             max_side
-        ));
-        if let Ok(img) = image::open(&path) {
-            return Ok(img.to_rgba8());
+        ))
+    }
+
+    /// Tugas pembuatan thumbnail yang **tidak memegang sesi**: semua yang
+    /// dibutuhkan (sumber piksel bersama, path cache, mpp) disalin, sehingga
+    /// GUI bisa menjalankannya di thread latar tanpa mengunci `Session`.
+    pub fn thumbnail_task(
+        &self,
+        slide: SlideId,
+        max_side: u32,
+        tissue: bool,
+    ) -> Result<ThumbTask, EngineError> {
+        let entry = self.slide(slide)?;
+        let tissue = tissue && entry.has_valid_mpp();
+        if !entry.has_valid_mpp() && tissue {
+            log::debug!("irisan {slide} tanpa mpp: thumbnail 3D tanpa masker jaringan");
         }
-        let mut img = self.thumbnail(slide, max_side)?;
-        let (w, h) = (img.width() as usize, img.height() as usize);
-        if w == 0 || h == 0 {
-            return Ok(img);
-        }
-        // mpp thumbnail = mpp level 0 × faktor penurunan.
-        let mpp_thumb = entry.mpp[0] * f64::from(entry.size_l0[0]) / w as f64;
-        h3d_imgproc::apply_tissue_alpha(img.as_mut(), w, h, mpp_thumb, h3d_imgproc::FEATHER_PX)?;
-        let mut png = Vec::new();
-        let enc = image::codecs::png::PngEncoder::new(&mut png);
-        if image::ImageEncoder::write_image(
-            enc,
-            img.as_raw(),
-            img.width(),
-            img.height(),
-            image::ExtendedColorType::Rgba8,
-        )
-        .is_ok()
-        {
-            if let Err(e) = write_atomic(&path, &png) {
-                log::warn!("gagal menulis cache thumbnail jaringan: {e}");
-            }
-        }
-        Ok(img)
+        let fp = self.source_fingerprint(entry)?;
+        let plain_path = self.thumb_path(slide, fp, max_side, false);
+        let tissue_path = tissue.then(|| self.thumb_path(slide, fp, max_side, true));
+        // Cache sudah ada: sumber tidak perlu dibuka.
+        let final_path = tissue_path.as_ref().unwrap_or(&plain_path);
+        let source = if final_path.is_file() {
+            None
+        } else {
+            Some(self.open_source(slide)?)
+        };
+        Ok(ThumbTask {
+            source,
+            max_side,
+            plain_path,
+            tissue_path,
+            mpp_l0: entry.mpp,
+            size_l0: entry.size_l0,
+        })
     }
 
     /// Baca seluruh irisan pada resolusi ≈ `target_mpp` (lihat [`read_at_mpp`]).
@@ -673,6 +955,7 @@ impl Session {
 mod tests {
     use super::*;
     use h3d_core::NoProgress;
+    use h3d_slide::FlatBackend;
 
     #[test]
     fn read_at_mpp_box_average_and_strips() {

@@ -26,3 +26,6 @@ lz4_flex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Hanya untuk membangun model ONNX mungil di tes (lihat h3d-segment).
+tract-onnx = { workspace = true }
+prost = "0.14"

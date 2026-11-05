@@ -29,8 +29,10 @@ pub use clock::{clock_from_env, Clock, FixedClock, SystemClock, FIXED_TIME_ENV};
 pub use error::EngineError;
 pub use job::{spawn_job, spawn_session_job, JobHandle, SharedSession};
 pub use session::{
-    AttrParams, ExportKind, ImportOptions, MarginFigure, PendingProposal, QcRow, RegSummary,
-    RegisterRun, Session, APP_VERSION, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE, REG_IMAGE_MPP,
+    kind_for_class, AttrParams, ExportKind, ImportOptions, MarginFigure, ModelEntry,
+    ModelLabelSetup, PendingProposal, QcRow, RegSummary, RegisterRun, Session, ThumbTask,
+    APP_VERSION, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE, MODEL_ONNX_FILE, MODEL_SPEC_FILE,
+    REG_IMAGE_MPP,
 };
 
 // Tipe crate bawah yang muncul di API publik, agar pemakai (CLI/GUI) cukup
@@ -41,6 +43,6 @@ pub use h3d_io::{to_stable_json_of, ClinicalScope, EmbedMode, Report, ReportFigu
 pub use h3d_io::{ObjectReport, TracksFile};
 pub use h3d_register::{OrderSuggestion, QcThresholds, RegMetric, RegModel, RegOptions};
 pub use h3d_segment::{
-    ClassicParams, ImportSummary, LabelStore, PaintMode, Proposal, RasterImportSummary,
+    ClassicParams, ImportSummary, LabelStore, ModelSpec, PaintMode, Proposal, RasterImportSummary,
 };
 pub use h3d_volume::{LabelMesh, ObjectTrack, SpatialAnalysis, TrackEvent, TrackSet, VoxelMask};

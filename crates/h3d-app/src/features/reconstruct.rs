@@ -570,16 +570,23 @@ fn refresh_slices(app: &mut AppState, sess: &Session, gpu: Option<&Gpu>, ctx: &e
             if st.uploaded_slices.contains(&it.id) {
                 continue;
             }
+            // Thumbnail dibuat di thread latar; frame ini hanya mengunggah
+            // yang sudah siap.
+            let key = crate::thumbs::ThumbKey {
+                slide: it.id,
+                side: SLICE_TEX_SIDE,
+                tissue: st.hide_background,
+            };
+            app.thumb_worker.ensure_requested(sess, key);
             if budget == 0 {
                 ctx.request_repaint();
                 break;
             }
-            budget -= 1;
-            let thumb = if st.hide_background {
-                sess.thumbnail_tissue(it.id, SLICE_TEX_SIDE)
-            } else {
-                sess.thumbnail(it.id, SLICE_TEX_SIDE)
+            let Some(thumb) = app.thumb_worker.take(&key) else {
+                ctx.request_repaint();
+                continue;
             };
+            budget -= 1;
             match thumb {
                 Ok(img) => {
                     let ok = g
@@ -599,7 +606,11 @@ fn refresh_slices(app: &mut AppState, sess: &Session, gpu: Option<&Gpu>, ctx: &e
                         st.uploaded_slices.insert(it.id);
                     }
                 }
-                Err(err) => log::warn!("thumbnail irisan {} gagal: {err}", it.id),
+                Err(err) => {
+                    // Dicatat sekali; tidak diulang tiap frame.
+                    log::warn!("thumbnail irisan {} gagal: {err}", it.id);
+                    st.uploaded_slices.insert(it.id);
+                }
             }
         }
     }
@@ -682,7 +693,13 @@ pub fn canvas(
     let ctx = ui.ctx().clone();
     if let Some(sess) = sess {
         if app.recon.needs_reload {
-            reload(app, sess);
+            if app.derived_ready() {
+                reload(app, sess);
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(
+                    crate::state::DERIVED_DEBOUNCE_MS,
+                ));
+            }
         }
         if app.recon.needs_upload {
             match gpu {
@@ -1032,7 +1049,14 @@ pub fn viewcube(app: &mut AppState, ui: &mut Ui, work: egui::Rect) {
 /// rincian klik mesh. Mengembalikan irisan yang diminta dibuka di 2D.
 pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Option<SlideId> {
     if app.recon.needs_reload {
-        reload(app, sess);
+        if app.derived_ready() {
+            reload(app, sess);
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(
+                    crate::state::DERIVED_DEBOUNCE_MS,
+                ));
+        }
     }
     let mut open = None;
     if app.recon.meshes.is_empty() {

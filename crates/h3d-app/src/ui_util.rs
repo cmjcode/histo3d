@@ -136,17 +136,30 @@ impl ThumbCache {
         &mut self,
         ctx: &egui::Context,
         session: &Session,
+        worker: &mut crate::thumbs::ThumbWorker,
         id: SlideId,
     ) -> Option<(egui::TextureId, [u32; 2])> {
         if !self.map.contains_key(&id) {
-            if self.failed.contains(&id) || self.loaded_this_frame >= THUMBS_PER_FRAME {
-                if !self.failed.contains(&id) {
-                    ctx.request_repaint();
-                }
+            if self.failed.contains(&id) {
                 return None;
             }
+            let key = crate::thumbs::ThumbKey {
+                slide: id,
+                side: THUMB_SIDE,
+                tissue: false,
+            };
+            // Pembuatan di thread latar; di sini hanya unggah tekstur.
+            worker.ensure_requested(session, key);
+            if self.loaded_this_frame >= THUMBS_PER_FRAME {
+                ctx.request_repaint();
+                return None;
+            }
+            let Some(res) = worker.take(&key) else {
+                ctx.request_repaint();
+                return None;
+            };
             self.loaded_this_frame += 1;
-            match session.thumbnail(id, THUMB_SIDE) {
+            match res {
                 Ok(img) => {
                     let size = [img.width(), img.height()];
                     let color = egui::ColorImage::from_rgba_unmultiplied(

@@ -88,6 +88,28 @@ pub struct SlidesState {
     pub orientation: OrientationForm,
     /// Penyangga panel irisan.
     pub meta: SlideMetaState,
+    /// Irisan yang berkasnya hilang, diperiksa ulang tiap
+    /// [`MISSING_RECHECK_SECS`] (bukan `stat` tiap frame).
+    pub missing: Option<(std::time::Instant, Vec<SlideId>)>,
+}
+
+/// Selang pemeriksaan ulang berkas slide yang hilang (detik).
+pub const MISSING_RECHECK_SECS: u64 = 2;
+
+impl SlidesState {
+    /// Irisan yang berkasnya hilang (hasil di-cache beberapa detik).
+    pub fn missing_slides(&mut self, sess: &Session) -> Vec<SlideId> {
+        let fresh = self
+            .missing
+            .as_ref()
+            .filter(|(t, _)| t.elapsed() < std::time::Duration::from_secs(MISSING_RECHECK_SECS));
+        if let Some((_, v)) = fresh {
+            return v.clone();
+        }
+        let v = sess.missing_slides();
+        self.missing = Some((std::time::Instant::now(), v.clone()));
+        v
+    }
 }
 
 /// Pindahkan elemen `from` ke posisi `to` (indeks setelah pemindahan).
@@ -159,7 +181,7 @@ pub fn layers_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Lay
     if !sess.project().z_is_monotonic() {
         h3d_ui::widgets::warning_banner(ui, &t!("slides-z-not-monotonic"));
     }
-    let missing = sess.missing_slides();
+    let missing = app.slides.missing_slides(sess);
     if !missing.is_empty() {
         h3d_ui::widgets::warning_banner(
             ui,
@@ -249,7 +271,7 @@ pub fn layers_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Lay
                 } else {
                     egui::Color32::from_gray(110)
                 };
-                match app.thumbs.get(ui.ctx(), sess, *id) {
+                match app.thumbs.get(ui.ctx(), sess, &mut app.thumb_worker, *id) {
                     Some((tex, size)) => paint_oriented_thumb(
                         &painter,
                         img_rect,

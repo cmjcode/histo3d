@@ -19,6 +19,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 image = { workspace = true }
+png = { workspace = true }
+rayon = { workspace = true }
 tiff = { workspace = true }
 wsi-rs = { workspace = true, optional = true }
 

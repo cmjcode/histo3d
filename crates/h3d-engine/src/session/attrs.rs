@@ -302,6 +302,41 @@ impl Session {
         &self,
         slide: SlideId,
     ) -> Result<Option<RegionLookup<'_>>, EngineError> {
+        let stores = self.label_snapshot()?;
+        let (tumor, stroma) = self.region_label_ids();
+        let Some((i, map)) = self.pick_region_source(slide, &stores, &tumor)? else {
+            return Ok(None);
+        };
+        Ok(stores.into_iter().nth(i).map(|(_, store)| RegionLookup {
+            store,
+            map,
+            tumor,
+            stroma,
+        }))
+    }
+
+    /// Seperti [`Self::region_lookup`] dengan potret label `stores` yang
+    /// sudah ada (dipakai berulang untuk banyak irisan tanpa memuat ulang
+    /// semua `.lbl`).
+    pub(crate) fn region_lookup_in<'a>(
+        &self,
+        slide: SlideId,
+        stores: &'a [(SlideId, Cow<'a, LabelStore>)],
+    ) -> Result<Option<RegionLookup<'a>>, EngineError> {
+        let (tumor, stroma) = self.region_label_ids();
+        let Some((i, map)) = self.pick_region_source(slide, stores, &tumor)? else {
+            return Ok(None);
+        };
+        Ok(Some(RegionLookup {
+            store: Cow::Borrowed(stores[i].1.as_ref()),
+            map,
+            tumor,
+            stroma,
+        }))
+    }
+
+    /// Id label `Tumor` dan `Stroma` di tabel label.
+    fn region_label_ids(&self) -> (Vec<u8>, Vec<u8>) {
         let ids = |pred: &dyn Fn(LabelKind) -> bool| -> Vec<u8> {
             self.project
                 .labels
@@ -310,57 +345,55 @@ impl Session {
                 .map(|l| l.id.0)
                 .collect()
         };
-        let tumor = ids(&|k| k == LabelKind::Tumor);
-        let stroma = ids(&|k| k == LabelKind::Stroma);
+        (
+            ids(&|k| k == LabelKind::Tumor),
+            ids(&|k| k == LabelKind::Stroma),
+        )
+    }
+
+    /// Indeks potret label yang menjadi sumber masker untuk `slide` beserta
+    /// pemetaan `U_slide → U_sumber` (`None` = label sendiri).
+    fn pick_region_source(
+        &self,
+        slide: SlideId,
+        stores: &[(SlideId, Cow<'_, LabelStore>)],
+        tumor: &[u8],
+    ) -> Result<Option<(usize, Option<Affine2>)>, EngineError> {
         let has_tumor = |st: &LabelStore| st.labels_present().iter().any(|l| tumor.contains(&l.0));
-        let stores = self.label_snapshot()?;
         let me = self.slide(slide)?;
         let own = stores
             .iter()
             .position(|(id, st)| *id == slide && has_tumor(st));
-        let pick = match own {
-            Some(i) => Some((i, None)),
-            None => {
-                let mut best: Option<(u32, u32, usize)> = None;
-                for (i, (id, st)) in stores.iter().enumerate() {
-                    let Some(e) = self.project.slide(*id) else {
-                        continue;
-                    };
-                    if *id == slide
-                        || e.status != SlideStatus::Ok
-                        || e.stain != Stain::He
-                        || !has_tumor(st)
-                    {
-                        continue;
-                    }
-                    let d = e.order.abs_diff(me.order);
-                    // Seri → urutan lebih kecil (deterministik).
-                    if best.is_none_or(|(bd, bo, _)| (d, e.order) < (bd, bo)) {
-                        best = Some((d, e.order, i));
-                    }
-                }
-                match best {
-                    Some((_, _, i)) => {
-                        let src = self.slide(stores[i].0)?;
-                        let map = src
-                            .transform
-                            .affine()
-                            .try_inverse()?
-                            .compose(&me.transform.affine());
-                        Some((i, Some(map)))
-                    }
-                    None => None,
-                }
+        if let Some(i) = own {
+            return Ok(Some((i, None)));
+        }
+        let mut best: Option<(u32, u32, usize)> = None;
+        for (i, (id, st)) in stores.iter().enumerate() {
+            let Some(e) = self.project.slide(*id) else {
+                continue;
+            };
+            if *id == slide || e.status != SlideStatus::Ok || e.stain != Stain::He || !has_tumor(st)
+            {
+                continue;
             }
-        };
-        Ok(pick.and_then(|(i, map)| {
-            stores.into_iter().nth(i).map(|(_, store)| RegionLookup {
-                store,
-                map,
-                tumor,
-                stroma,
-            })
-        }))
+            let d = e.order.abs_diff(me.order);
+            // Seri → urutan lebih kecil (deterministik).
+            if best.is_none_or(|(bd, bo, _)| (d, e.order) < (bd, bo)) {
+                best = Some((d, e.order, i));
+            }
+        }
+        match best {
+            Some((_, _, i)) => {
+                let src = self.slide(stores[i].0)?;
+                let map = src
+                    .transform
+                    .affine()
+                    .try_inverse()?
+                    .compose(&me.transform.affine());
+                Ok(Some((i, Some(map))))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Hitung atribut (8.12.5) dengan parameter bawaan. Lihat
@@ -963,13 +996,15 @@ impl Session {
     pub(crate) fn attr_reports(&self) -> Result<Vec<AttrReport>, EngineError> {
         let mut out = Vec::new();
         let band = self.project.spatial.peri_band_um;
+        // Potret label dimuat sekali untuk semua atribut dan irisan.
+        let stores = self.label_snapshot()?;
         for def in &self.project.attrs {
             let mut rows = Vec::new();
             for (slide, store) in self.attr_slices(def)? {
                 let values = store.to_array();
                 let weights = store.weights_array();
                 let (h, w) = values.dim();
-                let lookup = self.region_lookup(slide)?;
+                let lookup = self.region_lookup_in(slide, &stores)?;
                 // Jarak ke tumor pada kisi atribut (untuk pita peritumoral).
                 let tumor_mask = lookup.as_ref().map(|lk| {
                     Array2::from_shape_fn((h, w), |(y, x)| {

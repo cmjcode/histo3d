@@ -7,10 +7,11 @@
 //! tertunda yang diterima lewat [`Session::accept_pending`].
 
 use std::path::Path;
+use std::sync::Arc;
 
 use h3d_core::{
     AnnotationRecord, AnnotationSource, LabelDef, LabelId, LabelKind, Progress, ReviewStatus,
-    SlideId, SlideStatus, SubProgress, UndoStack,
+    SlideId, SlideStatus, SubProgress,
 };
 use h3d_segment::{
     ClassicParams, ImportSummary, LabelEditCommand, LabelStore, PaintMode, Proposal,
@@ -45,14 +46,7 @@ impl Session {
                 Some(s) => s,
                 None => LabelStore::new(self.project.recon.mpp_label, entry.size_um()),
             };
-            self.labels.insert(
-                slide,
-                LabelSlot {
-                    store,
-                    dirty: false,
-                    undo: UndoStack::default(),
-                },
-            );
+            self.labels.insert(slide, LabelSlot::new(store));
         }
         self.labels
             .get_mut(&slide)
@@ -78,14 +72,25 @@ impl Session {
 
     /// Simpan label satu irisan (atomik) dan `project.json` (provenance).
     pub fn save_labels(&mut self, slide: SlideId) -> Result<(), EngineError> {
+        self.write_labels(slide)?;
+        self.save_project()
+    }
+
+    /// Tulis `labels/NNNN.lbl` bila kotor, tanpa menyentuh `project.json`.
+    pub(crate) fn write_labels(&mut self, slide: SlideId) -> Result<(), EngineError> {
         if let Some(slot) = self.labels.get_mut(&slide) {
             if slot.dirty {
                 self.bundle.save_labels(slide, &slot.store)?;
                 slot.store.clear_dirty();
                 slot.dirty = false;
+                // Berkas baru saja ditulis dari isi ini: hash isinya (bila
+                // sudah dihitung) tetap sah; cache hash berkas dibuang.
+                if let Ok(mut h) = self.label_hashes.lock() {
+                    h.remove(&slide);
+                }
             }
         }
-        self.save_project()
+        Ok(())
     }
 
     /// Buang label irisan dari memori (mis. saat peringatan memori di iPad).
@@ -187,7 +192,7 @@ impl Session {
         // `capture` sudah menerapkan mutasi; `push` hanya menulis ulang isi
         // yang sama sambil mencatat langkah undo.
         slot.undo.push(Box::new(cmd), &mut slot.store);
-        slot.dirty = true;
+        slot.mark_dirty();
         self.sync_annotations(slide, touched);
         Ok(true)
     }
@@ -248,7 +253,7 @@ impl Session {
         let slot = self.ensure_labels(slide)?;
         let name = slot.undo.undo(&mut slot.store);
         if name.is_some() {
-            slot.dirty = true;
+            slot.mark_dirty();
             self.sync_annotations(slide, None);
         }
         Ok(name)
@@ -259,7 +264,7 @@ impl Session {
         let slot = self.ensure_labels(slide)?;
         let name = slot.undo.redo(&mut slot.store);
         if name.is_some() {
-            slot.dirty = true;
+            slot.mark_dirty();
             self.sync_annotations(slide, None);
         }
         Ok(name)
@@ -368,8 +373,25 @@ impl Session {
         slides: &[SlideId],
         p: &dyn Progress,
     ) -> Result<(), EngineError> {
-        let seg = TractSegmenter::load(model)?;
-        self.segment_with(&seg, slides, p)
+        let seg = self.segmenter(model)?;
+        self.segment_with(seg.as_ref(), slides, p)
+    }
+
+    /// Model segmentasi dari folder `model`, dimuat sekali per sesi (muat +
+    /// optimasi ONNX memakan detik; GUI memanggil per irisan).
+    pub fn segmenter(&self, model: &Path) -> Result<Arc<TractSegmenter>, EngineError> {
+        if let Ok(cache) = self.segmenter.lock() {
+            if let Some((dir, seg)) = cache.as_ref() {
+                if dir == model {
+                    return Ok(Arc::clone(seg));
+                }
+            }
+        }
+        let seg = Arc::new(TractSegmenter::load(model)?);
+        if let Ok(mut cache) = self.segmenter.lock() {
+            *cache = Some((model.to_path_buf(), Arc::clone(&seg)));
+        }
+        Ok(seg)
     }
 
     /// Seperti [`Self::segment_ai`] dengan backend inferensi apa pun.

@@ -43,6 +43,7 @@ impl AppState {
         }
         ctx.input(|i| self.touch.observe(&i.events, i.any_touches()));
         self.thumbs.begin_frame();
+        self.thumb_worker.poll();
         self.tiles.begin_frame();
         if let Some(g) = gpu {
             g.with(|r, _, _| r.begin_frame());
@@ -86,7 +87,7 @@ impl AppState {
 
         if self.job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        } else if self.tiles.needs_repaint() {
+        } else if self.tiles.needs_repaint() || self.thumb_worker.has_pending() {
             ctx.request_repaint();
         }
     }
