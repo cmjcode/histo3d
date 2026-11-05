@@ -5,3 +5,7 @@
 /dist
 images
 .env
+build.sh
+
+# Skrip build lokal
+build.sh
