@@ -12,6 +12,8 @@ struct Globals {
     // Bidang potong: fragmen dengan dot(xyz, world) − w > 0 dibuang.
     // Nonaktif = xyz nol dan w sangat besar.
     clip_plane: vec4<f32>,
+    // x = faktor renggang Z (tampilan saja; 1 = skala sebenarnya).
+    params: vec4<f32>,
 };
 
 struct MeshParams {
@@ -44,8 +46,10 @@ const NODATA_THRESHOLD: f32 = 1.0e38;
 @vertex
 fn vs_mesh(in: VIn) -> VOut {
     var out: VOut;
-    out.clip = globals.view_proj * vec4<f32>(in.pos, 1.0);
-    out.world = in.pos;
+    // Renggang Z mengelilingi pusat volume (ruang R berpusat di sana).
+    let pos = vec3<f32>(in.pos.xy, in.pos.z * globals.params.x);
+    out.clip = globals.view_proj * vec4<f32>(pos, 1.0);
+    out.world = pos;
     out.normal = in.normal;
     out.scalar = in.scalar;
     return out;

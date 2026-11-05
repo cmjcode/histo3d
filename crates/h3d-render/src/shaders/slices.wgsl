@@ -9,6 +9,8 @@ struct Globals {
     light1: vec4<f32>,
     ambient: vec4<f32>,
     clip_plane: vec4<f32>,
+    // x = faktor renggang Z (tampilan saja; 1 = skala sebenarnya).
+    params: vec4<f32>,
 };
 
 struct SliceParams {
@@ -42,7 +44,8 @@ fn corner(i: u32) -> vec2<f32> {
 @vertex
 fn vs_slice(@builtin(vertex_index) vi: u32) -> VOut {
     let c = corner(vi);
-    let world = slice.model * vec4<f32>(c, 0.0, 1.0);
+    var world = slice.model * vec4<f32>(c, 0.0, 1.0);
+    world.z = world.z * globals.params.x;
     var out: VOut;
     out.clip = globals.view_proj * world;
     out.uv = c;

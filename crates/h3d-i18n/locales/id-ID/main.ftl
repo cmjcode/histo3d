@@ -19,12 +19,69 @@ lang-en = English
 theme-light = Terang
 theme-dark = Gelap
 
-# --- Mode aplikasi ---
+# --- Kata umum untuk judul tabel ---
 mode-slides = Irisan
-mode-register = Registrasi
-mode-segment = Segmentasi
-mode-reconstruct = Rekonstruksi
-mode-report = Laporan
+
+# --- Cangkang ala DUCAD: tampilan, rel alat, laci, kanvas ---
+view-stack-3d = Tumpukan 3D
+view-slice-2d = Irisan 2D
+view-back-to-3d = Kembali ke 3D
+view-open-2d = Buka 2D
+view-switch-hint = Klik irisan di tumpukan, lalu buka tampilan 2D untuk menandai tumor
+tool-select = Pilih irisan
+tool-select-hint = Klik irisan di tumpukan untuk memilihnya; klik ganda membuka tampilan 2D
+drawer-layers = Lapisan
+drawer-sample = Sampel
+drawer-tumor3d = Tumor 3D
+drawer-labels = Label dan usulan
+drawer-align = Penyejajaran
+drawer-slice = Irisan terpilih
+menu-main = Menu utama
+menu-project = Proyek
+menu-export = Ekspor
+report-open = Laporan
+report-close = Tutup laporan
+stack-auto = Susun otomatis
+stack-auto-hint = Mengurutkan dan mengorientasikan irisan dari gambar resolusi rendah; hasilnya tampil sebagai pratinjau yang perlu Anda terima
+stack-align-hint = Menyejajarkan setiap irisan ke tetangganya (bisa dilanjutkan)
+stack-expand = Renggangkan tumpukan
+stack-expand-hint = Hanya tampilan; pengukuran tidak berubah
+stack-proposal-title = Susunan usulan
+stack-proposal-summary = { $n } irisan berpindah, { $uncertain } ragu
+stack-proposal-preview-hint = Pratinjau tembus pandang di kanvas; proyek belum berubah
+stack-proposal-details = Rincian perubahan
+stack-proposal-no-change = Susunan saat ini sudah sesuai usulan
+stack-registering = Menyejajarkan irisan
+stack-empty = Tumpukan kosong
+stack-empty-hint = Impor irisan lewat menu atau tombol di bawah; aplikasi akan menyusun tumpukannya
+stack-nav-hint = Seret untuk memutar, klik kanan atau tengah untuk menggeser, roda untuk zoom
+stack-slice-hidden = Sembunyikan di 3D
+stack-slice-shown = Tampilkan di 3D
+stack-fit = Pas ke layar
+stack-selected-none = Klik irisan di tumpukan untuk melihat rinciannya
+stack-slices-visible = Irisan di 3D
+stack-mesh-visible = Mesh tumor di 3D
+slice-mode-annotate = Tandai
+slice-mode-annotate-hint = Kuas, laso, poligon, penghapus, dan usulan untuk label pada irisan ini
+slice-mode-align = Sejajarkan
+slice-mode-align-hint = Bandingkan dengan irisan tetangga dan koreksi dengan landmark atau geser/putar
+viewcube-top = ATAS
+viewcube-bottom = BAWAH
+viewcube-front = DEPAN
+viewcube-back = BLKG
+viewcube-right = KANAN
+viewcube-left = KIRI
+welcome-hint = Impor irisan histologi, biarkan aplikasi menyusun tumpukannya, lalu klik satu irisan untuk menandai tumor
+welcome-open-slide-folder = Buka folder irisan
+settings-auto-stack = Susun otomatis setelah impor
+settings-auto-stack-hint = Setelah impor, urutan dan orientasi diusulkan dan ditampilkan di 3D untuk Anda terima atau tolak
+layers-slices = Irisan
+layers-labels = Label
+layers-reorder-hint = Seret baris untuk mengubah urutan; klik ganda membuka 2D
+layers-qc-flagged = QC gagal
+layers-not-registered = Belum disejajarkan
+layers-pending = Usulan menunggu
+context-slice-z = z { $z } µm
 
 # --- Aksi umum ---
 action-new = Proyek baru

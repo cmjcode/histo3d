@@ -62,6 +62,65 @@ pub fn slice_model_matrix(
     (conv * t4 * scale).as_mat4()
 }
 
+/// Matriks model irisan setelah renggang Z tampilan ([`crate::Scene3D::z_scale`]):
+/// hasil `slice_model_matrix` dikalikan skala `(1, 1, z_scale)` di ruang R.
+/// Dipakai CPU (picking, garis tepi) agar sama persis dengan shader.
+pub fn slice_model_matrix_scaled(model: &Mat4, z_scale: f32) -> Mat4 {
+    let z = crate::scene::sanitize_z_scale(z_scale);
+    Mat4::from_scale(glam::Vec3::new(1.0, 1.0, z)) * *model
+}
+
+/// Keempat sudut quad irisan di ruang R (mm), urutan `(0,0) (1,0) (1,1) (0,1)`.
+pub fn slice_corners_mm(model: &Mat4) -> [glam::Vec3; 4] {
+    [
+        model.project_point3(glam::Vec3::new(0.0, 0.0, 0.0)),
+        model.project_point3(glam::Vec3::new(1.0, 0.0, 0.0)),
+        model.project_point3(glam::Vec3::new(1.0, 1.0, 0.0)),
+        model.project_point3(glam::Vec3::new(0.0, 1.0, 0.0)),
+    ]
+}
+
+/// Hasil klik pada quad irisan.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SlicePick {
+    /// Parameter ray (`origin + dir × t`), > 0.
+    pub t: f32,
+    /// Koordinat kotak satuan `(u, v) ∈ [0,1]²` pada irisan; `u` searah
+    /// lebar slide, `v` searah tinggi (ruang U).
+    pub uv: [f32; 2],
+    /// Titik kena (mm, ruang R, sudah termasuk renggang Z bila ada).
+    pub point_mm: glam::Vec3,
+}
+
+/// Potong `ray` (ruang R, mm) dengan quad irisan bermatriks `model`
+/// (sudah termasuk renggang Z bila dipakai). `None` bila ray sejajar bidang,
+/// perpotongan di belakang asal ray, atau di luar kotak satuan.
+pub fn pick_slice(ray: &crate::mesh::Ray, model: &Mat4) -> Option<SlicePick> {
+    if model.determinant().abs() < 1e-18 {
+        return None;
+    }
+    let inv = model.inverse();
+    // Ray ke ruang kotak satuan irisan; bidang irisan adalah z = 0.
+    let o = inv.project_point3(ray.origin);
+    let d = inv.transform_vector3(ray.dir);
+    if d.z.abs() < 1e-12 {
+        return None;
+    }
+    let t = -o.z / d.z;
+    if !(t.is_finite() && t > 0.0) {
+        return None;
+    }
+    let p = o + d * t;
+    if !(0.0..=1.0).contains(&p.x) || !(0.0..=1.0).contains(&p.y) {
+        return None;
+    }
+    Some(SlicePick {
+        t,
+        uv: [p.x, p.y],
+        point_mm: ray.origin + ray.dir * t,
+    })
+}
+
 /// Tekstur thumbnail irisan di GPU.
 pub struct SliceTexture {
     /// Tekstur `Rgba8UnormSrgb`.
@@ -218,5 +277,40 @@ mod tests {
         let p = m.project_point3(Vec3::new(1.0, 1.0, 0.0));
         // (2000 µm, 1000 µm) → (2 mm, −1 mm) karena y dibalik.
         assert!((p - Vec3::new(2.0, -1.0, 0.0)).length() < 1e-6);
+        let c = slice_corners_mm(&m);
+        assert!((c[0] - Vec3::ZERO).length() < 1e-6);
+        assert!((c[2] - p).length() < 1e-6);
+    }
+
+    #[test]
+    fn pick_hits_inside_quad_and_respects_z_scale() {
+        use crate::mesh::Ray;
+        // Irisan 2 × 1 mm di z = 4 µm; pusat volume di z = 0.
+        let m = slice_model_matrix(&Affine2::IDENTITY, [2000.0, 1000.0], 4.0, [0.0; 3]);
+        let down = |x: f32, y: f32| Ray {
+            origin: Vec3::new(x, y, 10.0),
+            dir: Vec3::new(0.0, 0.0, -1.0),
+        };
+        let hit = pick_slice(&down(0.5, -0.25), &m).expect("tengah quad kena");
+        assert!((hit.uv[0] - 0.25).abs() < 1e-5 && (hit.uv[1] - 0.25).abs() < 1e-5);
+        assert!((hit.point_mm.z - 0.004).abs() < 1e-6);
+        assert!(pick_slice(&down(2.5, -0.5), &m).is_none(), "di luar lebar");
+        assert!(pick_slice(&down(0.5, 0.5), &m).is_none(), "di luar tinggi");
+        // Ray sejajar bidang dan ray yang menjauh tidak kena.
+        let along = Ray {
+            origin: Vec3::new(-1.0, -0.5, 0.004),
+            dir: Vec3::X,
+        };
+        assert!(pick_slice(&along, &m).is_none());
+        let away = Ray {
+            origin: Vec3::new(0.5, -0.5, 10.0),
+            dir: Vec3::Z,
+        };
+        assert!(pick_slice(&away, &m).is_none());
+        // Renggang Z 100× memindahkan bidang ke z = 0,4 mm.
+        let ms = slice_model_matrix_scaled(&m, 100.0);
+        let hit = pick_slice(&down(0.5, -0.25), &ms).unwrap();
+        assert!((hit.point_mm.z - 0.4).abs() < 1e-5);
+        assert_eq!(slice_model_matrix_scaled(&m, f32::NAN), m);
     }
 }

@@ -1237,22 +1237,35 @@ mati. Cukup untuk beberapa label; OIT tidak diperlukan.
 
 ### 8.11 `h3d-ui` dan `h3d-app`
 
-**Mode aplikasi.**
+**Satu layar ala DUCAD (menggantikan lima mode).** Sasaran pengguna adalah
+dokter/tenaga medis: kanvas penuh di tengah, panel-panel mengambang di
+atasnya, dan alur kerja tunggal *impor → tumpukan 3D tersusun otomatis →
+klik irisan → kerja di 2D*. Tidak ada fitur lama yang dihapus; semuanya
+dipindahkan ke tempat baru di bawah ini.
 
 ```rust
-pub enum AppMode { Slides, Register, Segment, Reconstruct, Report }
+pub enum View { Stack3D, Slice2D }          // isi kanvas
+pub enum SliceMode { Annotate, Align }      // cara kerja di 2D
+pub enum Drawer { Layers, Sample, Labels, Align, Tumor3D }
 ```
 
-| Mode | Isi layar |
+| Bagian layar | Isi (asal fitur lama) |
 |---|---|
-| `Slides` | Kisi thumbnail; impor; seret untuk mengurutkan; isi mpp dan jarak irisan; tandai rusak; tombol "Usulkan urutan dan orientasi" dengan pratinjau perubahan, tanda irisan ragu, "Balik urutan", dan Terima/Tolak (8.4.7). Panel "Klinis" dan orientasi anatomis; per irisan: pra-analitik dan panel IHC (8.12.10). |
-| `Register` | Viewer pembanding (irisan `i` vs tetangga); daftar QC; tombol "Sejajarkan semua"; alat landmark dan geser/putar manual. |
-| `Segment` | Viewer slide + overlay label; panel label (dengan `kind` dan grup); kuas/laso/poligon/penghapus; "Salin ke irisan berikut"; usulan klasik/AI/interpolasi dengan Terima/Tolak; overlay inti positif/negatif untuk kalibrasi ambang IHC; "Tandai sudah ditinjau" (8.12.10). |
-| `Reconstruct` | Viewport 3D; parameter (`s_xy`, penghalusan, decimate); visibilitas dan opasitas label; bidang potong; irisan di 3D; pemilih lapisan skalar dengan legenda; klik mesh → nilai dan irisan terdekat (8.12.10). |
-| `Report` | Tabel pengukuran; tab analisis (komponen, margin, invasi, ukuran, atribut, provenance; 8.12.8); peringatan; ekspor. |
+| Kanvas **Tumpukan 3D** | Semua irisan `Ok` sebagai quad bertekstur pada `z_i` dengan `T_i`, mesh tumor di atasnya; klik irisan = pilih, klik ganda = buka 2D; sorot hover/terpilih, garis tepi kuning untuk gagal QC; "renggangkan tumpukan" (`Scene3D::z_scale`, hanya tampilan, otomatis agar tebal ≈ ½ lebar); pratinjau tembus pandang susunan usulan; bidang potong; lapisan skalar + legenda; klik mesh → nilai dan irisan terdekat; ViewCube. (Rekonstruksi.) |
+| Kanvas **Irisan 2D** | `Annotate`: viewer slide + overlay label, kuas/penghapus/laso/poligon, usulan, inti kalibrasi (Segmentasi). `Align`: viewer pembanding irisan vs tetangga (campur / papan catur / selisih), landmark, geser/putar (Registrasi). Navigasi irisan: bilah konteks, geser dua jari, panah. |
+| **Bilah atas** | Menu burger: Baru, Buka, Simpan, Impor irisan, Ekspor (7 jenis + kotak data klinis), Laporan, Pengaturan, Tentang. Nama proyek. Pemilih 3D/2D di tengah. Kanan: tombol laci, Laporan, urung/ulang (2D), tema, bahasa. |
+| **Rel alat kiri** | 3D: Susun otomatis, Sejajarkan semua, Bangun 3D, Analisis spasial, Pas ke layar, irisan/mesh/bidang potong. 2D Tandai: alat gambar, isi lubang, salin ke irisan berikut, tandai ditinjau. 2D Sejajarkan: geser pandangan, landmark, geser, putar, tandai rusak. |
+| **Laci kanan** | *Lapisan*: daftar irisan terurut (thumbnail searah `orient_hint`, lencana acuan/status/QC/usulan, mata "sembunyikan di 3D", seret untuk mengurutkan, klik ganda buka 2D) + label ringkas. *Sampel*: nama/catatan/susut/jarak, orientasi anatomis, klinis, rincian irisan terpilih (mpp, Z, status, acuan, pewarnaan, pra-analitik, IHC, hapus). *Label dan usulan*: panel label, usulan klasik/AI/interpolasi dengan Terima/Tolak, kalibrasi IHC. *Penyejajaran*: Sejajarkan semua, daftar QC. *Tumor 3D*: parameter rekonstruksi, visibilitas/opasitas, irisan di 3D + renggang, bidang potong, lapisan skalar, titik terpilih. |
+| **Bilah konteks** (kapsul bawah) | 3D: judul irisan, z, QC, Buka 2D, Jadikan acuan, Tandai rusak, Sembunyikan. 2D: Kembali ke 3D, sebelumnya / "i dari n" / berikutnya. |
+| **Kartu usulan** | Setelah "Susun otomatis": ringkasan (n berpindah, m ragu), Terima semua / Terima dicentang / Balik urutan / Tolak, rincian perubahan. Satu-satunya jalur usulan → proyek (aturan 8). |
+| **Lembar Laporan** | Panel bawah yang bisa diubah tingginya: 8 tab laporan, peringatan, kolom ekspor, kalimat "Hanya untuk riset". |
+| **Kartu progres** | Job latar berjalan sambil kanvas tetap tampil (dari cache); Batal. |
 
-Navigasi antar irisan (tombol, geser dua jari, tombol panah) tersedia di
-mode `Register` dan `Segment`.
+**Susun otomatis** (`Settings::auto_stack`, bawaan menyala): setelah impor
+≥ 3 irisan, `suggest_order` dijalankan (citra 64 µm/px, NCC + Dice, lintasan
+termirip; 8.4.7), hasilnya tampil sebagai kartu usulan + pratinjau 3D; setelah
+Terima, `register_all` menyusul otomatis. Dua irisan → langsung registrasi.
+Pengguna tetap bisa memanggil keduanya dari rel alat.
 
 **Masukan.**
 

@@ -2290,6 +2290,7 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "egui_icons",
+ "glam 0.33.12",
  "h3d-core",
  "h3d-i18n",
  "log",

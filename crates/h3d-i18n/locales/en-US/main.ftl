@@ -19,12 +19,69 @@ lang-en = English
 theme-light = Light
 theme-dark = Dark
 
-# --- App modes ---
+# --- Common word for table headers ---
 mode-slides = Slides
-mode-register = Register
-mode-segment = Segment
-mode-reconstruct = Reconstruct
-mode-report = Report
+
+# --- DUCAD-style shell: views, tool rail, drawers, canvas ---
+view-stack-3d = 3D stack
+view-slice-2d = 2D slice
+view-back-to-3d = Back to 3D
+view-open-2d = Open 2D
+view-switch-hint = Click a slice in the stack, then open the 2D view to mark the tumor
+tool-select = Select slice
+tool-select-hint = Click a slice in the stack to select it; double-click opens the 2D view
+drawer-layers = Layers
+drawer-sample = Sample
+drawer-tumor3d = Tumor 3D
+drawer-labels = Labels and proposals
+drawer-align = Alignment
+drawer-slice = Selected slice
+menu-main = Main menu
+menu-project = Project
+menu-export = Export
+report-open = Report
+report-close = Close report
+stack-auto = Auto-arrange
+stack-auto-hint = Orders and orients the slices from low-resolution images; the result is shown as a preview you must accept
+stack-align-hint = Aligns every slice to its neighbor (resumable)
+stack-expand = Expand stack
+stack-expand-hint = Display only; measurements are unchanged
+stack-proposal-title = Proposed arrangement
+stack-proposal-summary = { $n } slices move, { $uncertain } uncertain
+stack-proposal-preview-hint = Translucent preview on the canvas; the project has not changed
+stack-proposal-details = Change details
+stack-proposal-no-change = The current arrangement already matches the proposal
+stack-registering = Aligning slices
+stack-empty = The stack is empty
+stack-empty-hint = Import slices from the menu or the button below; the app will arrange the stack
+stack-nav-hint = Drag to orbit, right or middle button to pan, wheel to zoom
+stack-slice-hidden = Hide in 3D
+stack-slice-shown = Show in 3D
+stack-fit = Fit to screen
+stack-selected-none = Click a slice in the stack to see its details
+stack-slices-visible = Slices in 3D
+stack-mesh-visible = Tumor mesh in 3D
+slice-mode-annotate = Annotate
+slice-mode-annotate-hint = Brush, lasso, polygon, eraser, and proposals for labels on this slice
+slice-mode-align = Align
+slice-mode-align-hint = Compare with the neighboring slice and correct with landmarks or move/rotate
+viewcube-top = TOP
+viewcube-bottom = BOTTOM
+viewcube-front = FRONT
+viewcube-back = BACK
+viewcube-right = RIGHT
+viewcube-left = LEFT
+welcome-hint = Import histology slices, let the app arrange the stack, then click a slice to mark the tumor
+welcome-open-slide-folder = Open slide folder
+settings-auto-stack = Auto-arrange after import
+settings-auto-stack-hint = After import, order and orientation are proposed and shown in 3D for you to accept or reject
+layers-slices = Slices
+layers-labels = Labels
+layers-reorder-hint = Drag rows to reorder; double-click opens 2D
+layers-qc-flagged = QC failed
+layers-not-registered = Not aligned yet
+layers-pending = Proposals waiting
+context-slice-z = z { $z } µm
 
 # --- Common actions ---
 action-new = New project

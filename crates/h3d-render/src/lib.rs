@@ -38,9 +38,13 @@ pub use mesh::{
 };
 pub use overlay::{default_palette, LabelOverlayDraw};
 pub use scene::{
-    H3dPaintCallback, Lighting, RenderBudgets, Scene, Scene2D, Scene3D, SceneRenderer,
+    sanitize_z_scale, H3dPaintCallback, Lighting, RenderBudgets, Scene, Scene2D, Scene3D,
+    SceneRenderer,
 };
-pub use slices3d::{slice_model_matrix, SliceDraw, SliceId, SliceTexture};
+pub use slices3d::{
+    pick_slice, slice_corners_mm, slice_model_matrix, slice_model_matrix_scaled, SliceDraw,
+    SliceId, SlicePick, SliceTexture,
+};
 pub use tiles::{
     GpuTile, GpuTileCache, TileCacheIndex, TileDraw, TileKey, TileLayerDraw, TileTextureId,
     TileTextureKind, UploadStatus, DEFAULT_MAX_UPLOADS_PER_FRAME, DEFAULT_STALE_AFTER_FRAMES,

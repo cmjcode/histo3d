@@ -112,11 +112,16 @@ pub struct Scene3D {
     pub meshes: Vec<MeshInstance>,
     /// Irisan thumbnail di 3D.
     pub slices: Vec<SliceDraw>,
-    /// Bidang potong `[nx, ny, nz, d]` (ruang R mm): fragmen dengan
-    /// `n·p − d > 0` dibuang. `None` = tidak memotong.
+    /// Bidang potong `[nx, ny, nz, d]` (ruang R mm, **setelah** `z_scale`):
+    /// fragmen dengan `n·p − d > 0` dibuang. `None` = tidak memotong.
     pub clip_plane: Option<[f32; 4]>,
     /// Pencahayaan.
     pub lighting: Lighting,
+    /// Faktor renggang sumbu Z, hanya untuk tampilan: `r.z` mesh dan irisan
+    /// dikalikan nilai ini di shader (ruang R berpusat di `center_um`, jadi
+    /// perenggangan terjadi mengelilingi pusat volume). `1.0` = skala
+    /// sebenarnya. Tidak pernah memengaruhi pengukuran.
+    pub z_scale: f32,
 }
 
 /// Snapshot adegan yang dibawa paint callback.
@@ -149,6 +154,8 @@ struct Globals3D {
     light1: [f32; 4],
     ambient: [f32; 4],
     clip_plane: [f32; 4],
+    /// `x` = faktor renggang Z (lihat [`Scene3D::z_scale`]).
+    params: [f32; 4],
 }
 
 #[repr(C)]
@@ -167,6 +174,16 @@ struct SliceParamsUniform {
 
 /// Bidang potong nonaktif: normal nol, d sangat besar → tidak pernah memotong.
 const CLIP_DISABLED: [f32; 4] = [0.0, 0.0, 0.0, 1.0e30];
+
+/// Faktor renggang Z yang aman untuk shader: nilai tak hingga, NaN, nol,
+/// atau negatif jatuh ke `1.0` (skala sebenarnya).
+pub fn sanitize_z_scale(z_scale: f32) -> f32 {
+    if z_scale.is_finite() && z_scale > 0.0 {
+        z_scale
+    } else {
+        1.0
+    }
+}
 
 fn layer_uniform(
     affine: &Affine2,
@@ -968,6 +985,7 @@ impl SceneRenderer {
             light1: [n1.x, n1.y, n1.z, l.intensity1],
             ambient: [l.ambient[0], l.ambient[1], l.ambient[2], 0.0],
             clip_plane: scene.clip_plane.unwrap_or(CLIP_DISABLED),
+            params: [sanitize_z_scale(scene.z_scale), 0.0, 0.0, 0.0],
         };
 
         let fs = &mut self.slots[slot];
@@ -1256,7 +1274,11 @@ mod tests {
     #[test]
     fn uniform_sizes_are_16_byte_multiples() {
         assert_eq!(std::mem::size_of::<LayerUniform>(), 80);
-        assert_eq!(std::mem::size_of::<Globals3D>(), 144);
+        assert_eq!(std::mem::size_of::<Globals3D>(), 160);
+        assert_eq!(sanitize_z_scale(f32::NAN), 1.0);
+        assert_eq!(sanitize_z_scale(0.0), 1.0);
+        assert_eq!(sanitize_z_scale(-3.0), 1.0);
+        assert_eq!(sanitize_z_scale(4.0), 4.0);
         assert_eq!(std::mem::size_of::<MeshParamsUniform>(), 32);
         assert_eq!(std::mem::size_of::<SliceParamsUniform>(), 80);
     }

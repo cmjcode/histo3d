@@ -1,20 +1,22 @@
 //! Uji asap headless: keadaan aplikasi dibangun di atas proyek fantom lalu
-//! satu frame UI tiap mode dijalankan lewat `egui::Context::run_ui` tanpa
-//! jendela dan tanpa GPU (paint callback hanya ditambahkan bila ada render
-//! state). Juga alur impor tanpa mpp, goresan satu-undo, usulan urutan,
-//! dan kunci terjemahan semua `Warning`.
+//! satu frame UI tiap tampilan/laci dijalankan lewat `egui::Context::run_ui`
+//! tanpa jendela dan tanpa GPU (paint callback hanya ditambahkan bila ada
+//! render state). Juga alur impor → susun otomatis → Terima → registrasi,
+//! impor tanpa mpp, goresan satu-undo, usulan urutan, dan kunci terjemahan
+//! semua `Warning`.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-use h3d_app::modes::{register, segment, slides};
+use h3d_app::features::{register, segment, slides};
 use h3d_app::panels::browser::{BrowserPurpose, BrowserState};
 use h3d_app::settings::Settings;
-use h3d_app::state::{try_lock_session, AppState, ImportRequest, JobOutput};
+use h3d_app::state::{
+    try_lock_session, AppState, Drawer, ImportRequest, JobOutput, SliceMode, View,
+};
 use h3d_core::{Budgets, LabelId, NoProgress, SlideId};
 use h3d_engine::phantom::{write_phantom, PhantomManifest, PhantomOptions};
 use h3d_engine::{ImportOptions, RegOptions, Session};
-use h3d_ui::AppMode;
 use h3d_volume::Warning;
 
 /// Bahasa aktif bersifat global: tes yang menggambar UI bergiliran.
@@ -99,8 +101,16 @@ fn context(app: &AppState) -> egui::Context {
     ctx
 }
 
+fn no_errors(app: &AppState, what: &str) {
+    assert!(
+        app.toasts.items().iter().all(|t| !t.is_error),
+        "{what}: {:?}",
+        app.toasts.items()
+    );
+}
+
 #[test]
-fn every_mode_renders_a_frame_without_gpu() {
+fn every_view_drawer_and_sheet_renders_a_frame_without_gpu() {
     let _g = ui_lock();
     let fx = phantom(6);
     let path = project(&fx);
@@ -117,60 +127,81 @@ fn every_mode_renders_a_frame_without_gpu() {
     assert!(app.open_project(&path));
     assert!(app.toasts.items().is_empty(), "{:?}", app.toasts.items());
     assert!(app.current.is_some());
+    assert_eq!(app.view, View::Stack3D);
 
-    // Rekonstruksi + analisis lewat job latar supaya mode 3D dan Laporan
-    // punya isi.
+    // Rekonstruksi + analisis lewat job latar supaya kanvas 3D dan laporan
+    // punya isi; selama job berjalan kanvas tetap tergambar + kartu progres.
     assert!(app.start_job("rekonstruksi".into(), |s, p| {
         s.reconstruct(p).map(|m| JobOutput::Reconstructed(m.len()))
     }));
-    // Selama job berjalan layar menampilkan lapisan job.
     frame(&ctx, &mut app);
     app.wait_job();
     assert!(app.start_job("analisis".into(), |s, p| {
         s.analyze_spatial(p).map(|_| JobOutput::Analyzed)
     }));
     app.wait_job();
-    assert!(
-        app.toasts.items().iter().all(|t| !t.is_error),
-        "{:?}",
-        app.toasts.items()
-    );
+    no_errors(&app, "job");
 
     for lang in [h3d_i18n::Language::Id, h3d_i18n::Language::En] {
         app.settings.set_language(lang);
         app.persist_settings();
-        for mode in AppMode::ALL {
-            app.set_mode(mode);
-            if mode == AppMode::Slides {
-                app.slides.selected = app.current;
-            }
-            for _ in 0..3 {
+
+        // Tumpukan 3D dengan tiap laci terbuka.
+        app.set_view(View::Stack3D);
+        for drawer in Drawer::ALL {
+            app.drawer = Some(drawer);
+            for _ in 0..2 {
                 frame(&ctx, &mut app);
             }
-            assert!(
-                app.toasts.items().iter().all(|t| !t.is_error),
-                "mode {mode:?}: {:?}",
-                app.toasts.items()
-            );
+            no_errors(&app, &format!("laci {drawer:?}"));
         }
-        // Semua tab laporan.
-        app.set_mode(AppMode::Report);
+        app.drawer = None;
+        assert!(
+            !app.recon.slices.is_empty(),
+            "irisan harus ada di kanvas 3D"
+        );
+        assert!(app.recon.z_scale >= 1.0);
+
+        // Irisan 2D: Tandai dan Sejajarkan.
+        let slide = app.current.unwrap();
+        app.open_slice_2d(slide);
+        assert_eq!(app.view, View::Slice2D);
+        for mode in [SliceMode::Annotate, SliceMode::Align] {
+            app.slice_mode = mode;
+            app.drawer = Some(if mode == SliceMode::Annotate {
+                Drawer::Labels
+            } else {
+                Drawer::Align
+            });
+            for _ in 0..2 {
+                frame(&ctx, &mut app);
+            }
+            no_errors(&app, &format!("2D {mode:?}"));
+        }
+        app.drawer = None;
+
+        // Lembar laporan: semua tab, diperbesar dan tidak.
+        app.report_open = true;
         for tab in 0..8 {
             app.report.tab = tab;
+            app.report.expanded = tab % 2 == 0;
             frame(&ctx, &mut app);
         }
+        app.report.expanded = false;
+        app.report_open = false;
     }
     assert!(!app.recon.meshes.is_empty(), "mesh harus termuat");
     assert!(app.report.report.is_some(), "laporan harus terhitung");
 
-    // Alat dan lapisan tambahan tiap mode.
-    app.set_mode(AppMode::Register);
+    // Alat penyejajaran + mode banding.
+    app.set_view(View::Slice2D);
+    app.slice_mode = SliceMode::Align;
     for tool in [
         register::RegTool::Landmark,
         register::RegTool::Translate,
         register::RegTool::Rotate,
     ] {
-        app.register.tool = tool;
+        register::set_tool(&mut app, tool);
         app.register.shift = [20.0, -10.0];
         app.register.angle = 0.05;
         for kind in [
@@ -183,7 +214,8 @@ fn every_mode_renders_a_frame_without_gpu() {
         }
     }
 
-    app.set_mode(AppMode::Segment);
+    // Alat penandaan + lapisan usulan dan inti kalibrasi.
+    app.slice_mode = SliceMode::Annotate;
     let slide = app.current.unwrap();
     {
         let shared = app.session.clone().unwrap();
@@ -201,47 +233,47 @@ fn every_mode_renders_a_frame_without_gpu() {
         mpp: 1.0,
     });
     app.segment.stroke = vec![([400.0, 400.0], 60.0), ([500.0, 450.0], 40.0)];
-    for tool in [
-        segment::Tool::Pan,
-        segment::Tool::Brush,
-        segment::Tool::Eraser,
-        segment::Tool::Lasso,
-        segment::Tool::Polygon,
-    ] {
-        app.segment.tool = tool;
+    for tool in segment::Tool::ALL {
+        segment::set_tool(&mut app, tool);
         app.segment.polygon = vec![[100.0, 100.0], [300.0, 120.0], [200.0, 300.0]];
         frame(&ctx, &mut app);
     }
 
-    app.set_mode(AppMode::Reconstruct);
-    app.recon.show_slices = true;
+    // Kembali ke 3D: bidang potong, lapisan skalar, renggang manual,
+    // irisan tersembunyi, mesh dimatikan.
+    app.set_view(View::Stack3D);
     app.recon.clip_enabled = true;
-    app.recon.scalar = h3d_app::modes::reconstruct::scalar_names(&app.recon.meshes)
+    app.recon.scalar = h3d_app::features::reconstruct::scalar_names(&app.recon.meshes)
         .first()
         .cloned();
+    app.recon.z_scale = 40.0;
+    app.recon.z_scale_auto = false;
+    app.recon.hidden_slices.insert(slide);
     frame(&ctx, &mut app);
+    app.recon.show_meshes = false;
+    frame(&ctx, &mut app);
+    app.recon.show_meshes = true;
+    app.recon.hidden_slices.clear();
 
-    // Dialog: peramban Documents (dua tujuan) dan pratinjau usulan urutan.
-    app.set_mode(AppMode::Slides);
+    // Dialog: peramban Documents (dua tujuan) dan kartu usulan susunan.
     for purpose in [BrowserPurpose::Projects, BrowserPurpose::ImportSlides] {
         app.browser = Some(BrowserState::in_dir(purpose, fx.tmp.path().join("ph")));
         frame(&ctx, &mut app);
         assert!(app.browser.is_some());
     }
     app.browser = None;
-    assert!(app.start_job("usul".into(), |s, p| {
-        s.suggest_order(p).map(JobOutput::OrderSuggested)
-    }));
+    app.start_auto_stack(false);
     app.wait_job();
-    assert!(
-        app.slides.order_preview.is_some(),
-        "pratinjau harus terbuka"
-    );
-    frame(&ctx, &mut app);
-    assert!(
-        app.slides.order_preview.is_some(),
-        "usulan tidak boleh diterapkan tanpa keputusan pengguna"
-    );
+    if let Some(p) = app.slides.order_preview.as_mut() {
+        // Pratinjau tampil tembus pandang di kanvas; proyek belum berubah.
+        p.details_open = true;
+        frame(&ctx, &mut app);
+        assert!(
+            app.slides.order_preview.is_some(),
+            "usulan tidak boleh diterapkan tanpa keputusan pengguna"
+        );
+        assert!(app.recon.slices.iter().all(|s| s.preview));
+    }
 
     // Kait peringatan memori tidak panik tanpa GPU dan mengosongkan cache.
     h3d_app::platform::on_memory_warning();
@@ -286,6 +318,9 @@ fn import_without_mpp_asks_for_mpp_and_never_guesses() {
     app.start_import(prompt.request, Some([fx.manifest.mpp, fx.manifest.mpp]));
     app.wait_job();
     assert!(app.mpp_prompt.is_none());
+    // Susun otomatis menyusul (≥ 3 irisan): job usulan atau registrasi berjalan.
+    assert!(app.job.is_some(), "susun otomatis harus menyusul impor");
+    app.wait_job();
     let shared = app.session.clone().unwrap();
     let s = try_lock_session(&shared).unwrap();
     assert_eq!(s.slides().len(), 3);
@@ -297,8 +332,97 @@ fn import_without_mpp_asks_for_mpp_and_never_guesses() {
         );
     }
     drop(s);
-    assert!(app.slides.selected.is_some());
+    assert!(app.current.is_some());
     frame(&ctx, &mut app);
+}
+
+/// Alur sederhana dokter: impor → susun otomatis → kartu usulan di 3D →
+/// Terima → registrasi berjalan sendiri → tumpukan tersejajar.
+#[test]
+fn auto_stack_runs_after_import_and_registers_after_accept() {
+    let _g = ui_lock();
+    let fx = phantom(5);
+    let mut app = app();
+    let ctx = context(&app);
+    assert!(app.settings.auto_stack);
+    assert!(app.create_project(&fx.tmp.path().join("auto.h3d")));
+    app.start_import(
+        ImportRequest {
+            paths: fx.slide_paths.clone(),
+            embed: false,
+            embed_mode: h3d_engine::EmbedMode::Copy,
+        },
+        Some([fx.manifest.mpp, fx.manifest.mpp]),
+    );
+    app.wait_job();
+    assert_eq!(app.view, View::Stack3D);
+    assert!(app.job.is_some(), "usulan urutan harus dimulai otomatis");
+    assert!(app.auto_stack_active);
+    frame(&ctx, &mut app);
+    app.wait_job();
+
+    // Fantom sudah urut: usulan bisa "tanpa perubahan" (langsung registrasi)
+    // atau membuka kartu; keduanya tidak mengubah proyek tanpa Terima.
+    let before: Vec<SlideId> = {
+        let shared = app.session.clone().unwrap();
+        let s = try_lock_session(&shared).unwrap();
+        AppState::ordered_ids(&s)
+    };
+    if app.slides.order_preview.is_some() {
+        assert!(app.auto_stack_active);
+        frame(&ctx, &mut app);
+        let order = app
+            .slides
+            .order_preview
+            .as_ref()
+            .unwrap()
+            .suggestion
+            .order
+            .clone();
+        {
+            let shared = app.session.clone().unwrap();
+            let s = try_lock_session(&shared).unwrap();
+            assert_eq!(AppState::ordered_ids(&s), before, "belum ada Terima");
+        }
+        let shared = app.session.clone().unwrap();
+        let mut s = try_lock_session(&shared).unwrap();
+        app.decide_order(&mut s, slides::OrderDecision::Accept(order));
+        drop(s);
+        assert!(app.slides.order_preview.is_none());
+    }
+    assert!(app.job.is_some(), "registrasi harus menyusul otomatis");
+    app.wait_job();
+    assert!(!app.auto_stack_active);
+    no_errors(&app, "susun otomatis");
+    let shared = app.session.clone().unwrap();
+    let s = try_lock_session(&shared).unwrap();
+    let reference = s.project().effective_reference().unwrap();
+    for e in s.slides() {
+        if e.id != reference {
+            assert!(e.reg.is_some(), "irisan {} belum tersejajar", e.id);
+        }
+    }
+    drop(s);
+    frame(&ctx, &mut app);
+    assert_eq!(app.recon.slices.len(), 5);
+
+    // Susun otomatis bisa dimatikan di Pengaturan.
+    app.settings.auto_stack = false;
+    let mut app2 = AppState::new(app.settings.clone(), Budgets::IPAD);
+    assert!(app2.create_project(&fx.tmp.path().join("manual.h3d")));
+    app2.start_import(
+        ImportRequest {
+            paths: fx.slide_paths.clone(),
+            embed: false,
+            embed_mode: h3d_engine::EmbedMode::Copy,
+        },
+        Some([fx.manifest.mpp, fx.manifest.mpp]),
+    );
+    app2.wait_job();
+    assert!(
+        app2.job.is_none(),
+        "tanpa susun otomatis tidak ada job lanjutan"
+    );
 }
 
 #[test]
@@ -322,6 +446,8 @@ fn open_slide_folder_and_skip_incomplete_download_in_batch() {
         .take()
         .expect("PNG di folder meminta isian mpp setelah melewati berkas rusak");
     app.start_import(prompt.request, Some([fx.manifest.mpp, fx.manifest.mpp]));
+    app.wait_job();
+    // Susun otomatis yang menyusul tidak boleh mengganggu hasil impor.
     app.wait_job();
 
     let shared = app.session.clone().unwrap();
@@ -401,17 +527,26 @@ fn order_suggestion_is_applied_only_through_accept() {
     let now: Vec<SlideId> = s.slides().iter().map(|e| e.id).collect();
     assert_eq!(now, current);
 
-    // Isi pratinjau tergambar; tanpa klik tidak ada keputusan.
+    // Isi kartu tergambar (ringkas dan dengan rincian); tanpa klik tidak ada
+    // keputusan. Pratinjau 3D-nya memuat semua irisan `Ok` sebagai pratinjau.
     let ctx = egui::Context::default();
     h3d_ui::theme::apply(&ctx, h3d_ui::ThemeMode::Dark);
-    let mut decision = slides::OrderDecision::None;
-    let mut out = ctx.run_ui(Default::default(), |ui| {
-        egui::CentralPanel::default().show(ui, |ui| {
-            decision = slides::order_preview_ui(ui, &mut preview, &s);
+    for details in [false, true] {
+        preview.details_open = details;
+        let mut decision = slides::OrderDecision::None;
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                decision = slides::order_preview_ui(ui, &mut preview, &s);
+            });
         });
-    });
-    out.textures_delta.clear();
-    assert_eq!(decision, slides::OrderDecision::None);
+        out.textures_delta.clear();
+        assert_eq!(decision, slides::OrderDecision::None);
+    }
+    let items = h3d_app::features::reconstruct::slice_items(&s, Some(&preview), 1.0);
+    assert_eq!(items.len(), 5);
+    assert!(items.iter().all(|i| i.preview));
+    let numbers: Vec<u32> = items.iter().map(|i| i.number).collect();
+    assert_eq!(numbers, [1, 2, 3, 4, 5]);
 
     // Terima semua → urutan proyek = urutan usulan, asal = usulan.
     let all = preview.suggestion.order.clone();
@@ -492,7 +627,7 @@ fn every_warning_has_a_translation_in_both_locales() {
                 w.i18n_key()
             );
             h3d_i18n::set_language(lang);
-            let text = h3d_app::modes::report::warning_message(w);
+            let text = h3d_app::features::report::warning_message(w);
             assert!(!text.is_empty() && text != w.i18n_key(), "{text}");
             assert!(!text.contains("{ $"), "argumen tidak terisi: {text}");
             for (_, value) in w.args() {

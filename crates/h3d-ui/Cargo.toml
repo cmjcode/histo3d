@@ -11,4 +11,5 @@ h3d-core = { workspace = true }
 h3d-i18n = { workspace = true }
 egui = { workspace = true }
 egui_icons = { workspace = true }
+glam = { workspace = true }
 log = { workspace = true }

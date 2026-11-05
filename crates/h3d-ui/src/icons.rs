@@ -174,8 +174,53 @@ pub const KIND_SURFACE: MaterialIcon = icons::ICON_HORIZONTAL_RULE;
 /// Jenis label: lainnya.
 pub const KIND_OTHER: MaterialIcon = icons::ICON_LABEL;
 
+// --- Cangkang ala DUCAD (bilah atas, rel alat, laci, kanvas) ---
+
+/// Menu utama (burger).
+pub const MENU: MaterialIcon = icons::ICON_MENU;
+/// Kembali (2D → tumpukan 3D).
+pub const BACK: MaterialIcon = icons::ICON_ARROW_BACK;
+/// Tampilan tumpukan 3D.
+pub const STACK_3D: MaterialIcon = icons::ICON_STACKS;
+/// Tampilan irisan 2D.
+pub const SLICE_2D: MaterialIcon = icons::ICON_CROP_SQUARE;
+/// Renggangkan tumpukan (sumbu Z, tampilan saja).
+pub const EXPAND_Z: MaterialIcon = icons::ICON_UNFOLD_MORE;
+/// Susun otomatis (urutan + orientasi + registrasi).
+pub const AUTO_STACK: MaterialIcon = icons::ICON_AUTO_FIX_HIGH;
+/// Alat pilih (klik irisan di 3D).
+pub const SELECT: MaterialIcon = icons::ICON_ADS_CLICK;
+/// Laci Sampel (nama, catatan, orientasi, pra-analitik).
+pub const SAMPLE: MaterialIcon = icons::ICON_DESCRIPTION;
+/// Data klinis.
+pub const CLINICAL: MaterialIcon = icons::ICON_MEDICAL_INFORMATION;
+/// Pas ke layar.
+pub const FIT_SCREEN: MaterialIcon = icons::ICON_FIT_SCREEN;
+/// Menu lanjutan (titik tiga).
+pub const MORE: MaterialIcon = icons::ICON_MORE_VERT;
+/// Buka bagian (panah bawah).
+pub const CHEVRON_DOWN: MaterialIcon = icons::ICON_EXPAND_MORE;
+/// Perbesar panel.
+pub const FULLSCREEN: MaterialIcon = icons::ICON_OPEN_IN_FULL;
+/// Kecilkan panel.
+pub const EXIT_FULLSCREEN: MaterialIcon = icons::ICON_CLOSE_FULLSCREEN;
+
 /// Semua ikon bernama (dipakai tes `named_icons_render`).
-pub const ALL: [MaterialIcon; 80] = [
+pub const ALL: [MaterialIcon; 94] = [
+    MENU,
+    BACK,
+    STACK_3D,
+    SLICE_2D,
+    EXPAND_Z,
+    AUTO_STACK,
+    SELECT,
+    SAMPLE,
+    CLINICAL,
+    FIT_SCREEN,
+    MORE,
+    CHEVRON_DOWN,
+    FULLSCREEN,
+    EXIT_FULLSCREEN,
     CLOSE,
     NEW,
     OPEN_FOLDER,

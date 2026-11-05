@@ -1,30 +1,118 @@
-//! Keadaan aplikasi: proyek terbuka (`SharedSession`), job latar, mode,
-//! dan keadaan tiap mode. Tidak bergantung pada jendela maupun GPU sehingga
-//! bisa dibangun dan digambar di tes headless.
+//! Keadaan aplikasi: proyek terbuka (`SharedSession`), job latar, tampilan
+//! aktif (tumpukan 3D atau irisan 2D), laci kanan, dan keadaan tiap fitur.
+//! Tidak bergantung pada jendela maupun GPU sehingga bisa dibangun dan
+//! digambar di tes headless.
 //!
 //! **Model thread** (lihat `h3d_engine::job`): thread job mengunci sesi
 //! selama job berjalan, jadi thread UI hanya memakai `try_lock()`; selama
-//! job berjalan layar menampilkan lapisan job (tahap, progres, Batal).
+//! job berjalan kanvas tetap menggambar adegan terakhir dan kartu progres
+//! tampil di bawah.
+//!
+//! **Susun otomatis** (alur impor → tumpukan 3D): setelah impor selesai,
+//! `suggest_order` dijalankan dan hasilnya tampil sebagai pratinjau tembus
+//! pandang di kanvas 3D. Urutan proyek baru berubah setelah pengguna menekan
+//! Terima (aturan keras 8); setelah itu `register_all` dijalankan otomatis.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use h3d_core::{AttrId, Budgets, Progress, SlideId};
 use h3d_engine::{
-    EngineError, ImportOptions, JobHandle, OrderSuggestion, Proposal, RegSummary, Session,
-    SharedSession,
+    EngineError, ImportOptions, JobHandle, OrderSuggestion, Proposal, RegOptions, RegSummary,
+    Session, SharedSession,
 };
 use h3d_i18n::t;
-use h3d_ui::AppMode;
 
+use crate::features::{reconstruct, register, report, segment, slides};
 use crate::gpu::Gpu;
-use crate::modes::{reconstruct, register, report, segment, slides};
 use crate::panels::browser::BrowserState;
 use crate::panels::mpp_prompt::MppPrompt;
 use crate::settings::Settings;
 use crate::tiles::TileStreamer;
 use crate::ui_util::{ThumbCache, Toasts};
 use crate::viewer::TouchTracker;
+
+/// Jumlah irisan `Ok` minimum agar usulan urutan berarti.
+pub const AUTO_STACK_MIN_SLIDES: usize = 3;
+
+/// Tampilan utama kanvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum View {
+    /// Tumpukan irisan (dan mesh tumor) di ruang 3D.
+    #[default]
+    Stack3D,
+    /// Satu irisan di 2D untuk menandai tumor atau menyejajarkan.
+    Slice2D,
+}
+
+/// Cara kerja di tampilan 2D.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum SliceMode {
+    /// Menandai label (kuas, laso, poligon, usulan).
+    #[default]
+    Annotate,
+    /// Menyejajarkan terhadap irisan tetangga (banding, landmark, geser/putar).
+    Align,
+}
+
+impl SliceMode {
+    /// Kunci terjemahan nama mode.
+    pub fn i18n_key(self) -> &'static str {
+        match self {
+            SliceMode::Annotate => "slice-mode-annotate",
+            SliceMode::Align => "slice-mode-align",
+        }
+    }
+}
+
+/// Laci kanan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Drawer {
+    /// Daftar irisan (urutan, status, QC) dan label.
+    Layers,
+    /// Sampel, klinis, orientasi anatomis, rincian irisan terpilih.
+    Sample,
+    /// Parameter rekonstruksi, visibilitas label, bidang potong, lapisan skalar.
+    Tumor3D,
+    /// Label, usulan klasik/AI/interpolasi, kalibrasi IHC.
+    Labels,
+    /// Daftar QC dan pengaturan banding.
+    Align,
+}
+
+impl Drawer {
+    /// Semua laci, urutan tombol di bilah atas.
+    pub const ALL: [Drawer; 5] = [
+        Drawer::Layers,
+        Drawer::Sample,
+        Drawer::Labels,
+        Drawer::Align,
+        Drawer::Tumor3D,
+    ];
+
+    /// Kunci terjemahan judul laci.
+    pub fn i18n_key(self) -> &'static str {
+        match self {
+            Drawer::Layers => "drawer-layers",
+            Drawer::Sample => "drawer-sample",
+            Drawer::Tumor3D => "drawer-tumor3d",
+            Drawer::Labels => "drawer-labels",
+            Drawer::Align => "drawer-align",
+        }
+    }
+
+    /// Ikon laci.
+    pub fn icon(self) -> h3d_ui::icons::MaterialIcon {
+        use h3d_ui::icons;
+        match self {
+            Drawer::Layers => icons::LAYERS,
+            Drawer::Sample => icons::SAMPLE,
+            Drawer::Tumor3D => icons::CUBE,
+            Drawer::Labels => icons::DRAW,
+            Drawer::Align => icons::COMPARE,
+        }
+    }
+}
 
 /// Hasil job latar.
 pub enum JobOutput {
@@ -82,8 +170,17 @@ pub struct AppState {
     pub settings_path: Option<PathBuf>,
     /// Anggaran memori/thread (dari `Budgets`, aturan 15).
     pub budgets: Budgets,
-    /// Mode aktif.
-    pub mode: AppMode,
+    /// Tampilan kanvas.
+    pub view: View,
+    /// Cara kerja di tampilan 2D.
+    pub slice_mode: SliceMode,
+    /// Laci kanan yang terbuka.
+    pub drawer: Option<Drawer>,
+    /// Lembar laporan di bawah kanvas terbuka.
+    pub report_open: bool,
+    /// Alur susun otomatis sedang berjalan: setelah usulan diterima,
+    /// registrasi dijalankan tanpa klik tambahan.
+    pub auto_stack_active: bool,
     /// Proyek terbuka.
     pub session: Option<SharedSession>,
     /// Nama proyek untuk bilah atas.
@@ -96,19 +193,19 @@ pub struct AppState {
     pub tiles: TileStreamer,
     /// Thumbnail irisan.
     pub thumbs: ThumbCache,
-    /// Irisan aktif (mode Registrasi dan Segmentasi).
+    /// Irisan terpilih (di tumpukan 3D, laci, dan tampilan 2D).
     pub current: Option<SlideId>,
     /// Pelacak Pencil/jari.
     pub touch: TouchTracker,
-    /// Keadaan mode Irisan.
+    /// Keadaan fitur Irisan (daftar, usulan urutan, sampel, klinis).
     pub slides: slides::SlidesState,
-    /// Keadaan mode Registrasi.
+    /// Keadaan fitur Penyejajaran.
     pub register: register::RegisterState,
-    /// Keadaan mode Segmentasi.
+    /// Keadaan fitur Penandaan.
     pub segment: segment::SegmentState,
-    /// Keadaan mode Rekonstruksi.
+    /// Keadaan kanvas 3D dan rekonstruksi.
     pub recon: reconstruct::ReconState,
-    /// Keadaan mode Laporan.
+    /// Keadaan laporan.
     pub report: report::ReportState,
     /// Dialog Tentang terbuka.
     pub show_about: bool,
@@ -147,7 +244,11 @@ impl AppState {
             settings,
             settings_path: None,
             budgets,
-            mode: AppMode::Slides,
+            view: View::Stack3D,
+            slice_mode: SliceMode::Annotate,
+            drawer: None,
+            report_open: false,
+            auto_stack_active: false,
             session: None,
             project_name: String::new(),
             job: None,
@@ -201,6 +302,10 @@ impl AppState {
         self.segment = Default::default();
         self.recon = Default::default();
         self.report = Default::default();
+        self.view = View::Stack3D;
+        self.drawer = None;
+        self.report_open = false;
+        self.auto_stack_active = false;
         self.mpp_prompt = None;
         self.pending_import = None;
         self.palette_key = 0;
@@ -221,7 +326,6 @@ impl AppState {
                 match Session::create(path) {
                     Ok(s) => {
                         self.install_session(s);
-                        self.mode = AppMode::Slides;
                         let paths = listing.slides.into_iter().map(|e| e.path).collect();
                         self.start_import(
                             ImportRequest {
@@ -287,7 +391,6 @@ impl AppState {
         match Session::create(path) {
             Ok(s) => {
                 self.install_session(s);
-                self.mode = AppMode::Slides;
                 true
             }
             Err(e) => {
@@ -419,6 +522,25 @@ impl AppState {
         });
     }
 
+    /// Mulai "Susun otomatis": usulan urutan dan orientasi dari gambar
+    /// resolusi rendah. Hasilnya menunggu Terima di kartu usulan; bila
+    /// `then_register`, registrasi menyusul otomatis setelah diterima.
+    pub fn start_auto_stack(&mut self, then_register: bool) {
+        if self.start_job(t!("stack-auto"), |s, p| {
+            s.suggest_order(p).map(JobOutput::OrderSuggested)
+        }) {
+            self.auto_stack_active = then_register;
+        }
+    }
+
+    /// Mulai "Sejajarkan semua" (registrasi seluruh tumpukan, bisa dilanjutkan).
+    pub fn start_register_all(&mut self) {
+        self.start_job(t!("register-all"), |s, p| {
+            s.register_all(&RegOptions::default(), p)
+                .map(JobOutput::Registered)
+        });
+    }
+
     /// Periksa job; bila selesai, terapkan hasilnya ke keadaan UI.
     /// Mengembalikan `true` selama job masih berjalan.
     pub fn poll_job(&mut self) -> bool {
@@ -442,6 +564,7 @@ impl AppState {
             }
             Err(e) => {
                 self.pending_import = None;
+                self.auto_stack_active = false;
                 self.toasts.engine_error(&e);
             }
         }
@@ -457,6 +580,14 @@ impl AppState {
         }
     }
 
+    /// Jumlah irisan berstatus `Ok` di proyek (0 bila sesi terkunci).
+    fn usable_slide_count(&self) -> usize {
+        self.session
+            .as_ref()
+            .and_then(|s| try_lock_session(s).map(|s| s.project().usable_slides_ordered().len()))
+            .unwrap_or(0)
+    }
+
     fn apply_job_output(&mut self, out: JobOutput) {
         match out {
             JobOutput::Imported { ids, skipped } => {
@@ -467,20 +598,49 @@ impl AppState {
                     self.toasts.engine_error(err);
                 }
                 if let Some(first) = ids.first() {
-                    self.slides.selected = Some(*first);
                     self.current.get_or_insert(*first);
+                }
+                self.view = View::Stack3D;
+                self.recon.fitted = false;
+                // Susun otomatis: usulan urutan (≥ 3 irisan) lalu registrasi.
+                if self.settings.auto_stack && !ids.is_empty() {
+                    let n = self.usable_slide_count();
+                    if n >= AUTO_STACK_MIN_SLIDES {
+                        self.start_auto_stack(true);
+                    } else if n >= 2 {
+                        self.start_register_all();
+                    }
                 }
             }
             JobOutput::OrderSuggested(s) => {
-                self.slides.order_preview = Some(slides::OrderPreview::new(s));
+                let preview = slides::OrderPreview::new(s);
+                let unchanged = self
+                    .session
+                    .as_ref()
+                    .and_then(|sh| {
+                        try_lock_session(sh)
+                            .map(|s| preview.changes(&AppState::ordered_ids(&s)).is_empty())
+                    })
+                    .unwrap_or(false);
+                if unchanged {
+                    self.toasts.info(t!("stack-proposal-no-change"));
+                    if self.auto_stack_active {
+                        self.auto_stack_active = false;
+                        self.start_register_all();
+                    }
+                } else {
+                    self.slides.order_preview = Some(preview);
+                }
             }
             JobOutput::Registered(summary) => {
+                self.auto_stack_active = false;
                 self.toasts.info(t!(
                     "register-done",
                     registered = summary.registered.len().to_string(),
                     skipped = summary.skipped.len().to_string(),
                     flagged = summary.flagged.len().to_string()
                 ));
+                self.recon.fitted = false;
             }
             JobOutput::Reconstructed(n) => {
                 self.toasts.info(t!("recon-done", n = n.to_string()));
@@ -502,6 +662,39 @@ impl AppState {
                     .info(t!("export-done", n = paths.len().to_string(), dir = dir));
             }
             JobOutput::Nuclei(n) => self.segment.nuclei = Some(*n),
+        }
+    }
+
+    /// Keputusan pengguna atas pratinjau usulan urutan: satu-satunya jalur
+    /// usulan → urutan proyek (aturan keras 8). Setelah Terima dalam alur
+    /// susun otomatis, registrasi dijalankan.
+    pub fn decide_order(&mut self, sess: &mut Session, decision: slides::OrderDecision) {
+        match decision {
+            slides::OrderDecision::None => {}
+            slides::OrderDecision::Reject => {
+                self.slides.order_preview = None;
+                self.auto_stack_active = false;
+            }
+            slides::OrderDecision::Accept(ids) => {
+                let Some(preview) = self.slides.order_preview.take() else {
+                    return;
+                };
+                match sess.apply_order_suggestion(&preview.suggestion, &ids) {
+                    Ok(()) => {
+                        if !sess.project().z_is_monotonic() {
+                            self.toasts.error(t!("slides-z-not-monotonic"));
+                        }
+                        self.toasts.info(t!("slides-order-applied"));
+                    }
+                    Err(e) => self.toasts.engine_error(&e),
+                }
+                self.invalidate_derived();
+                self.recon.fitted = false;
+                if self.auto_stack_active {
+                    self.auto_stack_active = false;
+                    self.start_register_all();
+                }
+            }
         }
     }
 
@@ -540,13 +733,36 @@ impl AppState {
         self.toasts.info(t!("memory-trimmed"));
     }
 
-    /// Pindah mode; turunan yang dibutuhkan mode tujuan disegarkan.
-    pub fn set_mode(&mut self, mode: AppMode) {
-        self.mode = mode;
-        match mode {
-            AppMode::Reconstruct => self.recon.needs_reload = true,
-            AppMode::Report => self.report.needs_refresh = true,
-            AppMode::Register => self.register.qc_dirty = true,
+    /// Pindah tampilan; turunan yang dibutuhkan tampilan tujuan disegarkan.
+    pub fn set_view(&mut self, view: View) {
+        if self.view != view {
+            self.segment.cancel_drawing();
+            self.register.reset_edit();
+        }
+        self.view = view;
+        match view {
+            View::Stack3D => self.recon.needs_reload = true,
+            View::Slice2D => self.register.qc_dirty = true,
+        }
+    }
+
+    /// Buka irisan `id` di tampilan 2D (klik ganda di tumpukan, laci, atau
+    /// tombol "Buka 2D").
+    pub fn open_slice_2d(&mut self, id: SlideId) {
+        self.current = Some(id);
+        self.set_view(View::Slice2D);
+    }
+
+    /// Buka/tutup laci; membuka laci lain menutup yang sedang terbuka.
+    pub fn toggle_drawer(&mut self, drawer: Drawer) {
+        self.drawer = if self.drawer == Some(drawer) {
+            None
+        } else {
+            Some(drawer)
+        };
+        match drawer {
+            Drawer::Align => self.register.qc_dirty = true,
+            Drawer::Tumor3D => self.recon.needs_reload = true,
             _ => {}
         }
     }
@@ -565,5 +781,45 @@ impl AppState {
                 .effective_reference()
                 .or_else(|| session.slides().first().map(|s| s.id));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drawer_and_mode_keys_exist() {
+        for lang in h3d_i18n::Language::all() {
+            for d in Drawer::ALL {
+                assert!(h3d_i18n::has_key(*lang, d.i18n_key()), "{d:?}");
+            }
+            for m in [SliceMode::Annotate, SliceMode::Align] {
+                assert!(h3d_i18n::has_key(*lang, m.i18n_key()), "{m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn toggle_drawer_opens_closes_and_switches() {
+        let mut app = AppState::new(Settings::default(), Budgets::IPAD);
+        assert_eq!(app.drawer, None);
+        app.toggle_drawer(Drawer::Layers);
+        assert_eq!(app.drawer, Some(Drawer::Layers));
+        app.toggle_drawer(Drawer::Sample);
+        assert_eq!(app.drawer, Some(Drawer::Sample));
+        app.toggle_drawer(Drawer::Sample);
+        assert_eq!(app.drawer, None);
+    }
+
+    #[test]
+    fn open_slice_switches_to_2d_and_back_keeps_selection() {
+        let mut app = AppState::new(Settings::default(), Budgets::IPAD);
+        app.open_slice_2d(SlideId(3));
+        assert_eq!(app.view, View::Slice2D);
+        assert_eq!(app.current, Some(SlideId(3)));
+        app.set_view(View::Stack3D);
+        assert_eq!(app.current, Some(SlideId(3)));
+        assert!(app.recon.needs_reload);
     }
 }

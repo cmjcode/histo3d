@@ -95,17 +95,20 @@ impl H3dApp {
         if let Some(path) = &args.project {
             state.open_project(path);
         }
-        if let Some(mode) = args.mode {
-            state.set_mode(mode);
-        }
         if let (Some(n), Some(shared)) = (args.slide, state.session.clone()) {
             if let Some(s) = crate::state::try_lock_session(&shared) {
                 if let Some(e) = s.slides().get(n - 1) {
                     state.current = Some(e.id);
-                    state.slides.selected = Some(e.id);
                 }
             }
         }
+        if let Some(view) = args.view {
+            state.set_view(view);
+        }
+        if let Some(drawer) = args.drawer {
+            state.toggle_drawer(drawer);
+        }
+        state.report_open = args.report;
         if args.analyze {
             state.recon.want_first_scalar = true;
             state.start_job(h3d_i18n::t!("recon-analyze"), |s, p| {

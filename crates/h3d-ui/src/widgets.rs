@@ -1,5 +1,6 @@
-//! Widget generik HISTO3D: tombol ikon, slider berlabel, bilah mode,
-//! pemberitahuan riset, spanduk peringatan, legenda colormap, swatch warna.
+//! Widget generik HISTO3D: tombol ikon, tombol alat persegi (rel alat ala
+//! DUCAD), kepala laci, slider berlabel, pemberitahuan riset, spanduk
+//! peringatan, legenda colormap, swatch warna.
 //!
 //! Semua teks lewat `h3d_i18n::t!`; semua ikon lewat [`crate::icons`].
 
@@ -10,53 +11,120 @@ use h3d_i18n::t;
 use crate::icons::{self, MaterialIcon};
 use crate::theme;
 
-/// Mode aplikasi (histo3d.md 8.11).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum AppMode {
-    /// Impor, urutan, mpp, metadata.
-    #[default]
-    Slides,
-    /// Registrasi antar irisan.
-    Register,
-    /// Pelabelan.
-    Segment,
-    /// Viewport 3D.
-    Reconstruct,
-    /// Pengukuran dan ekspor.
-    Report,
+/// Warna teks tebal yang terbaca di kedua tema. `RichText::strong` memakai
+/// `widgets.active.fg_stroke` yang oleh tema HISTO3D dibuat putih (teks
+/// tombol aktif) sehingga tak terlihat di tema terang; pakai ini sebagai ganti.
+pub fn strong_color(ui: &Ui) -> Color32 {
+    ui.visuals().widgets.inactive.fg_stroke.color
 }
 
-impl AppMode {
-    /// Semua mode, urutan alur kerja.
-    pub const ALL: [AppMode; 5] = [
-        AppMode::Slides,
-        AppMode::Register,
-        AppMode::Segment,
-        AppMode::Reconstruct,
-        AppMode::Report,
-    ];
-
-    /// Kunci terjemahan nama mode (`mode-*`).
-    pub fn i18n_key(self) -> &'static str {
-        match self {
-            AppMode::Slides => "mode-slides",
-            AppMode::Register => "mode-register",
-            AppMode::Segment => "mode-segment",
-            AppMode::Reconstruct => "mode-reconstruct",
-            AppMode::Report => "mode-report",
-        }
+/// Tombol alat persegi berikon (rel alat kiri, bilah atas): latar aksen bila
+/// `selected`, sorot saat hover, tooltip berjudul `title` dengan keterangan
+/// opsional `subtitle`. Sisi tombol = [`theme::TOOL_BUTTON_SIDE`].
+pub fn tool_button(
+    ui: &mut Ui,
+    icon: MaterialIcon,
+    selected: bool,
+    title: &str,
+    subtitle: Option<&str>,
+) -> Response {
+    let side = theme::TOOL_BUTTON_SIDE.max(ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(side), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let v = ui.visuals();
+        let (fill, stroke, fg) = if !ui.is_enabled() {
+            (
+                Color32::TRANSPARENT,
+                Stroke::NONE,
+                v.weak_text_color().gamma_multiply(0.6),
+            )
+        } else if selected {
+            (
+                theme::ACCENT,
+                Stroke::new(1.0, theme::ACCENT_LIGHT),
+                Color32::WHITE,
+            )
+        } else if response.hovered() {
+            (
+                v.widgets.hovered.bg_fill,
+                Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.7)),
+                v.widgets.hovered.fg_stroke.color,
+            )
+        } else {
+            (
+                Color32::TRANSPARENT,
+                Stroke::NONE,
+                v.widgets.inactive.fg_stroke.color,
+            )
+        };
+        ui.painter()
+            .rect(rect, 6.0, fill, stroke, egui::StrokeKind::Inside);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            icon.codepoint,
+            egui::FontId::new(theme::ICON_SIZE_DEFAULT, icon.font_family()),
+            fg,
+        );
     }
-
-    /// Ikon mode.
-    pub fn icon(self) -> MaterialIcon {
-        match self {
-            AppMode::Slides => icons::GRID,
-            AppMode::Register => icons::COMPARE,
-            AppMode::Segment => icons::DRAW,
-            AppMode::Reconstruct => icons::CUBE,
-            AppMode::Report => icons::REPORT,
-        }
+    if subtitle.is_some() || !title.is_empty() {
+        let title = title.to_owned();
+        let subtitle = subtitle.map(str::to_owned);
+        response.on_hover_ui(|ui| {
+            ui.set_max_width(260.0);
+            ui.label(RichText::new(title).color(strong_color(ui)));
+            if let Some(s) = subtitle {
+                ui.small(s);
+            }
+        })
+    } else {
+        response
     }
+}
+
+/// Kepala laci: ikon + judul tebal dan tombol tutup di kanan.
+/// Mengembalikan `true` bila tombol tutup diklik.
+pub fn drawer_header(ui: &mut Ui, icon: MaterialIcon, title: &str) -> bool {
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.label(
+            icon.rich_text()
+                .size(theme::ICON_SIZE_DEFAULT)
+                .color(theme::ACCENT),
+        );
+        ui.label(RichText::new(title).color(strong_color(ui)).size(14.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            close = icon_button(ui, icons::CLOSE, &t!("action-close")).clicked();
+        });
+    });
+    ui.add_space(2.0);
+    close
+}
+
+/// Judul bagian kecil di dalam laci (huruf kapital kecil berwarna redup).
+pub fn section_title(ui: &mut Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .size(10.5)
+            .color(ui.visuals().weak_text_color()),
+    );
+}
+
+/// Lencana angka bulat kecil (jumlah irisan, usulan menunggu).
+pub fn count_badge(ui: &mut Ui, n: usize, color: Color32) -> Response {
+    let text = n.to_string();
+    let font = egui::FontId::proportional(10.5);
+    let galley = ui.painter().layout_no_wrap(text, font, Color32::WHITE);
+    let h = 16.0;
+    let w = (galley.size().x + 10.0).max(h);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect_filled(rect, h / 2.0, color);
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    }
+    resp
 }
 
 /// Tombol ikon tanpa bingkai dengan tooltip.
@@ -150,22 +218,6 @@ pub fn icon_text_colored(icon: MaterialIcon, text: &str, color: Color32) -> egui
         },
     );
     egui::WidgetText::LayoutJob(std::sync::Arc::new(job))
-}
-
-/// Bilah pemilih mode (ikon + nama); `true` bila mode berubah.
-pub fn mode_bar(ui: &mut Ui, mode: &mut AppMode) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        for m in AppMode::ALL {
-            let selected = *mode == m;
-            let label = icon_text(m.icon(), &t!(m.i18n_key()));
-            if ui.selectable_label(selected, label).clicked() && !selected {
-                *mode = m;
-                changed = true;
-            }
-        }
-    });
-    changed
 }
 
 /// Pemberitahuan "Hanya untuk riset, bukan untuk diagnosis" (aturan keras 16).
@@ -265,12 +317,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn app_mode_keys_exist_in_both_languages() {
-        for m in AppMode::ALL {
-            for lang in h3d_i18n::Language::all() {
-                assert!(h3d_i18n::has_key(*lang, m.i18n_key()), "{:?}", m);
-            }
-        }
+    fn tool_button_and_header_render_in_both_states() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, theme::ThemeMode::Dark);
+        let mut out = ctx.run_ui(Default::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let a = tool_button(ui, icons::BRUSH, true, "Kuas", Some("B"));
+                let b = tool_button(ui, icons::ERASER, false, "Penghapus", None);
+                assert!(!a.clicked() && !b.clicked());
+                assert_eq!(a.rect.size(), b.rect.size());
+                assert!(!drawer_header(ui, icons::LAYERS, "Lapisan"));
+                section_title(ui, "irisan");
+                count_badge(ui, 12, theme::WARNING);
+            });
+        });
+        out.textures_delta.clear();
     }
 
     #[test]

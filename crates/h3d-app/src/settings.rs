@@ -24,6 +24,9 @@ pub struct Settings {
     pub language: String,
     /// Tema gelap.
     pub dark: bool,
+    /// Susun otomatis setelah impor: usulkan urutan dan orientasi, tampilkan
+    /// pratinjau di 3D, lalu sejajarkan setelah pengguna menerima.
+    pub auto_stack: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +36,7 @@ impl Default for Settings {
             finger_draw: false,
             language: "id".to_string(),
             dark: true,
+            auto_stack: true,
         }
     }
 }
@@ -128,5 +132,9 @@ mod tests {
         let partial = Settings::load(&path);
         assert_eq!(partial.user_initials, "AB");
         assert!(partial.dark);
+        assert!(
+            partial.auto_stack,
+            "berkas lama tanpa field → susun otomatis menyala"
+        );
     }
 }

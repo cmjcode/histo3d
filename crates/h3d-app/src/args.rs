@@ -2,19 +2,24 @@
 
 use std::path::PathBuf;
 
-use h3d_ui::AppMode;
+use crate::state::{Drawer, View};
 
 /// Teks bantuan.
-pub const USAGE: &str = "Pemakaian: histo3d [--project <folder.h3d>] [--mode slides|register|segment|reconstruct|report] \
-[--slide <nomor urut>] [--analyze] [--screenshot <berkas.png>] [--lang id|en] [--theme dark|light]";
+pub const USAGE: &str = "Pemakaian: histo3d [--project <folder.h3d>] [--view 3d|2d] \
+[--drawer layers|sample|labels|align|tumor3d] [--report] [--slide <nomor urut>] [--analyze] \
+[--screenshot <berkas.png>] [--lang id|en] [--theme dark|light]";
 
 /// Argumen yang sudah diurai.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CliArgs {
     /// Proyek yang dibuka saat mulai.
     pub project: Option<PathBuf>,
-    /// Mode awal.
-    pub mode: Option<AppMode>,
+    /// Tampilan awal (tumpukan 3D atau irisan 2D).
+    pub view: Option<View>,
+    /// Laci yang dibuka saat mulai.
+    pub drawer: Option<Drawer>,
+    /// Buka lembar laporan saat mulai.
+    pub report: bool,
     /// Simpan tangkapan layar ke berkas ini lalu keluar.
     pub screenshot: Option<PathBuf>,
     /// Bahasa awal (`id`/`en`).
@@ -29,14 +34,23 @@ pub struct CliArgs {
     pub help: bool,
 }
 
-/// Nama mode di baris perintah → `AppMode`.
-pub fn parse_mode(name: &str) -> Option<AppMode> {
+/// Nama tampilan di baris perintah → `View`.
+pub fn parse_view(name: &str) -> Option<View> {
     match name.to_ascii_lowercase().as_str() {
-        "slides" | "irisan" => Some(AppMode::Slides),
-        "register" | "registrasi" => Some(AppMode::Register),
-        "segment" | "segmentasi" => Some(AppMode::Segment),
-        "reconstruct" | "rekonstruksi" => Some(AppMode::Reconstruct),
-        "report" | "laporan" => Some(AppMode::Report),
+        "3d" | "stack" | "tumpukan" => Some(View::Stack3D),
+        "2d" | "slice" | "irisan" => Some(View::Slice2D),
+        _ => None,
+    }
+}
+
+/// Nama laci di baris perintah → `Drawer`.
+pub fn parse_drawer(name: &str) -> Option<Drawer> {
+    match name.to_ascii_lowercase().as_str() {
+        "layers" | "lapisan" => Some(Drawer::Layers),
+        "sample" | "sampel" => Some(Drawer::Sample),
+        "labels" | "label" => Some(Drawer::Labels),
+        "align" | "sejajar" => Some(Drawer::Align),
+        "tumor3d" | "tumor" => Some(Drawer::Tumor3D),
         _ => None,
     }
 }
@@ -54,6 +68,7 @@ impl CliArgs {
             match a.as_str() {
                 "-h" | "--help" => out.help = true,
                 "--analyze" => out.analyze = true,
+                "--report" => out.report = true,
                 "--slide" => {
                     let v = value("--slide")?;
                     let n: usize = v
@@ -65,10 +80,15 @@ impl CliArgs {
                 }
                 "--project" => out.project = Some(PathBuf::from(value("--project")?)),
                 "--screenshot" => out.screenshot = Some(PathBuf::from(value("--screenshot")?)),
-                "--mode" => {
-                    let v = value("--mode")?;
-                    out.mode =
-                        Some(parse_mode(&v).ok_or_else(|| format!("mode tidak dikenal: {v}"))?);
+                "--view" => {
+                    let v = value("--view")?;
+                    out.view =
+                        Some(parse_view(&v).ok_or_else(|| format!("tampilan tidak dikenal: {v}"))?);
+                }
+                "--drawer" => {
+                    let v = value("--drawer")?;
+                    out.drawer =
+                        Some(parse_drawer(&v).ok_or_else(|| format!("laci tidak dikenal: {v}"))?);
                 }
                 "--lang" => {
                     let v = value("--lang")?;
@@ -106,8 +126,11 @@ mod tests {
         let a = parse(&[
             "--project",
             "/tmp/x.h3d",
-            "--mode",
-            "segment",
+            "--view",
+            "2d",
+            "--drawer",
+            "labels",
+            "--report",
             "--screenshot",
             "a.png",
             "--lang",
@@ -120,18 +143,27 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(a.project, Some(PathBuf::from("/tmp/x.h3d")));
-        assert_eq!(a.mode, Some(AppMode::Segment));
+        assert_eq!(a.view, Some(View::Slice2D));
+        assert_eq!(a.drawer, Some(Drawer::Labels));
+        assert!(a.report);
         assert_eq!(a.screenshot, Some(PathBuf::from("a.png")));
         assert_eq!(a.lang, Some(h3d_i18n::Language::En));
         assert_eq!(a.theme, Some(h3d_ui::ThemeMode::Light));
         assert_eq!(a.slide, Some(3));
         assert!(a.analyze);
+        assert_eq!(parse_view("tumpukan"), Some(View::Stack3D));
+        assert_eq!(parse_drawer("tumor"), Some(Drawer::Tumor3D));
     }
 
     #[test]
     fn bad_input_is_error_not_panic() {
-        assert!(parse(&["--mode"]).is_err());
-        assert!(parse(&["--mode", "xyz"]).is_err());
+        assert!(parse(&["--view"]).is_err());
+        assert!(parse(&["--view", "xyz"]).is_err());
+        assert!(parse(&["--drawer", "xyz"]).is_err());
+        assert!(
+            parse(&["--mode", "slides"]).is_err(),
+            "flag lama tidak dikenal"
+        );
         assert!(parse(&["--wat"]).is_err());
         assert!(parse(&["--slide", "0"]).is_err());
         assert!(parse(&["--slide", "x"]).is_err());

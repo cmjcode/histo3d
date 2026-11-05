@@ -3,12 +3,14 @@
 //! supaya bisa diuji tanpa jendela; `main.rs` hanya mengurai argumen.
 //!
 //! Tata letak modul:
-//! - [`state`]: keadaan aplikasi, sesi bersama, job latar.
-//! - [`shell`]: satu frame UI (bilah atas, lapisan job, dialog).
+//! - [`state`]: keadaan aplikasi, sesi bersama, job latar, tampilan dan laci.
+//! - [`shell`]: satu layar ala DUCAD — kanvas penuh (tumpukan 3D atau irisan
+//!   2D) dengan bilah atas, rel alat kiri, laci kanan, bilah konteks, kartu
+//!   usulan, kartu progres, dan dialog yang mengambang di atasnya.
 //! - [`app`]: integrasi eframe (renderer wgpu, simpan otomatis, tangkapan layar).
 //! - [`platform`], [`apple`], `apple_ios`: lapisan platform.
 //! - [`tiles`], [`viewer`], [`gpu`]: aliran tile dan viewer 2D.
-//! - [`modes`]: satu modul per mode; [`panels`]: panel dan dialog bersama.
+//! - [`features`]: potongan UI per fitur; [`panels`]: panel dan dialog bersama.
 //! - [`geom`]: logika murni (konversi koordinat, landmark, usulan urutan).
 
 pub mod app;
@@ -17,9 +19,9 @@ pub mod apple;
 #[cfg(target_os = "ios")]
 pub mod apple_ios;
 pub mod args;
+pub mod features;
 pub mod geom;
 pub mod gpu;
-pub mod modes;
 pub mod panels;
 pub mod platform;
 pub mod settings;
