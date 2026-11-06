@@ -12,13 +12,13 @@ use std::process::ExitCode;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use h3d_core::{
-    AttrDef, AttrKind, ClinicalMeta, IhcScoring, LabelKind, NoProgress, SlideId, Stain,
-    StainPattern,
+    AttrDef, AttrKind, ClinicalMeta, IhcScoring, LabelKind, NoProgress, SlideId, SlideStatus,
+    Stain, StainPattern,
 };
 use h3d_engine::phantom::{write_phantom, PhantomOptions, PhantomShapeKind};
 use h3d_engine::{
-    clock_from_env, to_stable_json_of, AttrParams, ExportKind, ImportOptions, PaintMode, RegMetric,
-    RegModel, RegOptions, RegisterRun, Session,
+    clock_from_env, to_stable_json_of, AttrParams, ClassicParams, ExportKind, ImportOptions,
+    PaintMode, RegMetric, RegModel, RegOptions, RegisterRun, Session, StainChannel,
 };
 use serde_json::json;
 
@@ -139,6 +139,51 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         slides: Vec<u32>,
     },
+    /// Segmentasi klasik (ambang kanal pewarna + morfologi) pada irisan,
+    /// lalu terima hasilnya hanya pada piksel yang masih kosong. Label
+    /// dibuat (jenis `other`) bila belum ada.
+    Classic {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Nama label tujuan.
+        #[arg(long)]
+        label: String,
+        /// Id irisan dipisah koma (bawaan: semua irisan Ok).
+        #[arg(long, value_delimiter = ',')]
+        slides: Vec<u32>,
+        /// Kanal pewarna yang diambangkan.
+        #[arg(long, value_enum, default_value_t = ChannelArg::Hematoxylin)]
+        channel: ChannelArg,
+        /// Ambang 0..1 pada kanal yang diregangkan; tanpa nilai = Otsu.
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Ambil piksel di bawah ambang.
+        #[arg(long)]
+        invert: bool,
+        /// Radius pembukaan morfologi, µm.
+        #[arg(long = "open-um", default_value_t = 4.0)]
+        open_um: f64,
+        /// Radius penutupan morfologi, µm.
+        #[arg(long = "close-um", default_value_t = 8.0)]
+        close_um: f64,
+        /// Luas komponen minimum, µm².
+        #[arg(long = "min-area-um2", default_value_t = 500.0)]
+        min_area_um2: f64,
+        /// Isi lubang (lumen kelenjar ikut masuk).
+        #[arg(long = "fill-holes")]
+        fill_holes: bool,
+    },
+    /// Ubah status irisan (ok, excluded, damaged).
+    Status {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Id irisan.
+        #[arg(long)]
+        slide: u32,
+        /// Status baru.
+        #[arg(long, value_enum)]
+        status: StatusArg,
+    },
     /// Interpolasi bentuk label di antara irisan beranotasi.
     Interpolate {
         /// Folder proyek.
@@ -164,6 +209,20 @@ enum Command {
         /// tiap objek menjadi mesh terpisah `<Label>#<id>`.
         #[arg(long = "per-object")]
         per_object: bool,
+        /// Pisahkan objek yang menempel dalam satu irisan (watershed atas
+        /// jarak ke tepi) sebelum penautan; menyiratkan `--per-object`.
+        #[arg(long)]
+        split: bool,
+        /// Jarak minimum antar pusat objek saat memisahkan, µm.
+        #[arg(long = "split-distance")]
+        split_distance: Option<f64>,
+        /// Kedalaman lembah minimum saat memisahkan, µm.
+        #[arg(long = "split-h")]
+        split_h: Option<f64>,
+        /// Irisan hilang berurutan maksimum yang masih dijembatani saat
+        /// menautkan objek.
+        #[arg(long = "max-skip")]
+        max_skip: Option<u32>,
     },
     /// Tabel pengukuran per label.
     Measure {
@@ -256,6 +315,18 @@ enum Command {
 
 #[derive(Subcommand)]
 enum LabelsCommand {
+    /// Kosongkan piksel sebuah label pada irisan (definisi label tetap);
+    /// dipakai sebelum mengulang segmentasi dengan parameter lain.
+    Clear {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Nama label.
+        #[arg(long)]
+        label: String,
+        /// Id irisan dipisah koma (bawaan: semua irisan yang memuat label).
+        #[arg(long, value_delimiter = ',')]
+        slides: Vec<u32>,
+    },
     /// Impor anotasi GeoJSON (QuPath) ke satu irisan.
     Import {
         /// Folder proyek.
@@ -411,6 +482,40 @@ struct PhantomArgs {
     /// Izinkan cermin acak per irisan.
     #[arg(long)]
     mirror: bool,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ChannelArg {
+    Hematoxylin,
+    Eosin,
+    Dab,
+}
+
+impl From<ChannelArg> for StainChannel {
+    fn from(c: ChannelArg) -> Self {
+        match c {
+            ChannelArg::Hematoxylin => StainChannel::Hematoxylin,
+            ChannelArg::Eosin => StainChannel::Eosin,
+            ChannelArg::Dab => StainChannel::Dab,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StatusArg {
+    Ok,
+    Excluded,
+    Damaged,
+}
+
+impl From<StatusArg> for SlideStatus {
+    fn from(s: StatusArg) -> Self {
+        match s {
+            StatusArg::Ok => SlideStatus::Ok,
+            StatusArg::Excluded => SlideStatus::Excluded,
+            StatusArg::Damaged => SlideStatus::Damaged,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -862,6 +967,39 @@ fn run(cli: Cli) -> Result<Outcome> {
         }
         Command::Labels {
             command:
+                LabelsCommand::Clear {
+                    project,
+                    label,
+                    slides,
+                },
+        } => {
+            let mut s = open(&project)?;
+            let id = s.label_by_name(&label)?;
+            let ids: Vec<SlideId> = if slides.is_empty() {
+                s.slides_with_label(id)
+            } else {
+                slides.into_iter().map(SlideId).collect()
+            };
+            let mut n = 0usize;
+            for &slide in &ids {
+                let size = s.slide(slide)?.size_um();
+                // Poligon seluas irisan dengan mode hapus: hanya
+                // piksel bernilai `label` yang menjadi latar.
+                let rect = [
+                    [0.0, 0.0],
+                    [size[0], 0.0],
+                    [size[0], size[1]],
+                    [0.0, size[1]],
+                ];
+                if s.fill_polygon(slide, id, &rect, PaintMode::Erase)? {
+                    n += 1;
+                }
+            }
+            s.save()?;
+            println!("Label \"{label}\" dikosongkan pada {n} irisan");
+        }
+        Command::Labels {
+            command:
                 LabelsCommand::Diff {
                     project,
                     slide,
@@ -915,6 +1053,67 @@ fn run(cli: Cli) -> Result<Outcome> {
                 ids.len()
             );
         }
+        Command::Classic {
+            project,
+            label,
+            slides,
+            channel,
+            threshold,
+            invert,
+            open_um,
+            close_um,
+            min_area_um2,
+            fill_holes,
+        } => {
+            let mut s = open(&project)?;
+            let id = match s.label_by_name(&label) {
+                Ok(id) => id,
+                Err(_) => s.add_label(&label, [40, 180, 200, 255], LabelKind::Other)?,
+            };
+            let ids: Vec<SlideId> = if slides.is_empty() {
+                s.project()
+                    .usable_slides_ordered()
+                    .iter()
+                    .map(|e| e.id)
+                    .collect()
+            } else {
+                slides.into_iter().map(SlideId).collect()
+            };
+            let params = ClassicParams {
+                channel: channel.into(),
+                threshold,
+                invert,
+                open_radius_um: open_um,
+                close_radius_um: close_um,
+                min_area_um2,
+                fill_holes,
+            };
+            let mut n = 0usize;
+            for &slide in &ids {
+                let proposal = s.segment_classic(slide, id, &params)?;
+                // Menjalankan perintah ini adalah persetujuan eksplisit
+                // pengguna; label yang sudah ada tetap tidak ditimpa.
+                if s.accept_proposal(slide, &proposal, PaintMode::OnlyBackground)? {
+                    n += 1;
+                }
+                eprintln!("  irisan {slide}: selesai");
+            }
+            s.save()?;
+            println!(
+                "Segmentasi klasik \"{label}\": {} irisan diproses, {n} diterima (hanya pada piksel kosong)",
+                ids.len()
+            );
+        }
+        Command::Status {
+            project,
+            slide,
+            status,
+        } => {
+            let mut s = open(&project)?;
+            s.set_status(SlideId(slide), status.into())?;
+            s.save()?;
+            println!("Status irisan {slide} diubah");
+        }
         Command::Interpolate { project, label } => {
             let mut s = open(&project)?;
             let id = s.label_by_name(&label)?;
@@ -937,9 +1136,26 @@ fn run(cli: Cli) -> Result<Outcome> {
             smooth,
             decimate,
             per_object,
+            split,
+            split_distance,
+            split_h,
+            max_skip,
         } => {
             let mut s = open(&project)?;
             let mut cfg = s.project().recon.clone();
+            if split {
+                cfg.per_object = true;
+                cfg.track_split.enabled = true;
+            }
+            if let Some(v) = split_distance {
+                cfg.track_split.min_seed_distance_um = v;
+            }
+            if let Some(v) = split_h {
+                cfg.track_split.h_um = v;
+            }
+            if let Some(v) = max_skip {
+                cfg.track_max_skip = v;
+            }
             if let Some(v) = sxy {
                 cfg.s_xy_um = v;
             }
@@ -1000,16 +1216,23 @@ fn run(cli: Cli) -> Result<Outcome> {
                     );
                 }
                 if !report.objects.is_empty() {
-                    println!("Objek               Mesh mm³    Luas mm²   Diameter mm  Irisan");
+                    println!(
+                        "Objek               Mesh mm³    Luas mm²   Diameter mm  Irisan  Dijembatani"
+                    );
                     for ob in &report.objects {
                         println!(
-                            "{:<18} {:>11.4} {:>11.4} {:>13.3} {:>7}",
+                            "{:<18} {:>11.4} {:>11.4} {:>13.3} {:>7} {:>12}",
                             ob.name,
                             mm3(ob.volume_mesh_um3),
                             ob.surface_area_um2 / 1.0e6,
                             ob.max_diameter_um / 1000.0,
-                            ob.n_slices.map_or("-".to_owned(), |n| n.to_string())
+                            ob.n_slices.map_or("-".to_owned(), |n| n.to_string()),
+                            ob.n_bridged_slices
+                                .map_or("-".to_owned(), |n| n.to_string())
                         );
+                    }
+                    if let Some(h) = report.objects.iter().find_map(|o| o.track_params_hash) {
+                        println!("Hash parameter penautan: {h:016x}");
                     }
                 }
                 println!(
@@ -1381,6 +1604,9 @@ fn run(cli: Cli) -> Result<Outcome> {
                                     .collect::<Vec<_>>()
                                     .join(",")
                             ),
+                            h3d_engine::TrackEvent::Bridged { skipped, .. } => {
+                                format!("jembatan({} irisan)", skipped.len())
+                            }
                         })
                         .collect();
                     println!(

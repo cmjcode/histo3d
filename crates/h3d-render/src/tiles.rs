@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use crate::error::RenderError;
+use crate::slices3d::SliceId;
 use crate::wgpu;
 use h3d_core::Affine2;
 
@@ -59,6 +60,21 @@ impl TileDraw {
     }
 }
 
+/// Masker jaringan satu lapisan tile: tekstur beresolusi rendah yang
+/// menutupi seluruh irisan (kanal alfa = jaringan), dipetakan dari koordinat
+/// tile `rect_um` (ruang U) dengan `uv = p / size_um`. Alfa tile dikalikan
+/// alfa masker, sehingga latar kaca/putih di luar jaringan tidak digambar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TileMask {
+    /// Tekstur masker yang sudah diunggah lewat
+    /// [`crate::SceneRenderer::upload_tile_mask`]; bila belum ada, lapisan
+    /// digambar tanpa masker.
+    pub texture: SliceId,
+    /// Ukuran irisan `(lebar, tinggi)` dalam µm ruang U
+    /// (`piksel_level0 × mpp`), yaitu cakupan tekstur masker.
+    pub size_um: [f64; 2],
+}
+
 /// Lapisan tile RGBA dengan satu affine.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TileLayerDraw {
@@ -68,6 +84,8 @@ pub struct TileLayerDraw {
     pub tiles: Vec<TileDraw>,
     /// Opasitas 0..1.
     pub opacity: f32,
+    /// Masker jaringan (latar transparan); `None` = gambar apa adanya.
+    pub mask: Option<TileMask>,
 }
 
 impl TileLayerDraw {
@@ -77,6 +95,7 @@ impl TileLayerDraw {
             affine: Affine2::IDENTITY,
             tiles,
             opacity: 1.0,
+            mask: None,
         }
     }
 }

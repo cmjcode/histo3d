@@ -94,7 +94,9 @@ fn body(app: &mut AppState, sess: &mut Session, ui: &mut Ui, drawer: Drawer) -> 
 fn sample_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
     egui::CollapsingHeader::new(t!("slides-sample-panel"))
         .default_open(true)
-        .show(ui, |ui| sample_ui(ui, sess, &mut app.toasts));
+        .show(ui, |ui| {
+            sample_ui(ui, sess, &mut app.toasts, &mut app.recon.spacing_preview)
+        });
     egui::CollapsingHeader::new(t!("anat-panel"))
         .default_open(true)
         .show(ui, |ui| app.slides.orientation.ui(ui, sess));

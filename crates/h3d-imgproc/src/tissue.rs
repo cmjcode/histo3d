@@ -6,18 +6,22 @@ use crate::color::od_total;
 use crate::components::{component_areas, label_components};
 use crate::edt::edt_squared_2d;
 use crate::error::ImgError;
-use crate::morphology::{close, fill_holes};
+use crate::morphology::{close, fill_narrow_mouthed_holes};
 use crate::threshold::otsu;
 
 /// Radius penutupan morfologi bawaan (µm).
 pub const CLOSE_RADIUS_UM: f64 = 50.0;
+/// Radius cakram (µm) penentu latar "luar": latar hanya dibuang bila
+/// terjangkau dari tepi citra lewat jalur selebar ≥ 2 × radius. Rongga di
+/// dalam jaringan dengan mulut lebih sempit dianggap bagian jaringan.
+pub const MOUTH_RADIUS_UM: f64 = 150.0;
 /// Fraksi luas minimum komponen relatif terhadap komponen terbesar.
 pub const MIN_COMPONENT_FRACTION: f64 = 0.005;
 /// Lebar pita pelunakan tepi bawaan untuk [`tissue_alpha`] (piksel).
 pub const FEATHER_PX: f32 = 2.0;
 
 /// Masker jaringan: `OD_total` → Otsu → penutupan radius ~50 µm → isi
-/// lubang → buang komponen dengan luas < 0,5 % komponen terbesar.
+/// lubang, termasuk rongga bermulut sempit ([`MOUTH_RADIUS_UM`]) → buang komponen dengan luas < 0,5 % komponen terbesar.
 /// `mpp_um` = ukuran piksel citra ini (µm/px, harus positif).
 pub fn tissue_mask(rgba: &[u8], w: usize, h: usize, mpp_um: f64) -> Result<Array2<u8>, ImgError> {
     if !(mpp_um.is_finite() && mpp_um > 0.0) {
@@ -30,7 +34,9 @@ pub fn tissue_mask(rgba: &[u8], w: usize, h: usize, mpp_um: f64) -> Result<Array
     let raw = od.mapv(|v| u8::from(v > t));
     let radius_px = CLOSE_RADIUS_UM / mpp_um;
     let closed = close(&raw, radius_px);
-    let filled = fill_holes(&closed);
+    // Hanya latar putih di luar jaringan yang dibuang: rongga di dalam
+    // jaringan yang terbuka ke luar lewat celah sempit tetap dipertahankan.
+    let filled = fill_narrow_mouthed_holes(&closed, MOUTH_RADIUS_UM / mpp_um);
     let (labels, n) = label_components(&filled);
     if n == 0 {
         return Ok(filled);

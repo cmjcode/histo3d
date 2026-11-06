@@ -20,7 +20,12 @@ struct MeshParams {
     color: vec4<f32>,
     // (opasitas, mode skalar > 0.5, skalar min, skalar maks)
     params: vec4<f32>,
+    // xyz = geseran tampilan (mm, ruang R, setelah renggang Z), w = sorot 0..1
+    offset: vec4<f32>,
 };
+
+// Warna sorot objek terpilih (putih-kuning lembut).
+const HIGHLIGHT_COLOR: vec3<f32> = vec3<f32>(1.0, 0.9, 0.4);
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(1) @binding(0) var<uniform> mesh: MeshParams;
@@ -47,7 +52,8 @@ const NODATA_THRESHOLD: f32 = 1.0e38;
 fn vs_mesh(in: VIn) -> VOut {
     var out: VOut;
     // Renggang Z mengelilingi pusat volume (ruang R berpusat di sana).
-    let pos = vec3<f32>(in.pos.xy, in.pos.z * globals.params.x);
+    // Geseran tampilan ditambahkan setelah renggang Z (mengangkat objek).
+    let pos = vec3<f32>(in.pos.xy, in.pos.z * globals.params.x) + mesh.offset.xyz;
     out.clip = globals.view_proj * vec4<f32>(pos, 1.0);
     out.world = pos;
     out.normal = in.normal;
@@ -79,5 +85,14 @@ fn fs_mesh(in: VOut) -> @location(0) vec4<f32> {
     let d0 = max(dot(n, normalize(globals.light0.xyz)), 0.0) * globals.light0.w;
     let d1 = max(dot(n, normalize(globals.light1.xyz)), 0.0) * globals.light1.w;
     let shade = globals.ambient.rgb + vec3<f32>(d0 + d1);
-    return vec4<f32>(clamp(base * shade, vec3<f32>(0.0), vec3<f32>(1.0)), mesh.params.x);
+    var color = base * shade;
+    // Sorot: campur ke warna sorot, tambah ambient dan rim di tepi siluet
+    // supaya objek terpilih jelas dari segala arah.
+    let h = clamp(mesh.offset.w, 0.0, 1.0);
+    if h > 0.0 {
+        let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+        let lit = base * (shade + vec3<f32>(0.25)) + HIGHLIGHT_COLOR * rim * 0.6;
+        color = mix(color, mix(lit, HIGHLIGHT_COLOR, 0.35), h);
+    }
+    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), mesh.params.x);
 }

@@ -149,7 +149,9 @@ impl AppState {
         }
         if let Some(sess) = sess.as_deref_mut() {
             proposal::show(self, sess, ui, work);
-            if self.view == View::Slice2D {
+            let stack_tool =
+                self.view == View::Stack3D && reconstruct::options_bar_active(&self.recon);
+            if self.view == View::Slice2D || stack_tool {
                 self.tool_options_bar(sess, ui, work);
             }
         }
@@ -170,9 +172,12 @@ impl AppState {
             .fixed_pos(pos)
             .show(ui.ctx(), |ui| {
                 ui.set_max_width(work.width() - 2.0 * h3d_ui::theme::TOOL_BUTTON_SIDE - 60.0);
-                h3d_ui::theme::pill_frame(ui.visuals()).show(ui, |ui| match self.slice_mode {
-                    SliceMode::Annotate => segment::tool_options(self, sess, ui),
-                    SliceMode::Align => register::tool_options(self, sess, ui),
+                h3d_ui::theme::pill_frame(ui.visuals()).show(ui, |ui| match self.view {
+                    View::Stack3D => reconstruct::tool_options(self, sess, ui),
+                    View::Slice2D => match self.slice_mode {
+                        SliceMode::Annotate => segment::tool_options(self, sess, ui),
+                        SliceMode::Align => register::tool_options(self, sess, ui),
+                    },
                 });
             });
     }
@@ -235,12 +240,16 @@ impl AppState {
                 h3d_ui::theme::panel_frame(child.visuals()).show(&mut child, |ui| {
                     ui.set_width(card.width() - 20.0);
                     ui.add_space(14.0);
-                    ui.label(
-                        h3d_ui::icons::STACK_3D
-                            .rich_text()
-                            .size(40.0)
-                            .color(h3d_ui::theme::ACCENT),
-                    );
+                    if let Some(logo) = app_logo(ui.ctx()) {
+                        ui.add(egui::Image::new((logo.id(), egui::vec2(88.0, 88.0))));
+                    } else {
+                        ui.label(
+                            h3d_ui::icons::STACK_3D
+                                .rich_text()
+                                .size(40.0)
+                                .color(h3d_ui::theme::ACCENT),
+                        );
+                    }
                     ui.heading(t!("app-name"));
                     ui.label(t!("app-tagline"));
                     ui.add_space(6.0);
@@ -421,10 +430,36 @@ impl AppState {
 
 /// Isi dialog Tentang.
 pub fn about_ui(ui: &mut Ui) {
-    ui.heading(t!("app-name"));
-    ui.label(t!("app-tagline"));
-    ui.label(t!("about-version", version = h3d_engine::APP_VERSION));
-    ui.label(t!("about-license"));
+    ui.horizontal(|ui| {
+        if let Some(logo) = app_logo(ui.ctx()) {
+            ui.add(egui::Image::new((logo.id(), egui::vec2(72.0, 72.0))));
+        }
+        ui.vertical(|ui| {
+            ui.heading(t!("app-name"));
+            ui.label(t!("app-tagline"));
+            ui.label(t!("about-version", version = h3d_engine::APP_VERSION));
+            ui.label(t!("about-license"));
+        });
+    });
     ui.separator();
     h3d_ui::widgets::research_notice(ui);
+}
+
+/// Tekstur logo aplikasi ([`crate::app::APP_ICON_PNG`]), didekode sekali lalu
+/// disimpan di memori egui. `None` bila PNG tertanam gagal didekode.
+fn app_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new("h3d-app-logo");
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(tex);
+    }
+    let img =
+        image::load_from_memory_with_format(crate::app::APP_ICON_PNG, image::ImageFormat::Png)
+            .map_err(|e| log::warn!("logo aplikasi gagal didekode: {e}"))
+            .ok()?
+            .to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+    let tex = ctx.load_texture("h3d-app-logo", color, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    Some(tex)
 }

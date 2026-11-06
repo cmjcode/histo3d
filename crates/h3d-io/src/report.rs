@@ -112,6 +112,15 @@ pub struct ObjectReport {
     pub n_slices: Option<usize>,
     /// Rentang z anggota track, µm.
     pub z_range_um: Option<(f64, f64)>,
+    /// Hash parameter penautan efektif (IoU, celah, pemisah objek, lompat
+    /// irisan) dari `tracks.json`; dicetak di laporan supaya hasil dapat
+    /// direproduksi.
+    #[serde(default)]
+    pub track_params_hash: Option<u64>,
+    /// Jumlah irisan yang dilompati (objek luput lalu dijembatani dan
+    /// celahnya diinterpolasi).
+    #[serde(default)]
+    pub n_bridged_slices: Option<usize>,
 }
 
 /// Anggota grup.
@@ -1156,6 +1165,12 @@ pub fn render_csv(r: &Report, clinical: ClinicalScope<'_>) -> String {
         );
         if let Some(k) = ob.n_slices {
             c.row("2", "objek_irisan", n, &k.to_string(), "", "");
+        }
+        if let Some(k) = ob.n_bridged_slices {
+            c.row("2", "objek_irisan_dijembatani", n, &k.to_string(), "", "");
+        }
+        if let Some(h) = ob.track_params_hash {
+            c.row("2", "objek_hash_penautan", n, &format!("{h:016x}"), "", "");
         }
     }
     for g in &r.groups {

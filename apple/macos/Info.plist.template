@@ -9,6 +9,7 @@
     <key>CFBundleVersion</key><string>__BUILD__</string>
     <key>CFBundleShortVersionString</key><string>__VERSION__</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.medical</string>

@@ -91,6 +91,9 @@ build_bundle() {
   rm -rf "$bundle"; mkdir -p "$bundle"
   cp "$bin" "$bundle/$BIN_NAME"; chmod +x "$bundle/$BIN_NAME"
   gen_plist "$bundle/Info.plist" "$is_sim"
+  # Ikon iPad; AppIcon-1024.png hanya untuk App Store Connect, tidak masuk bundel.
+  cp apple/ios/icons/AppIcon76x76~ipad.png "apple/ios/icons/AppIcon76x76@2x~ipad.png" \
+     "apple/ios/icons/AppIcon83.5x83.5@2x~ipad.png" "$bundle/"
   [ -d apple/Assets.xcassets ] && cp -R apple/Assets.xcassets "$bundle/" 2>/dev/null || true
   if [ -n "$PROVISIONING_PROFILE" ] && [ -f "$PROVISIONING_PROFILE" ]; then
     cp "$PROVISIONING_PROFILE" "$bundle/embedded.mobileprovision"

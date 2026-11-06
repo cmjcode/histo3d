@@ -12,17 +12,17 @@
         "name": "Pembuluh darah",
         "result": {
           "any": true,
-          "area_mm2": 0.035972,
+          "area_mm2": 0.035971,
           "area_voxel_faces_mm2": 0.048705,
           "patches": [
             {
               "area_mm2": 0.018616,
-              "centroid_um": [865.460625, 993.156551, 210.362031],
+              "centroid_um": [865.462183, 993.166042, 210.365113],
               "layers": [6, 7, 8, 9, 10, 11, 12, 13]
             },
             {
               "area_mm2": 0.017355,
-              "centroid_um": [1030.992288, 1008.282684, 210.180019],
+              "centroid_um": [1030.993365, 1008.291463, 210.18012],
               "layers": [6, 7, 8, 9, 10, 11, 12, 13]
             }
           ]
@@ -34,24 +34,24 @@
       "distances_um": [
         [
           {
-            "plus_minus_um": 10.431906,
+            "plus_minus_um": 10.443862,
             "value_um": 0.0,
             "z_limited": false
           },
           {
-            "plus_minus_um": 10.431906,
+            "plus_minus_um": 10.443862,
             "value_um": 112.996124,
             "z_limited": false
           }
         ],
         [
           {
-            "plus_minus_um": 10.431906,
+            "plus_minus_um": 10.443862,
             "value_um": 112.996124,
             "z_limited": false
           },
           {
-            "plus_minus_um": 10.431906,
+            "plus_minus_um": 10.443862,
             "value_um": 0.0,
             "z_limited": false
           }
@@ -60,33 +60,33 @@
       "foci": [
         {
           "bbox_um": [
-            [1003.834166, 829.011541, 11.641263],
-            [1419.834166, 1245.011541, 407.444211]
+            [1003.835255, 829.020306, 11.641263],
+            [1419.835255, 1245.020306, 407.444211]
           ],
-          "centroid_um": [1210.951187, 1040.899839, 209.341492],
+          "centroid_um": [1210.95479, 1040.86403, 209.416938],
           "layers": [1, 18],
           "max_diameter_um": 425.95977,
-          "n_voxels": 6016,
-          "volume_um3": 35857325.64884
+          "n_voxels": 6015,
+          "volume_um3": 35851365.322103
         },
         {
           "bbox_um": [
-            [491.834166, 765.011541, 11.641263],
-            [891.834166, 1165.011541, 407.444211]
+            [491.835255, 765.020306, 11.641263],
+            [891.835255, 1165.020306, 407.444211]
           ],
-          "centroid_um": [685.074352, 960.822586, 209.449793],
+          "centroid_um": [685.093652, 960.848706, 209.438209],
           "layers": [1, 18],
-          "max_diameter_um": 428.446828,
-          "n_voxels": 6012,
-          "volume_um3": 35833484.341893
+          "max_diameter_um": 428.446827,
+          "n_voxels": 6014,
+          "volume_um3": 35845404.995367
         }
       ],
       "n": 2
     },
     "fractions": {
       "group_volumes": [
-        ["Tumor", 71690809.990737],
-        ["Pembuluh darah", 9107379.253895]
+        ["Tumor", 71696770.317474],
+        ["Pembuluh darah", 9119299.907368]
       ],
       "necrosis_percent": null,
       "rows": [
@@ -96,7 +96,7 @@
           "kind": "tumor",
           "label": 1,
           "name": "Tumor",
-          "volume_um3": 71690809.990737
+          "volume_um3": 71696770.317474
         },
         {
           "fraction_of_group": 1.0,
@@ -106,7 +106,7 @@
           },
           "label": 5,
           "name": "Pembuluh darah",
-          "volume_um3": 9107379.253895
+          "volume_um3": 9119299.907368
         }
       ]
     },
@@ -119,20 +119,20 @@
       "uniform_z": false
     },
     "hypoxia": {
-      "fraction_beyond": 0.69995,
+      "fraction_beyond": 0.699975,
       "histogram": [
         [0.0, 138],
-        [25.0, 358],
-        [50.0, 517],
+        [25.0, 359],
+        [50.0, 516],
         [75.0, 749],
-        [100.0, 810],
-        [125.0, 1037],
+        [100.0, 809],
+        [125.0, 1038],
         [150.0, 991],
-        [175.0, 1226],
-        [200.0, 1190],
+        [175.0, 1227],
+        [200.0, 1191],
         [225.0, 1098],
         [250.0, 1145],
-        [275.0, 874],
+        [275.0, 873],
         [300.0, 875],
         [325.0, 522],
         [350.0, 408],
@@ -152,37 +152,37 @@
       "vessel_hist_bin_um": 25.0
     },
     "size": {
-      "centroid_um": [948.100212, 1000.874528, 209.395624],
+      "centroid_um": [948.046079, 1000.859694, 209.427573],
       "max_diameter_um": {
-        "plus_minus_um": 10.431906,
+        "plus_minus_um": 10.443862,
         "value_um": 944.199293,
         "z_limited": false
       },
       "pca_axes_um": [
         {
-          "plus_minus_um": 10.431906,
-          "value_um": 953.699939,
+          "plus_minus_um": 10.443862,
+          "value_um": 953.688624,
           "z_limited": false
         },
         {
-          "plus_minus_um": 10.431906,
-          "value_um": 435.142781,
+          "plus_minus_um": 10.443862,
+          "value_um": 439.744325,
           "z_limited": false
         },
         {
-          "plus_minus_um": 14.073169,
-          "value_um": 430.974062,
+          "plus_minus_um": 14.085125,
+          "value_um": 431.112318,
           "z_limited": true
         }
       ],
       "pca_directions": [
-        [0.988658, 0.150183, -0.000696],
-        [-0.144827, 0.952153, -0.269127],
-        [-0.039756, 0.266176, 0.963104]
+        [0.988675, 0.15007, -0.000534],
+        [-0.145742, 0.959299, -0.241877],
+        [-0.035786, 0.239216, 0.970307]
       ]
     },
-    "tre_est_um": 2.431906,
-    "tumor_volume_um3": 71690809.990737,
+    "tre_est_um": 2.443862,
+    "tumor_volume_um3": 71696770.317474,
     "warnings": [
       {
         "dz": 23.282526,
@@ -192,7 +192,7 @@
   },
   "app_version": "0.0.3",
   "attrs": [],
-  "dimension_uncertainty_um": 14.073169,
+  "dimension_uncertainty_um": 14.085125,
   "figures": [],
   "grid": {
     "nz": 22,
@@ -227,44 +227,44 @@
   "labels": [
     {
       "bbox_um": [
-        [483.657756, 756.258777, 19.491284],
-        [1421.083613, 1249.269014, 423.310838]
+        [483.658845, 756.267541, 19.381987],
+        [1421.084702, 1249.277779, 423.310838]
       ],
       "group": "Tumor",
       "kind": "tumor",
       "label": 1,
-      "max_diameter_um": 946.782535,
+      "max_diameter_um": 946.782505,
       "n_components": 2,
       "n_slices_annotated": 18,
       "n_slices_interpolated": 0,
       "n_slices_reviewed": 0,
       "name": "Tumor",
-      "surface_area_um2": 1065656.353358,
+      "surface_area_um2": 1065713.153636,
       "volume_cavalieri_um3": 71798095.872,
       "volume_corrected_um3": null,
-      "volume_mesh_um3": 70550545.488799,
+      "volume_mesh_um3": 70549093.645805,
       "volume_reviewed_um3": null
     },
     {
       "bbox_um": [
-        [859.341825, 907.762626, -3.017294],
-        [1037.404671, 1089.287939, 445.532122]
+        [859.342913, 907.771254, -3.360323],
+        [1037.561915, 1089.296702, 445.532278]
       ],
       "group": "Pembuluh darah",
       "kind": {
         "vessel": "blood"
       },
       "label": 5,
-      "max_diameter_um": 475.967204,
+      "max_diameter_um": 475.967522,
       "n_components": 1,
       "n_slices_annotated": 20,
       "n_slices_interpolated": 0,
       "n_slices_reviewed": 0,
       "name": "Pembuluh darah",
-      "surface_area_um2": 269970.955107,
+      "surface_area_um2": 270395.046202,
       "volume_cavalieri_um3": 9572284.739368,
       "volume_corrected_um3": null,
-      "volume_mesh_um3": 8997018.434024,
+      "volume_mesh_um3": 9024117.957293,
       "volume_reviewed_um3": null
     }
   ],
@@ -328,7 +328,14 @@
     "per_object": false,
     "s_xy_um": 16.0,
     "smooth_iterations": 10,
+    "track_max_skip": 1,
     "track_min_iou": 0.2,
+    "track_split": {
+      "enabled": false,
+      "h_um": 8.0,
+      "min_area_um2": 0.0,
+      "min_seed_distance_um": 40.0
+    },
     "z_factor_max": 2.0
   },
   "sample_name": "p",
@@ -357,7 +364,7 @@
     },
     {
       "kind": "volume_mismatch",
-      "percent": 6.009707
+      "percent": 5.726603
     }
   ]
 }

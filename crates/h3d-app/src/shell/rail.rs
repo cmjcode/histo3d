@@ -1,8 +1,9 @@
 //! Rel alat kiri: isinya mengikuti tampilan.
 //!
 //! - Tumpukan 3D: Susun otomatis, Sejajarkan semua, Bangun 3D, Analisis
-//!   spasial | Pas ke layar, Irisan di 3D, Mesh di 3D, Bidang potong.
-//!   (Dari mode Irisan, Registrasi, dan Rekonstruksi.)
+//!   spasial | Pas ke layar, Irisan di 3D, Mesh di 3D, Bidang potong |
+//!   Putar, Geser, Fokus 2 irisan. (Dari mode Irisan, Registrasi, dan
+//!   Rekonstruksi.)
 //! - Irisan 2D, Tandai: Geser, Kuas, Penghapus, Laso, Poligon | Isi lubang,
 //!   Salin ke irisan berikut, Tandai ditinjau. (Dari mode Segmentasi.)
 //! - Irisan 2D, Sejajarkan: Geser, Landmark, Geser irisan, Putar irisan |
@@ -16,7 +17,7 @@ use h3d_engine::Session;
 use h3d_i18n::t;
 use h3d_ui::RailItem;
 
-use crate::features::{register, segment};
+use crate::features::{reconstruct, register, segment};
 use crate::state::{AppState, JobOutput, SliceMode, View};
 
 /// Aksi rel alat.
@@ -34,6 +35,9 @@ enum RailAction {
     Mode(SliceMode),
     Annotate(segment::Tool),
     Align(register::RegTool),
+    StackTool(reconstruct::StackTool),
+    /// Fokus dua irisan (terpilih + patokan) atau kembali tampilkan semua.
+    ToggleFocus,
     FillHoles,
     CopyToNext,
     MarkReviewed,
@@ -81,6 +85,16 @@ pub fn show(app: &mut AppState, sess: Option<&mut Session>, ui: &mut Ui, work: R
         }
         RailAction::Annotate(tool) => segment::set_tool(app, tool),
         RailAction::Align(tool) => register::set_tool(app, tool),
+        RailAction::StackTool(tool) => reconstruct::set_tool(app, tool),
+        RailAction::ToggleFocus => {
+            if app.recon.focus.is_some() {
+                reconstruct::focus_clear(&mut app.recon);
+            } else if let (Some(sess), Some(slide)) = (sess.as_deref(), app.current) {
+                if reconstruct::focus_on(app, sess, slide).is_none() {
+                    app.toasts.info(t!("stack-selected-none"));
+                }
+            }
+        }
         RailAction::FillHoles => {
             if let (Some(sess), Some(slide), Some(label)) =
                 (sess, app.current, app.segment.active_label)
@@ -196,6 +210,39 @@ fn stack_items(app: &AppState, busy: bool) -> Vec<RailItem<RailAction>> {
             t!("recon-clipping-plane"),
         )
         .selected(st.clip_enabled),
+        RailItem::Separator,
+        RailItem::tool(
+            RailAction::StackTool(reconstruct::StackTool::Rotate),
+            h3d_ui::icons::ROTATE,
+            t!("stack-tool-rotate"),
+        )
+        .hint(t!("stack-tool-hint"))
+        .selected(st.tool == reconstruct::StackTool::Rotate)
+        .enabled(!busy && app.current.is_some()),
+        RailItem::tool(
+            RailAction::StackTool(reconstruct::StackTool::Translate),
+            h3d_ui::icons::MOVE,
+            t!("stack-tool-translate"),
+        )
+        .hint(t!("stack-tool-hint"))
+        .selected(st.tool == reconstruct::StackTool::Translate)
+        .enabled(!busy && app.current.is_some()),
+        RailItem::tool(
+            RailAction::StackTool(reconstruct::StackTool::Object),
+            h3d_ui::icons::OBJECT_PICK,
+            t!("stack-tool-object"),
+        )
+        .hint(t!("stack-tool-object-hint"))
+        .selected(st.tool == reconstruct::StackTool::Object)
+        .enabled(!st.meshes.is_empty()),
+        RailItem::tool(
+            RailAction::ToggleFocus,
+            h3d_ui::icons::FOCUS_PAIR,
+            t!("stack-focus-pair"),
+        )
+        .hint(t!("stack-focus-pair-hint"))
+        .selected(st.focus.is_some())
+        .enabled(st.focus.is_some() || (app.current.is_some() && n >= 2)),
     ]
 }
 

@@ -317,18 +317,33 @@ impl SwipeDetector {
     }
 }
 
-/// `T` baru hasil pegangan geser/putar di layar (8.4.5): geser `shift_um`
-/// (W) dan putar `angle_rad` di sekitar `pivot_w` (W), diterapkan **setelah**
-/// `t` lama. Hasilnya tetap memetakan U → W.
+/// `T` baru hasil pegangan geser/putar/balik di layar (8.4.5): cermin
+/// `flip` (`[horizontal, vertikal]`, sumbu lewat `pivot_w`), putar
+/// `angle_rad` di sekitar `pivot_w` (W), lalu geser `shift_um` (W); semuanya
+/// diterapkan **setelah** `t` lama. Hasilnya tetap memetakan U → W. Cermin
+/// sah (determinan negatif, 5.4): irisan yang terpasang terbalik di kaca
+/// dikoreksi dengan ini.
 pub fn manual_adjusted_transform(
     t: &Affine2,
     shift_um: [f64; 2],
     angle_rad: f64,
+    flip: [bool; 2],
     pivot_w: [f64; 2],
 ) -> Affine2 {
+    let mirror = mirror_about(flip, pivot_w);
     let rot = Affine2::rotation_about(angle_rad, pivot_w);
     let shift = Affine2::translation(shift_um[0], shift_um[1]);
-    shift.compose(&rot).compose(t)
+    shift.compose(&rot).compose(&mirror).compose(t)
+}
+
+/// Cermin di sekitar `center` (W): `flip[0]` membalik kiri-kanan (x → −x),
+/// `flip[1]` membalik atas-bawah (y → −y). Keduanya sekaligus = putar 180°.
+pub fn mirror_about(flip: [bool; 2], center: [f64; 2]) -> Affine2 {
+    let sx = if flip[0] { -1.0 } else { 1.0 };
+    let sy = if flip[1] { -1.0 } else { 1.0 };
+    Affine2::translation(center[0], center[1])
+        .compose(&Affine2::scale(sx, sy))
+        .compose(&Affine2::translation(-center[0], -center[1]))
 }
 
 /// Format nilai ± ketidakpastian dalam mm (tiga desimal) lewat kunci
@@ -604,12 +619,36 @@ mod tests {
     fn manual_adjustment_keeps_pivot_under_pure_rotation() {
         let t = Affine2::translation(50.0, 60.0);
         let pivot = [300.0, 400.0];
-        let rotated = manual_adjusted_transform(&t, [0.0, 0.0], 0.4, pivot);
+        let rotated = manual_adjusted_transform(&t, [0.0, 0.0], 0.4, [false, false], pivot);
         // Titik U yang jatuh di pivot tetap di pivot.
         let u = t.inverse().unwrap().apply(pivot);
         let w = rotated.apply(u);
         assert!((w[0] - pivot[0]).abs() < 1e-9 && (w[1] - pivot[1]).abs() < 1e-9);
-        let shifted = manual_adjusted_transform(&t, [10.0, -5.0], 0.0, pivot);
+        let shifted = manual_adjusted_transform(&t, [10.0, -5.0], 0.0, [false, false], pivot);
         assert!(shifted.approx_eq(&Affine2::translation(60.0, 55.0), 1e-9));
+    }
+
+    #[test]
+    fn manual_flip_mirrors_about_pivot() {
+        let t = Affine2::translation(50.0, 60.0);
+        let pivot = [300.0, 400.0];
+        let flipped = manual_adjusted_transform(&t, [0.0, 0.0], 0.0, [true, false], pivot);
+        // Cermin: determinan negatif, pivot tetap, titik di kanan pivot ke kiri.
+        assert!(flipped.determinant() < 0.0);
+        let u = t.inverse().unwrap().apply(pivot);
+        let w = flipped.apply(u);
+        assert!((w[0] - pivot[0]).abs() < 1e-9 && (w[1] - pivot[1]).abs() < 1e-9);
+        let w = flipped.apply([350.0, 340.0]); // W lama = (400, 400)
+        assert!((w[0] - 200.0).abs() < 1e-9 && (w[1] - 400.0).abs() < 1e-9);
+        // Vertikal: y dicerminkan.
+        let v = manual_adjusted_transform(&t, [0.0, 0.0], 0.0, [false, true], pivot);
+        let w = v.apply([250.0, 440.0]); // W lama = (300, 500)
+        assert!((w[0] - 300.0).abs() < 1e-9 && (w[1] - 300.0).abs() < 1e-9);
+        // Keduanya = rotasi 180° (determinan positif).
+        let both = manual_adjusted_transform(&t, [0.0, 0.0], 0.0, [true, true], pivot);
+        let rot =
+            manual_adjusted_transform(&t, [0.0, 0.0], std::f64::consts::PI, [false, false], pivot);
+        assert!(both.approx_eq(&rot, 1e-9));
+        assert!(both.determinant() > 0.0);
     }
 }

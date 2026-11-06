@@ -101,6 +101,7 @@ mod tests {
                 events: Vec::new(),
             }],
             warnings: Vec::new(),
+            bridged: 0,
         }
     }
 

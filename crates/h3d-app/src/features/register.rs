@@ -17,9 +17,11 @@ use crate::geom::{
     manual_adjusted_transform, navigate, neighbor_toward_reference, LandmarkCollector, LandmarkSide,
 };
 use crate::gpu::Gpu;
-use crate::state::AppState;
-use crate::ui_util::{icon_text_button, icon_text_button_enabled};
-use crate::viewer::{paint_background, slide_layer, Viewer2D};
+use crate::state::{AppState, Drawer, SliceMode, View};
+use crate::ui_util::{icon_selectable, icon_text_button, icon_text_button_enabled};
+use crate::viewer::{
+    hide_background_checkbox, paint_background, slide_layer, tissue_mask_if_enabled, Viewer2D,
+};
 
 /// Mode tampilan pembanding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -78,6 +80,21 @@ impl RegTool {
     }
 }
 
+/// Tombol jungkit balik kiri-kanan / atas-bawah untuk koreksi manual
+/// (irisan yang terpasang terbalik di kaca). Dipakai mode 2D dan kanvas 3D.
+pub fn flip_buttons(ui: &mut Ui, flip: &mut [bool; 2]) {
+    if crate::ui_util::icon_selectable(ui, flip[0], h3d_ui::icons::FLIP_H, &t!("register-flip-h"))
+        .clicked()
+    {
+        flip[0] = !flip[0];
+    }
+    if crate::ui_util::icon_selectable(ui, flip[1], h3d_ui::icons::FLIP_V, &t!("register-flip-v"))
+        .clicked()
+    {
+        flip[1] = !flip[1];
+    }
+}
+
 /// Keadaan mode Registrasi.
 pub struct RegisterState {
     /// Viewer pembanding.
@@ -96,6 +113,8 @@ pub struct RegisterState {
     pub shift: [f64; 2],
     /// Putaran manual yang belum diterapkan (radian).
     pub angle: f64,
+    /// Cermin manual yang belum diterapkan: `[kiri-kanan, atas-bawah]`.
+    pub flip: [bool; 2],
     /// Irisan yang koreksinya sedang disusun.
     pub editing: Option<SlideId>,
     /// Tabel QC (di-cache).
@@ -115,6 +134,7 @@ impl Default for RegisterState {
             landmarks: LandmarkCollector::default(),
             shift: [0.0, 0.0],
             angle: 0.0,
+            flip: [false, false],
             editing: None,
             qc: Vec::new(),
             qc_dirty: true,
@@ -128,12 +148,256 @@ impl RegisterState {
         self.landmarks.clear();
         self.shift = [0.0, 0.0];
         self.angle = 0.0;
+        self.flip = [false, false];
     }
 
-    /// Ada geser/putar manual yang belum diterapkan.
+    /// Ada geser/putar/balik manual yang belum diterapkan.
     pub fn has_manual(&self) -> bool {
-        self.shift != [0.0, 0.0] || self.angle != 0.0
+        self.shift != [0.0, 0.0] || self.angle != 0.0 || self.flip != [false, false]
     }
+
+    /// Irisan gagal QC menurut tabel yang di-cache, urutan tumpukan.
+    pub fn flagged_ids(&self) -> Vec<SlideId> {
+        self.qc
+            .iter()
+            .filter(|r| r.flagged)
+            .map(|r| r.slide)
+            .collect()
+    }
+}
+
+/// Buka `slide` di mode Sejajarkan 2D dengan alat landmark dan laci
+/// Penyejajaran terbuka: titik masuk tombol "Perbaiki" dan navigasi
+/// antar irisan gagal QC.
+pub fn start_fix(app: &mut AppState, slide: SlideId) {
+    app.open_slice_2d(slide);
+    app.slice_mode = SliceMode::Align;
+    app.register.tool = RegTool::Landmark;
+    app.register.compare = CompareKind::Blend;
+    app.drawer = Some(Drawer::Align);
+}
+
+/// Irisan gagal QC berikutnya setelah `current` (melingkar), tidak termasuk
+/// `current` sendiri; `None` bila tidak ada yang lain.
+pub fn next_flagged(
+    flagged: &[SlideId],
+    current: Option<SlideId>,
+    forward: bool,
+) -> Option<SlideId> {
+    let others: Vec<SlideId> = flagged
+        .iter()
+        .copied()
+        .filter(|f| Some(*f) != current)
+        .collect();
+    if others.is_empty() {
+        return None;
+    }
+    let pos = current.and_then(|c| flagged.iter().position(|f| *f == c));
+    let n = flagged.len();
+    let start = match (pos, forward) {
+        (Some(p), true) => (p + 1) % n,
+        (Some(p), false) => (p + n - 1) % n,
+        (None, _) => 0,
+    };
+    (0..n)
+        .map(|i| {
+            if forward {
+                (start + i) % n
+            } else {
+                (start + n - i) % n
+            }
+        })
+        .map(|i| flagged[i])
+        .find(|f| Some(*f) != current)
+}
+
+/// Alasan gagal QC satu baris, satu kalimat per ambang yang dilanggar.
+/// Ambang yang dipakai adalah bawaan `QcThresholds` (sama dengan
+/// "Sejajarkan semua" dari aplikasi).
+fn failure_reasons(row: &QcRow) -> Vec<String> {
+    let thr = h3d_engine::QcThresholds::default();
+    let v = thr.violations(
+        row.ncc.unwrap_or(f32::NAN),
+        row.mask_dice.unwrap_or(f32::NAN),
+        row.area_ratio.unwrap_or(f32::NAN),
+    );
+    let mut out = Vec::new();
+    if v.ncc {
+        out.push(t!(
+            "register-fix-ncc",
+            v = fmt_opt(row.ncc),
+            min = format!("{:.2}", thr.ncc_min)
+        ));
+    }
+    if v.dice {
+        out.push(t!(
+            "register-fix-dice",
+            v = fmt_opt(row.mask_dice),
+            min = format!("{:.2}", thr.dice_min)
+        ));
+    }
+    if v.area_ratio {
+        out.push(t!(
+            "register-fix-area",
+            v = fmt_opt(row.area_ratio),
+            lo = format!("{:.2}", thr.area_ratio.0),
+            hi = format!("{:.2}", thr.area_ratio.1)
+        ));
+    }
+    out
+}
+
+/// Kartu panduan perbaikan QC di atas laci Penyejajaran. Tanpa irisan gagal:
+/// tidak digambar. Di luar mode Sejajarkan: spanduk + tombol "Perbaiki".
+/// Di mode Sejajarkan pada irisan gagal: langkah-langkah, alasan gagal,
+/// navigasi antar irisan gagal, dan jalan pintas Terima / Tandai rusak.
+fn fix_card(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
+    let flagged = app.register.flagged_ids();
+    if flagged.is_empty() {
+        return;
+    }
+    let n = flagged.len();
+    let pos = app
+        .current
+        .and_then(|c| flagged.iter().position(|f| *f == c));
+    let in_fix = app.view == View::Slice2D && app.slice_mode == SliceMode::Align && pos.is_some();
+
+    let mut go: Option<SlideId> = None;
+    egui::Frame::new()
+        .fill(h3d_ui::theme::WARNING.gamma_multiply(0.18))
+        .stroke(egui::Stroke::new(1.0, h3d_ui::theme::WARNING))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    h3d_ui::icons::WARNING
+                        .rich_text()
+                        .color(h3d_ui::theme::WARNING),
+                );
+                if in_fix {
+                    let k = pos.map_or(0, |p| p + 1);
+                    crate::ui_util::strong(
+                        ui,
+                        t!(
+                            "register-fix-progress",
+                            k = k.to_string(),
+                            n = n.to_string()
+                        ),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(n > 1, egui::Button::new(h3d_ui::icons::NEXT.rich_text()))
+                            .on_hover_text(t!("register-fix-next"))
+                            .clicked()
+                        {
+                            go = next_flagged(&flagged, app.current, true);
+                        }
+                        if ui
+                            .add_enabled(n > 1, egui::Button::new(h3d_ui::icons::PREV.rich_text()))
+                            .on_hover_text(t!("register-fix-prev"))
+                            .clicked()
+                        {
+                            go = next_flagged(&flagged, app.current, false);
+                        }
+                    });
+                } else {
+                    ui.label(t!("register-flagged-count", n = n.to_string()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_text_button(ui, h3d_ui::icons::TUNE, &t!("register-fix"))
+                            .on_hover_text(t!("register-fix-hint"))
+                            .clicked()
+                        {
+                            go = Some(pos.map_or(flagged[0], |p| flagged[p]));
+                        }
+                    });
+                }
+            });
+            if !in_fix {
+                return;
+            }
+            let Some(slide) = app.current else {
+                return;
+            };
+
+            // Mengapa gagal.
+            if let Some(row) = app.register.qc.iter().find(|r| r.slide == slide) {
+                let reasons = failure_reasons(row);
+                if !reasons.is_empty() {
+                    ui.add_space(4.0);
+                    ui.weak(t!("register-fix-why"));
+                    for r in reasons {
+                        ui.label(r);
+                    }
+                }
+            }
+
+            // Langkah.
+            ui.add_space(6.0);
+            ui.label(t!("register-fix-step1"));
+            ui.add_space(2.0);
+            ui.label(t!("register-fix-step2"));
+            ui.horizontal_wrapped(|ui| {
+                for tool in [RegTool::Landmark, RegTool::Translate, RegTool::Rotate] {
+                    if icon_selectable(
+                        ui,
+                        app.register.tool == tool,
+                        tool.icon(),
+                        &t!(tool.i18n_key()),
+                    )
+                    .clicked()
+                    {
+                        set_tool(app, tool);
+                    }
+                }
+            });
+            let tool_hint = match app.register.tool {
+                RegTool::Translate => Some(t!("register-fix-tool-translate-hint")),
+                RegTool::Rotate => Some(t!("register-fix-tool-rotate-hint")),
+                RegTool::Landmark => Some(t!("register-fix-tool-landmark-hint")),
+                RegTool::View => None,
+            };
+            if let Some(h) = tool_hint {
+                ui.small(h);
+            }
+            ui.add_space(2.0);
+            ui.label(t!("register-fix-step3"));
+
+            // Jalan pintas tanpa koreksi.
+            ui.add_space(6.0);
+            ui.weak(t!("register-fix-or"));
+            ui.horizontal_wrapped(|ui| {
+                if icon_text_button(ui, h3d_ui::icons::CHECK, &t!("register-accept"))
+                    .on_hover_text(t!("register-accept-hint"))
+                    .clicked()
+                {
+                    match sess.accept_registration(slide) {
+                        Ok(()) => {
+                            app.toasts.info(t!("register-accepted"));
+                            app.register.qc_dirty = true;
+                            go = next_flagged(&flagged, app.current, true);
+                        }
+                        Err(e) => app.toasts.engine_error(&e),
+                    }
+                }
+                if icon_text_button(ui, h3d_ui::icons::DAMAGED, &t!("register-mark-damaged"))
+                    .on_hover_text(t!("register-mark-damaged-hint"))
+                    .clicked()
+                {
+                    match sess.set_status(slide, SlideStatus::Damaged) {
+                        Ok(()) => {
+                            app.register.qc_dirty = true;
+                            go = next_flagged(&flagged, app.current, true);
+                        }
+                        Err(e) => app.toasts.engine_error(&e),
+                    }
+                }
+            });
+        });
+    if let Some(id) = go {
+        start_fix(app, id);
+    }
+    ui.add_space(4.0);
 }
 
 /// Urutkan baris QC: irisan gagal QC dulu, lalu yang belum terdaftar, lalu
@@ -191,10 +455,7 @@ fn fmt_opt(v: Option<f32>) -> String {
 /// Isi laci "Penyejajaran": Sejajarkan semua, ringkasan, dan daftar QC.
 pub fn align_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
     sync(app, sess);
-    let flagged = app.register.qc.iter().filter(|r| r.flagged).count();
-    if flagged > 0 {
-        h3d_ui::widgets::warning_banner(ui, &t!("register-flagged-count", n = flagged.to_string()));
-    }
+    fix_card(app, sess, ui);
     let needs = sess.needs_registration().len();
     ui.horizontal(|ui| {
         if icon_text_button_enabled(
@@ -321,6 +582,8 @@ pub fn tool_options(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
             }
             CompareKind::Difference => {}
         }
+        ui.separator();
+        hide_background_checkbox(app, ui);
     });
     ui.horizontal_wrapped(|ui| {
         let st = &mut app.register;
@@ -373,6 +636,7 @@ pub fn tool_options(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
                     t!("register-rotate"),
                     st.angle.to_degrees()
                 ));
+                flip_buttons(ui, &mut st.flip);
                 if icon_text_button_enabled(
                     ui,
                     st.has_manual() && neighbor.is_some(),
@@ -386,7 +650,8 @@ pub fn tool_options(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
                         let size = entry.size_um();
                         let pivot = t_old.apply([size[0] / 2.0, size[1] / 2.0]);
                         // `t_new` memetakan U irisan → W (arah `T_i`, 5.3).
-                        let t_new = manual_adjusted_transform(&t_old, st.shift, st.angle, pivot);
+                        let t_new =
+                            manual_adjusted_transform(&t_old, st.shift, st.angle, st.flip, pivot);
                         match sess.apply_manual_transform(slide, t_new) {
                             Ok(()) => {
                                 st.reset_edit();
@@ -400,6 +665,7 @@ pub fn tool_options(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
                 if ui.button(t!("register-reset-transform")).clicked() {
                     st.shift = [0.0, 0.0];
                     st.angle = 0.0;
+                    st.flip = [false, false];
                 }
             }
             RegTool::View => {
@@ -463,7 +729,7 @@ pub fn viewer(app: &mut AppState, sess: &mut Session, ui: &mut Ui, gpu: Option<&
     let t_fixed = neighbor
         .and_then(|n| sess.slide(n).ok())
         .map(|n| n.transform.affine());
-    let t_moving = manual_adjusted_transform(&t_old, st.shift, st.angle, pivot);
+    let t_moving = manual_adjusted_transform(&t_old, st.shift, st.angle, st.flip, pivot);
     if !primary_pans && !frame.multi_touch {
         match st.tool {
             RegTool::Landmark => {
@@ -508,13 +774,16 @@ pub fn viewer(app: &mut AppState, sess: &mut Session, ui: &mut Ui, gpu: Option<&
             RegTool::View => {}
         }
     }
-    let t_moving = manual_adjusted_transform(&t_old, st.shift, st.angle, pivot);
+    let t_moving = manual_adjusted_transform(&t_old, st.shift, st.angle, st.flip, pivot);
 
-    // Adegan.
-    let moving = slide_layer(&mut app.tiles, sess, gpu, slide, &t_moving, &frame.view);
+    // Adegan. Masker jaringan menyembunyikan latar kaca di luar jaringan
+    // (sama dengan "Sembunyikan latar" di 3D).
+    let mut moving = slide_layer(&mut app.tiles, sess, gpu, slide, &t_moving, &frame.view);
+    moving.mask = tissue_mask_if_enabled(app, sess, gpu, ui.ctx(), slide);
     let scene = match (neighbor, t_fixed) {
         (Some(n), Some(tf)) => {
-            let fixed = slide_layer(&mut app.tiles, sess, gpu, n, &tf, &frame.view);
+            let mut fixed = slide_layer(&mut app.tiles, sess, gpu, n, &tf, &frame.view);
+            fixed.mask = tissue_mask_if_enabled(app, sess, gpu, ui.ctx(), n);
             let st = &app.register;
             let mode = if st.tool == RegTool::Landmark {
                 // Saat mengeklik landmark hanya sisi yang ditunggu yang tampil.
@@ -654,6 +923,39 @@ mod tests {
             flagged,
             manual: false,
         }
+    }
+
+    #[test]
+    fn next_flagged_cycles_and_skips_current() {
+        let f = [SlideId(1), SlideId(4), SlideId(9)];
+        assert_eq!(next_flagged(&f, Some(SlideId(1)), true), Some(SlideId(4)));
+        assert_eq!(next_flagged(&f, Some(SlideId(9)), true), Some(SlideId(1)));
+        assert_eq!(next_flagged(&f, Some(SlideId(1)), false), Some(SlideId(9)));
+        // Irisan aktif bukan yang gagal → mulai dari yang pertama.
+        assert_eq!(next_flagged(&f, Some(SlideId(7)), true), Some(SlideId(1)));
+        assert_eq!(next_flagged(&f, None, false), Some(SlideId(1)));
+        // Satu-satunya irisan gagal adalah yang aktif → tidak ada tujuan.
+        assert_eq!(next_flagged(&f[..1], Some(SlideId(1)), true), None);
+        assert_eq!(next_flagged(&[], None, true), None);
+    }
+
+    #[test]
+    fn failure_reasons_name_each_violated_threshold() {
+        let mut r = row(1, 0, true, true);
+        r.ncc = Some(0.14);
+        r.mask_dice = Some(0.73);
+        r.area_ratio = Some(1.0);
+        assert_eq!(failure_reasons(&r).len(), 2);
+        r.ncc = Some(0.9);
+        r.mask_dice = Some(0.95);
+        r.area_ratio = Some(1.3);
+        assert_eq!(failure_reasons(&r).len(), 1);
+        r.area_ratio = None;
+        assert_eq!(
+            failure_reasons(&r).len(),
+            1,
+            "metrik hilang dihitung pelanggaran"
+        );
     }
 
     #[test]

@@ -141,17 +141,35 @@ impl GpuMesh {
         ]
     }
 
-    /// Picking ray–segitiga di CPU.
+    /// Picking ray–segitiga di CPU (mesh pada posisi aslinya).
     pub fn pick(&self, ray: &Ray) -> Option<PickHit> {
-        pick_triangle(ray.origin, ray.dir, &self.positions_mm, &self.indices).map(
-            |(tri_index, t, bary)| PickHit {
-                tri_index,
-                t,
-                bary,
-                point_mm: ray.origin + ray.dir * t,
-            },
-        )
+        self.pick_offset(ray, [0.0; 3])
     }
+
+    /// Picking mesh yang digambar dengan geseran tampilan `offset_mm`
+    /// ([`MeshInstance::offset_mm`]): ray digeser sebesar `−offset` lalu
+    /// diuji terhadap geometri asli; `point_mm` dikembalikan di ruang yang
+    /// terlihat (geometri + offset).
+    pub fn pick_offset(&self, ray: &Ray, offset_mm: [f32; 3]) -> Option<PickHit> {
+        pick_offset_cpu(ray, offset_mm, &self.positions_mm, &self.indices)
+    }
+}
+
+/// Inti [`GpuMesh::pick_offset`] tanpa GPU: ray digeser `−offset_mm`, diuji
+/// terhadap `positions_mm`; `point_mm` di ruang yang terlihat.
+pub fn pick_offset_cpu(
+    ray: &Ray,
+    offset_mm: [f32; 3],
+    positions_mm: &[[f32; 3]],
+    indices: &[u32],
+) -> Option<PickHit> {
+    let origin = ray.origin - Vec3::from(offset_mm);
+    pick_triangle(origin, ray.dir, positions_mm, indices).map(|(tri_index, t, bary)| PickHit {
+        tri_index,
+        t,
+        bary,
+        point_mm: ray.origin + ray.dir * t,
+    })
 }
 
 /// Unggah mesh ruang W (µm, `f64`) ke GPU sebagai mm `f32` relatif `center_um`.
@@ -230,10 +248,17 @@ pub struct MeshInstance {
     pub scalar_range: [f32; 2],
     /// Colormap untuk mode skalar.
     pub colormap: Colormap,
+    /// Geseran tampilan (mm, ruang R), diterapkan **setelah** renggang Z;
+    /// dipakai untuk "mengangkat" satu objek keluar dari tumpukan. Hanya
+    /// tampilan: geometri di GPU dan pengukuran tidak berubah.
+    pub offset_mm: [f32; 3],
+    /// Sorot 0..1: campuran warna akhir ke warna sorot (0 = tanpa sorot).
+    /// Hanya tampilan.
+    pub highlight: f32,
 }
 
 impl MeshInstance {
-    /// Instance opak berwarna polos.
+    /// Instance opak berwarna polos, tanpa geseran dan sorot.
     pub fn solid(mesh: MeshId, color: [f32; 4]) -> Self {
         Self {
             mesh,
@@ -243,6 +268,8 @@ impl MeshInstance {
             scalar_mode: false,
             scalar_range: [0.0, 1.0],
             colormap: Colormap::default(),
+            offset_mm: [0.0; 3],
+            highlight: 0.0,
         }
     }
 }
@@ -400,6 +427,29 @@ mod tests {
             ],
             vec![0, 1, 2, 0, 2, 3],
         )
+    }
+
+    #[test]
+    fn pick_with_offset_follows_displaced_mesh() {
+        let (p, i) = quad();
+        let down = Vec3::new(0.0, 0.0, -1.0);
+        // Diangkat 10 mm ke +Z dan digeser 5 mm ke +X.
+        let off = [5.0, 0.0, 10.0];
+        let ray_new = Ray {
+            origin: Vec3::new(5.7, 0.2, 20.0),
+            dir: down,
+        };
+        let hit = pick_offset_cpu(&ray_new, off, &p, &i).expect("kena mesh yang digeser");
+        assert!((hit.point_mm - Vec3::new(5.7, 0.2, 10.0)).length() < 1e-4);
+        assert!((hit.t - 10.0).abs() < 1e-4);
+        assert_eq!(hit.tri_index, 0);
+        // Posisi lama kosong setelah digeser; tanpa geseran tetap kena.
+        let ray_old = Ray {
+            origin: Vec3::new(0.7, 0.2, 20.0),
+            dir: down,
+        };
+        assert!(pick_offset_cpu(&ray_old, off, &p, &i).is_none());
+        assert!(pick_offset_cpu(&ray_old, [0.0; 3], &p, &i).is_some());
     }
 
     #[test]

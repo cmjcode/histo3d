@@ -552,6 +552,8 @@ impl Session {
         TrackParams {
             min_iou: min_iou.unwrap_or(self.project.recon.track_min_iou),
             max_gap_um: self.project.recon.max_gap_um,
+            split: self.project.recon.track_split,
+            max_skip_slices: self.project.recon.track_max_skip,
         }
     }
 
@@ -809,10 +811,8 @@ impl Session {
                     .iter()
                     .find(|l| l.id == m.label)
                     .map_or_else(|| m.label.to_string(), |l| l.name.clone());
-                let track = tracks
-                    .as_ref()
-                    .and_then(|t| t.set(m.label))
-                    .and_then(|s| s.track(id));
+                let set = tracks.as_ref().and_then(|t| t.set(m.label));
+                let track = set.and_then(|s| s.track(id));
                 report.objects.push(ObjectReport {
                     label: m.label,
                     name: m.display_name(&name),
@@ -824,6 +824,8 @@ impl Session {
                     n_components: m.connected_components(),
                     n_slices: track.map(|t| t.members.len()),
                     z_range_um: track.and_then(|t| t.z_range_um()),
+                    track_params_hash: set.map(|s| s.params_hash),
+                    n_bridged_slices: set.map(|s| s.skipped_slides(id).len()),
                 });
             }
         }

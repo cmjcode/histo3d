@@ -15,6 +15,11 @@ const SHOT_MIN_FRAMES: u64 = 20;
 /// Frame maksimum menunggu tile/job sebelum tetap mengambil tangkapan layar.
 const SHOT_MAX_FRAMES: u64 = 900;
 
+/// Ikon aplikasi 256 px berlatar transparan (dibuat dari `icon.jpg`). Dipakai
+/// sebagai ikon jendela/taskbar dan logo dialog Tentang. Ikon bundel macOS
+/// (`apple/macos/AppIcon.icns`) dan iPad (`apple/ios/icons`) terpisah.
+pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/histo3d-256.png");
+
 /// Opsi eframe: renderer wgpu dengan depth buffer 32-bit (format depth
 /// pipeline `SceneRenderer` harus sama; lihat [`crate::gpu::DEPTH_FORMAT`]).
 pub fn native_options() -> eframe::NativeOptions {
@@ -23,6 +28,10 @@ pub fn native_options() -> eframe::NativeOptions {
         viewport = viewport.with_maximized(true);
     } else {
         viewport = viewport.with_inner_size([1440.0, 900.0]);
+        match eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
+            Ok(icon) => viewport = viewport.with_icon(icon),
+            Err(e) => log::warn!("ikon jendela gagal didekode: {e}"),
+        }
     }
     eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,

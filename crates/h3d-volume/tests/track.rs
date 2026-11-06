@@ -5,8 +5,8 @@ use h3d_core::{Budgets, NoProgress, ReconConfig, SlideId, SlideTransform};
 use h3d_volume::phantom3d::LABEL_TUMOR;
 use h3d_volume::{
     generate_phantom, plan_grid, reconstruct_label_objects, track_label, ArrayLabelSampler,
-    GridPlan, Phantom, PhantomShape, PhantomSpec, SliceInput, TrackEvent, TrackParams, TrackSet,
-    Warning,
+    GridPlan, Phantom, PhantomShape, PhantomSpec, SliceInput, SplitParams, TrackEvent, TrackParams,
+    TrackSet, Warning,
 };
 
 static IDENTITY: SlideTransform = SlideTransform::Identity;
@@ -226,4 +226,147 @@ fn per_object_reconstruction_gives_one_closed_mesh_per_track() {
     assert_eq!(whole.connected_components(), 2);
     let vw = whole.signed_volume_um3();
     assert!(((sum - vw) / vw).abs() < 0.01, "{sum} vs {vw}");
+}
+
+/// Dua bola yang saling tumpang 200 µm sepanjang X (leher 600 µm vs
+/// diameter 1000 µm): satu komponen terhubung di irisan tengah.
+fn touching_spheres() -> PhantomSpec {
+    PhantomSpec {
+        foci: Some((2, -200.0)),
+        ..two_spheres()
+    }
+}
+
+#[test]
+fn touching_spheres_are_one_object_without_split_and_two_with_split() {
+    let p = generate_phantom(&touching_spheres());
+    // Tanpa pemisah: irisan tengah satu komponen → ada Merge/Split.
+    let plain = track(
+        &p,
+        &TrackParams {
+            max_skip_slices: 0,
+            ..Default::default()
+        },
+    );
+    assert!(plain.event_count() > 0, "{plain:?}");
+    assert!(plain.tracks.len() != 2);
+    // Dengan pemisah: dua objek bersih tanpa peristiwa.
+    let split = TrackParams {
+        split: SplitParams {
+            enabled: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let set = track(&p, &split);
+    assert_eq!(set.tracks.len(), 2, "{set:?}");
+    assert_eq!(set.event_count(), 0);
+    assert_eq!(set.bridged, 0);
+    assert_ne!(set.params_hash, plain.params_hash);
+    let n_slices = p
+        .slices
+        .iter()
+        .filter(|s| s.masks.iter().any(|(l, _)| *l == LABEL_TUMOR))
+        .count();
+    for t in &set.tracks {
+        assert_eq!(t.members.len(), n_slices, "objek {}", t.instance_id);
+    }
+    // Pembelahan hampir simetris: luas kedua objek di irisan tengah mirip.
+    let mid = n_slices / 2;
+    let a = set.tracks[0].members[mid].area_um2;
+    let b = set.tracks[1].members[mid].area_um2;
+    assert!((a - b).abs() / a.max(b) < 0.05, "{a} vs {b}");
+    // Rekonstruksi per objek: dua mesh tertutup, masing-masing satu komponen.
+    let smp = samplers(&p);
+    let inp = inputs(&p, &smp);
+    let cfg = ReconConfig::default();
+    let plan = plan(&inp, &cfg);
+    let (set2, meshes) =
+        reconstruct_label_objects(&plan, &inp, LABEL_TUMOR, &cfg, &split, &NoProgress)
+            .expect("recon");
+    assert_eq!(set2, set);
+    assert_eq!(meshes.len(), 2);
+    for m in &meshes {
+        assert!(m.is_closed());
+        assert_eq!(m.connected_components(), 1);
+        assert!(m.signed_volume_um3() > 0.0);
+    }
+}
+
+#[test]
+fn object_missing_in_one_slice_is_bridged_and_stays_one_closed_mesh() {
+    // Dua bola terpisah; di irisan tengah bola kiri dihapus (irisan tetap
+    // berlabel karena bola kanan masih ada).
+    let mut p = generate_phantom(&two_spheres());
+    let n = p.slices.len();
+    let mid = n / 2;
+    let cx = p.spec.size_um[0] / 2.0;
+    let s = p.spec.s_xy;
+    let mut hole_slide = None;
+    for (i, sl) in p.slices.iter_mut().enumerate() {
+        if i != mid {
+            continue;
+        }
+        for (l, m) in sl.masks.iter_mut() {
+            if *l != LABEL_TUMOR {
+                continue;
+            }
+            for ((_, x), v) in m.indexed_iter_mut() {
+                if (x as f64 + 0.5) * s < cx {
+                    *v = 0;
+                }
+            }
+            hole_slide = Some(SlideId(i as u32));
+        }
+    }
+    let hole = hole_slide.expect("irisan tengah berlabel");
+    let smp = samplers(&p);
+    let inp = inputs(&p, &smp);
+    let cfg = ReconConfig::default();
+    let plan = plan(&inp, &cfg);
+    // Tanpa lompatan: objek kiri terbelah dua.
+    let strict = TrackParams {
+        max_skip_slices: 0,
+        ..Default::default()
+    };
+    let set0 = track_label(&plan, &inp, LABEL_TUMOR, &strict, &NoProgress).expect("track");
+    assert_eq!(set0.tracks.len(), 3, "{set0:?}");
+    assert_eq!(set0.bridged, 0);
+    // Dengan lompatan satu irisan: tetap dua objek.
+    let params = TrackParams::default();
+    assert_eq!(params.max_skip_slices, 1);
+    let (set, meshes) =
+        reconstruct_label_objects(&plan, &inp, LABEL_TUMOR, &cfg, &params, &NoProgress)
+            .expect("recon");
+    assert_eq!(set.tracks.len(), 2, "{set:?}");
+    assert_eq!(set.bridged, 1);
+    assert_eq!(set.event_count(), 0);
+    assert_ne!(set.params_hash, set0.params_hash);
+    let n_labelled = p
+        .slices
+        .iter()
+        .filter(|s| s.masks.iter().any(|(l, _)| *l == LABEL_TUMOR))
+        .count();
+    let left = &set.tracks[0];
+    assert_eq!(left.members.len(), n_labelled - 1);
+    assert!(left.members.iter().all(|m| m.slide != hole));
+    assert!(matches!(
+        left.events.as_slice(),
+        [TrackEvent::Bridged { skipped, .. }] if skipped == &vec![hole]
+    ));
+    assert_eq!(set.skipped_slides(1), vec![hole]);
+    assert!(set.skipped_slides(2).is_empty());
+    assert_eq!(meshes.len(), 2);
+    let truth_each = p.truth.volume_um3 / 2.0;
+    for (m, t) in meshes.iter().zip(&set.tracks) {
+        assert!(m.is_closed(), "objek {} tidak tertutup", t.instance_id);
+        assert_eq!(m.connected_components(), 1, "objek {}", t.instance_id);
+        let v = m.signed_volume_um3();
+        let e = (v - truth_each).abs() / truth_each;
+        assert!(e < 0.1, "objek {}: galat volume {e}", t.instance_id);
+    }
+    // Berkas JSON deterministik dan bisa dibaca ulang dengan varian baru.
+    let j = serde_json::to_string(&set).expect("json");
+    let back: TrackSet = serde_json::from_str(&j).expect("ulang");
+    assert_eq!(back, set);
 }

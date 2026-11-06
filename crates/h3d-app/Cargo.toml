@@ -64,5 +64,9 @@ objc2-ui-kit = { version = "0.3", features = [
 ] }
 raw-window-handle = "0.6"
 
+# Ikon .exe Windows; di target lain embed-resource tidak melakukan apa-apa.
+[build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 tempfile = { workspace = true }

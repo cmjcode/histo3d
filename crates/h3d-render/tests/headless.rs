@@ -180,6 +180,14 @@ fn headless_renders_2d_and_3d_without_validation_errors() {
     inst_scalar.scalar_range = [0.0, 1.0];
     let mut inst_alpha = MeshInstance::solid(MeshId(2), [0.2, 0.8, 0.2, 1.0]);
     inst_alpha.opacity = 0.4;
+    // Objek "diangkat" dan tersorot (tampilan saja).
+    let mut inst_lifted = MeshInstance::solid(MeshId(1), [0.3, 0.3, 0.9, 1.0]);
+    inst_lifted.offset_mm = [0.0, 0.0, 1.5];
+    inst_lifted.highlight = 1.0;
+    let mut inst_lifted_alpha = inst_lifted;
+    inst_lifted_alpha.mesh = MeshId(2);
+    inst_lifted_alpha.opacity = 0.5;
+    inst_lifted_alpha.highlight = 0.5;
     let mut cam = OrbitCamera::default();
     cam.fit_bounds(
         glam::Vec3::splat(-2.0),
@@ -193,6 +201,8 @@ fn headless_renders_2d_and_3d_without_validation_errors() {
         meshes: vec![
             inst_scalar,
             inst_alpha,
+            inst_lifted,
+            inst_lifted_alpha,
             MeshInstance::solid(MeshId(99), [1.0; 4]),
         ],
         slices: vec![SliceDraw {
@@ -279,6 +289,7 @@ fn headless_renders_2d_and_3d_without_validation_errors() {
                     affine: Affine2::translation(50.0, -20.0),
                     tiles: vec![tile_b],
                     opacity: 1.0,
+                    mask: None,
                 },
                 mode,
             }),
@@ -308,6 +319,22 @@ fn headless_renders_2d_and_3d_without_validation_errors() {
         .get::<SceneRenderer>()
         .expect("renderer tersimpan");
     assert_eq!(renderer.mesh_ids(), vec![MeshId(1), MeshId(2)]);
+    // Picking mesh yang "diangkat": ray di atas posisi geseran kena, di
+    // posisi lama meleset; titik kena dilaporkan di ruang yang terlihat.
+    {
+        let m = renderer.mesh(MeshId(1)).expect("mesh 1");
+        let c = m.bounds_center_mm();
+        let off = [0.0, 0.0, 1.5];
+        let down = glam::Vec3::new(0.0, 0.0, -1.0);
+        let ray_new = h3d_render::Ray {
+            origin: glam::Vec3::new(c[0], c[1], c[2] + off[2] + 10.0),
+            dir: down,
+        };
+        let hit = m.pick_offset(&ray_new, off).expect("kena mesh terangkat");
+        let hit_old = m.pick(&ray_new).expect("kena mesh asli di bawahnya");
+        assert!((hit.point_mm.z - (hit_old.point_mm.z + off[2])).abs() < 1e-4);
+        assert!(hit.t < hit_old.t);
+    }
     assert!(renderer.has_tile(&key(0, 0)) && renderer.has_label_tile(&key(0, 0)));
 
     let err = block_on(scope.pop(), Some(&device));

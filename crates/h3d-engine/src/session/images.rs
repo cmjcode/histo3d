@@ -990,7 +990,9 @@ impl Session {
     }
 
     fn thumb_path(&self, slide: SlideId, fp: u64, max_side: u32, tissue: bool) -> PathBuf {
-        let suffix = if tissue { "-tissue" } else { "" };
+        // "-tissue2": masker v2 (rongga bermulut sempit dipertahankan); cache
+        // masker lama dengan akhiran "-tissue" diabaikan dan dibangun ulang.
+        let suffix = if tissue { "-tissue2" } else { "" };
         self.bundle.cache_thumbs_dir().join(format!(
             "{}-{:016x}-{}{suffix}.png",
             slide_stem(slide),

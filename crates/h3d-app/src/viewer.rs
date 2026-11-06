@@ -6,14 +6,22 @@
 //! geser; iPad — Pencil menggambar, jari menggeser/zoom (cubit), geser dua
 //! jari mendatar = pindah irisan.
 
+use std::collections::HashSet;
+
 use egui::{Rect, Response, Sense, Ui};
 use h3d_core::{Affine2, SlideId};
 use h3d_engine::{LabelStore, Session};
-use h3d_render::{Camera2D, TileLayerDraw};
+use h3d_render::{Camera2D, SliceId, TileLayerDraw, TileMask};
 
 use crate::geom::{NavDir, SwipeDetector};
 use crate::gpu::{Gpu, GpuSink};
+use crate::state::AppState;
+use crate::thumbs::{ThumbKey, ThumbWorker};
 use crate::tiles::{TileSink, TileStreamer, ViewW};
+
+/// Sisi terpanjang tekstur masker jaringan lapisan tile 2D (piksel).
+/// Sama dengan thumbnail 3D agar berkas cache `*-tissue.png` dipakai bersama.
+pub const MASK_TEX_SIDE: u32 = 512;
 
 /// Jenis penunjuk yang sedang aktif.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +253,7 @@ pub fn slide_layer(
         affine: *t,
         tiles: draws,
         opacity: 1.0,
+        mask: None,
     }
 }
 
@@ -269,6 +278,111 @@ pub fn label_layer(
             })
             .unwrap_or_default(),
         None => tiles.label_tiles(None, slide, store, t, view),
+    }
+}
+
+/// Masker jaringan irisan untuk lapisan tile 2D (latar kaca/putih
+/// transparan, seperti "Sembunyikan latar" di 3D). Masker dibuat dari
+/// thumbnail jaringan di thread latar lalu diunggah sekali ke GPU; sebelum
+/// siap (atau tanpa mpp/GPU, atau gagal) mengembalikan `None` dan lapisan
+/// digambar apa adanya. Kegagalan dicatat di `failed` agar tidak diulang
+/// tiap frame.
+pub fn tissue_mask(
+    worker: &mut ThumbWorker,
+    failed: &mut HashSet<SlideId>,
+    session: &Session,
+    gpu: Option<&Gpu>,
+    ctx: &egui::Context,
+    slide: SlideId,
+) -> Option<TileMask> {
+    let entry = session.slide(slide).ok()?;
+    if !entry.has_valid_mpp() {
+        return None;
+    }
+    let gpu = gpu?;
+    let mask = TileMask {
+        texture: SliceId(slide.0),
+        size_um: entry.size_um(),
+    };
+    if gpu.with(|r, _, _| r.has_tile_mask(mask.texture)) == Some(true) {
+        return Some(mask);
+    }
+    if failed.contains(&slide) {
+        return None;
+    }
+    let key = ThumbKey {
+        slide,
+        side: MASK_TEX_SIDE,
+        tissue: true,
+    };
+    match worker.request(session, key) {
+        None => {
+            ctx.request_repaint();
+            None
+        }
+        Some(Err(e)) => {
+            log::warn!("masker jaringan irisan {slide} gagal: {e}");
+            failed.insert(slide);
+            None
+        }
+        Some(Ok(img)) => {
+            let res = gpu.with(|r, device, queue| {
+                r.upload_tile_mask(
+                    device,
+                    queue,
+                    mask.texture,
+                    img.width(),
+                    img.height(),
+                    img.as_raw(),
+                )
+            });
+            match res {
+                Some(Ok(())) => Some(mask),
+                Some(Err(e)) => {
+                    log::warn!("unggah masker jaringan irisan {slide} gagal: {e}");
+                    failed.insert(slide);
+                    None
+                }
+                None => None,
+            }
+        }
+    }
+}
+
+/// Masker jaringan irisan bila "Sembunyikan latar" aktif (pengaturan yang
+/// sama dengan tampilan 3D, `ReconState::hide_background`).
+pub fn tissue_mask_if_enabled(
+    app: &mut AppState,
+    session: &Session,
+    gpu: Option<&Gpu>,
+    ctx: &egui::Context,
+    slide: SlideId,
+) -> Option<TileMask> {
+    if !app.recon.hide_background {
+        return None;
+    }
+    tissue_mask(
+        &mut app.thumb_worker,
+        &mut app.tissue_mask_failed,
+        session,
+        gpu,
+        ctx,
+        slide,
+    )
+}
+
+/// Kotak centang "Sembunyikan latar" bersama 2D/3D. Saat berubah, tekstur
+/// irisan 3D diunggah ulang dengan/tanpa alfa masker.
+pub fn hide_background_checkbox(app: &mut AppState, ui: &mut Ui) {
+    if ui
+        .checkbox(
+            &mut app.recon.hide_background,
+            h3d_i18n::t!("recon-hide-background"),
+        )
+        .on_hover_text(h3d_i18n::t!("recon-hide-background-hint"))
+        .changed()
+    {
+        app.recon.uploaded_slices.clear();
     }
 }
 

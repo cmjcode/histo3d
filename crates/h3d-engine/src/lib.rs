@@ -41,8 +41,11 @@ pub use h3d_io::report::fmt_uncertainty;
 pub use h3d_io::strings::{direction_text, warning_text};
 pub use h3d_io::{to_stable_json_of, ClinicalScope, EmbedMode, Report, ReportFigure};
 pub use h3d_io::{ObjectReport, TracksFile};
-pub use h3d_register::{OrderSuggestion, QcThresholds, RegMetric, RegModel, RegOptions};
+pub use h3d_register::{
+    OrderSuggestion, QcThresholds, QcViolations, RegMetric, RegModel, RegOptions,
+};
 pub use h3d_segment::{
     ClassicParams, ImportSummary, LabelStore, ModelSpec, PaintMode, Proposal, RasterImportSummary,
+    StainChannel,
 };
 pub use h3d_volume::{LabelMesh, ObjectTrack, SpatialAnalysis, TrackEvent, TrackSet, VoxelMask};

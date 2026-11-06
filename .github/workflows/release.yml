@@ -94,6 +94,7 @@ jobs:
             archive="$name.zip"
           else
             cp target/release/histo3d target/release/h3d target/release/histo3d-updater "$stage/"
+            cp crates/h3d-app/assets/histo3d-512.png "$stage/histo3d.png"
             chmod +x "$stage/histo3d" "$stage/h3d" "$stage/histo3d-updater"
             printf '%s\n' \
               '[Desktop Entry]' \
@@ -102,6 +103,7 @@ jobs:
               'Name=HISTO3D' \
               'Comment=Rekonstruksi 3D tumor dari irisan histologi serial (hanya untuk riset, bukan untuk diagnosis)' \
               'Exec=histo3d' \
+              'Icon=histo3d' \
               'Terminal=false' \
               'Categories=Science;MedicalSoftware;Graphics;' \
               'StartupWMClass=HISTO3D' \

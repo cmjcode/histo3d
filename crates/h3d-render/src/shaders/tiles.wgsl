@@ -15,11 +15,16 @@ struct Layer {
     viewport: vec4<f32>,
     // (ukuran kotak papan catur dalam piksel fisik, viewport_x px, viewport_y px, 0)
     params: vec4<f32>,
+    // Masker jaringan: (lebar irisan µm, tinggi irisan µm, aktif 0/1, 0).
+    // uv masker = p / size; alfa tile dikalikan alfa masker.
+    mask: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> layer: Layer;
 @group(1) @binding(0) var tile_tex: texture_2d<f32>;
 @group(1) @binding(1) var tile_samp: sampler;
+@group(2) @binding(0) var mask_tex: texture_2d<f32>;
+@group(2) @binding(1) var mask_samp: sampler;
 
 struct Inst {
     // (x0, y0, x1, y1) µm ruang U
@@ -31,6 +36,8 @@ struct Inst {
 struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    // uv pada tekstur masker (0..1 di seluruh irisan).
+    @location(1) mask_uv: vec2<f32>,
 };
 
 fn corner(i: u32) -> vec2<f32> {
@@ -61,6 +68,7 @@ fn vs_tile(@builtin(vertex_index) vi: u32, inst: Inst) -> VOut {
     let p = mix(inst.rect.xy, inst.rect.zw, c);
     out.clip = layer_to_ndc(p);
     out.uv = mix(inst.uv.xy, inst.uv.zw, c);
+    out.mask_uv = p / max(layer.mask.xy, vec2<f32>(1e-6, 1e-6));
     return out;
 }
 
@@ -71,6 +79,7 @@ fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> VOut {
     var out: VOut;
     out.clip = vec4<f32>(c * 2.0 - 1.0, 0.0, 1.0);
     out.uv = c;
+    out.mask_uv = c;
     return out;
 }
 
@@ -89,7 +98,12 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
             discard;
         }
     }
-    let c = textureSample(tile_tex, tile_samp, in.uv);
+    var c = textureSample(tile_tex, tile_samp, in.uv);
+    if layer.mask.z > 0.5 {
+        // Di luar jaringan alfa masker 0 → tile transparan (latar kaca
+        // tidak digambar), tepi masker sudah dihaluskan saat pembuatan.
+        c.a = c.a * textureSample(mask_tex, mask_samp, in.mask_uv).a;
+    }
     if mode == 3u || mode == 4u {
         // Kegelapan (1 − luminansi): jaringan terang, latar kaca gelap.
         let lum = dot(c.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));

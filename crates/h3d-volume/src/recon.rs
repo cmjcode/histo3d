@@ -24,7 +24,7 @@ use crate::error::VolError;
 use crate::grid::StackGrid;
 use crate::measure::Warning;
 use crate::mesh::LabelMesh;
-use crate::track::{component_masks, instance_masks, link_components, TrackParams, TrackSet};
+use crate::track::{component_masks_split, instance_masks, link_components, TrackParams, TrackSet};
 
 /// Sumber label raster satu irisan, dibaca di ruang U (µm). Abstraksi atas
 /// `LabelStore` milik `h3d-segment` agar crate ini tidak bergantung padanya.
@@ -425,11 +425,25 @@ pub fn layer_sources(
     max_gap_um: f64,
     cap_um: f64,
 ) -> Vec<LayerSource> {
+    let present: Vec<bool> = inputs.iter().map(|s| s.has_label(label)).collect();
+    layer_sources_for(grid, inputs, &present, max_gap_um, cap_um)
+}
+
+/// Seperti [`layer_sources`], tetapi irisan yang dianggap beranotasi
+/// ditentukan `present[i]` (mis. hanya irisan tempat satu objek hadir;
+/// irisan yang dilompati track menjadi lapis interpolasi).
+pub fn layer_sources_for(
+    grid: &StackGrid,
+    inputs: &[SliceInput<'_>],
+    present: &[bool],
+    max_gap_um: f64,
+    cap_um: f64,
+) -> Vec<LayerSource> {
     // Irisan yang memuat label, terurut z (seri → indeks terkecil).
     let mut ann: Vec<(f64, usize)> = inputs
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.has_label(label))
+        .filter(|(i, _)| present.get(*i).copied().unwrap_or(false))
         .map(|(i, s)| (s.z_um, i))
         .collect();
     ann.sort_by(|p, q| p.0.total_cmp(&q.0).then(p.1.cmp(&q.1)));
@@ -661,9 +675,11 @@ pub fn build_label_stack(
 }
 
 /// Seperti [`build_label_stack`], tetapi masker per irisan sudah tersedia
-/// (mis. masker satu objek dari [`crate::track`]). `masks[i]` harus
-/// `Some` tepat untuk irisan yang memuat `label` (lihat
-/// [`SliceInput::has_label`]) dan berukuran `size.y × size.x` kisi.
+/// (mis. masker satu objek dari [`crate::track`]). `masks[i] = Some`
+/// menandai irisan yang dianggap beranotasi untuk tumpukan ini (biasanya
+/// tepat irisan yang memuat `label`, lihat [`SliceInput::has_label`];
+/// irisan berlabel yang dilompati satu objek diberi `None` sehingga
+/// diinterpolasi) dan harus berukuran `size.y × size.x` kisi.
 pub fn build_label_stack_from_masks(
     plan: &GridPlan,
     inputs: &[SliceInput<'_>],
@@ -700,10 +716,11 @@ pub fn build_label_stack_from_masks(
         .iter()
         .map(|s| s.label_flag(label).map(|i| (s.id, i)))
         .collect();
-    let layers = layer_sources(
+    let present: Vec<bool> = masks.iter().map(|m| m.is_some()).collect();
+    let layers = layer_sources_for(
         &grid,
         inputs,
-        label,
+        &present,
         plan.max_gap_um,
         plan.median_spacing_um / 2.0,
     );
@@ -935,9 +952,11 @@ pub fn reconstruct_label(
 /// Rekonstruksi per objek (histo3d.md 8.6.2 + penautan antar irisan):
 /// komponen `label` ditautkan antar irisan ([`crate::track::track_label`]),
 /// lalu tiap objek direkonstruksi lewat jalur SDF/surface-nets yang sama
-/// dengan [`reconstruct_label`]. Mesh diurutkan menurut `instance_id` dan
-/// membawa `instance_id = Some(id)`. Objek tanpa segitiga (terlalu kecil
-/// untuk kisi) tidak dikembalikan.
+/// dengan [`reconstruct_label`]. Irisan berlabel yang dilompati sebuah
+/// objek ([`crate::track::TrackEvent::Bridged`]) diinterpolasi untuk
+/// objek itu, bukan dianggap kosong. Mesh diurutkan menurut `instance_id`
+/// dan membawa `instance_id = Some(id)`. Objek tanpa segitiga (terlalu
+/// kecil untuk kisi) tidak dikembalikan.
 pub fn reconstruct_label_objects(
     plan: &GridPlan,
     inputs: &[SliceInput<'_>],
@@ -946,8 +965,9 @@ pub fn reconstruct_label_objects(
     params: &TrackParams,
     progress: &dyn Progress,
 ) -> Result<(TrackSet, Vec<LabelMesh>), VolError> {
+    params.validate()?;
     let sub = h3d_core::SubProgress::new(progress, 0.0, 0.2);
-    let comps = component_masks(plan, inputs, label, &sub)?;
+    let comps = component_masks_split(plan, inputs, label, &params.split, &sub)?;
     let set = link_components(plan, label, &comps, params);
     let inst = instance_masks(&set, &comps);
     let n = set.tracks.len().max(1) as f32;
@@ -960,10 +980,16 @@ pub fn reconstruct_label_objects(
         let hi = 0.2 + 0.8 * (k + 1) as f32 / n;
         let sub = h3d_core::SubProgress::new(progress, lo, hi);
         // Masker biner objek ini: `Some` untuk tiap irisan yang memuat label
-        // (kosong bila objek tidak hadir di sana), `None` bila tidak.
+        // (kosong bila objek tidak hadir di sana), `None` bila tidak memuat
+        // label atau bila irisan itu dilompati objek ini (diinterpolasi).
+        let skipped = set.skipped_slides(t.instance_id);
         let masks: Vec<Option<Array2<u8>>> = inst
             .iter()
-            .map(|m| {
+            .zip(inputs)
+            .map(|(m, s)| {
+                if skipped.contains(&s.id) {
+                    return None;
+                }
                 m.as_ref()
                     .map(|ids| ids.mapv(|v| u8::from(v == t.instance_id)))
             })

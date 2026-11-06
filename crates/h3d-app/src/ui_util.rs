@@ -94,6 +94,51 @@ pub fn opt_number(
 }
 
 /// Pesan galat untuk pengguna dalam bahasa aktif.
+/// Rentang slider jarak irisan (µm, logaritmik): tebal potongan mikrotom
+/// (~1 µm) sampai jarak kasar antar blok (10 mm). Nilai proyek di luar
+/// rentang tetap ditampilkan (`SliderClamping::Edits`).
+pub const SPACING_SLIDER_RANGE_UM: std::ops::RangeInclusive<f64> = 1.0..=10_000.0;
+
+/// Slider jarak antar irisan. Saat digeser, nilai hanya masuk `preview`
+/// (kanvas 3D memakainya untuk menggambar `z_um` bawaan); `set_spacing`
+/// dipanggil sekali saat slider dilepas atau angka diketik, sehingga satu
+/// gesekan = satu entri undo. `z_um` isian tangan tidak pernah disentuh.
+pub fn spacing_slider(
+    ui: &mut Ui,
+    session: &mut Session,
+    toasts: &mut Toasts,
+    preview: &mut Option<f64>,
+) -> Response {
+    let current = session.project().recon.default_spacing_um;
+    let mut value = preview.unwrap_or(current);
+    let r = ui
+        .add(
+            egui::Slider::new(&mut value, SPACING_SLIDER_RANGE_UM)
+                .logarithmic(true)
+                .clamping(egui::SliderClamping::Edits)
+                .max_decimals(1)
+                .suffix(format!(" {}", t!("unit-um"))),
+        )
+        .on_hover_text(t!("slides-spacing-hint"));
+    if r.changed() {
+        *preview = Some(value);
+    }
+    // Lepas geser, atau angka diketik/tombol panah (tanpa geser) → komit.
+    let commit = r.drag_stopped() || (r.changed() && !r.dragged());
+    if commit {
+        if let Some(v) = preview.take() {
+            if (v - current).abs() > 1e-9 {
+                if let Err(e) = session.set_spacing(v) {
+                    toasts.engine_error(&e);
+                }
+            }
+        }
+    } else if !r.dragged() {
+        *preview = None;
+    }
+    r
+}
+
 pub fn error_text(e: &EngineError) -> String {
     match e {
         EngineError::MppMissing { file } => t!("err-mpp-missing", name = file.clone()),

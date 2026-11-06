@@ -9,6 +9,19 @@
     <key>CFBundleVersion</key><string>__BUILD__</string>
     <key>CFBundleShortVersionString</key><string>__VERSION__</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <!-- Ikon iPad (berkas lepas dari apple/ios/icons, disalin build_ipad.sh). -->
+    <key>CFBundleIcons~ipad</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>AppIcon76x76</string>
+                <string>AppIcon83.5x83.5</string>
+            </array>
+            <key>CFBundleIconName</key><string>AppIcon</string>
+        </dict>
+    </dict>
     <key>MinimumOSVersion</key><string>16.0</string>
     <key>CFBundleSupportedPlatforms</key><array><string>__PLATFORM__</string></array>
     <key>UIDeviceFamily</key><array><integer>2</integer></array>

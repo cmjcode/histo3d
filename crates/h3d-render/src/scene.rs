@@ -31,7 +31,7 @@ use crate::slices3d::{
     SliceTexture,
 };
 use crate::tiles::{
-    tile_instance_layout, GpuTileCache, TileDraw, TileInstance, TileKey, TileLayerDraw,
+    tile_instance_layout, GpuTileCache, TileDraw, TileInstance, TileKey, TileLayerDraw, TileMask,
     TileTextureKind, UploadStatus,
 };
 use crate::wgpu;
@@ -186,6 +186,8 @@ struct LayerUniform {
     view: [f32; 4],
     viewport: [f32; 4],
     params: [f32; 4],
+    /// `(lebar irisan µm, tinggi irisan µm, masker aktif 0/1, 0)`.
+    mask: [f32; 4],
 }
 
 #[repr(C)]
@@ -206,6 +208,8 @@ struct Globals3D {
 struct MeshParamsUniform {
     color: [f32; 4],
     params: [f32; 4],
+    /// `xyz` = geseran tampilan (mm, ruang R, setelah renggang Z), `w` = sorot 0..1.
+    offset: [f32; 4],
 }
 
 #[repr(C)]
@@ -275,6 +279,17 @@ pub fn sanitize_z_scale(z_scale: f32) -> f32 {
     }
 }
 
+/// Parameter masker untuk uniform: nonaktif bila `None` atau ukuran tidak
+/// sah (tidak finit / tidak positif).
+fn mask_params(mask: Option<&TileMask>) -> [f32; 4] {
+    match mask {
+        Some(m) if m.size_um.iter().all(|v| v.is_finite() && *v > 0.0) => {
+            [m.size_um[0] as f32, m.size_um[1] as f32, 1.0, 0.0]
+        }
+        _ => [1.0, 1.0, 0.0, 0.0],
+    }
+}
+
 fn layer_uniform(
     affine: &Affine2,
     view: &View2D,
@@ -282,6 +297,7 @@ fn layer_uniform(
     mode: u32,
     checker_px: f32,
     ppp: f32,
+    mask: Option<&TileMask>,
 ) -> LayerUniform {
     let [a, b, tx, c, d, ty] = affine.m;
     LayerUniform {
@@ -305,6 +321,7 @@ fn layer_uniform(
             view.viewport_min_pt[1] * ppp,
             0.0,
         ],
+        mask: mask_params(mask),
     }
 }
 
@@ -382,6 +399,8 @@ struct LayerCmd {
     ubo: usize,
     /// `(kunci tile, indeks instance)`.
     tiles: Vec<(TileKey, u32)>,
+    /// Tekstur masker jaringan (grup 2) bila ada di `tile_masks`.
+    mask: Option<SliceId>,
 }
 
 struct MeshCmd {
@@ -436,6 +455,7 @@ struct PlannedLayer<'a> {
     kind: LayerKind,
     uniform: LayerUniform,
     tiles: &'a [TileDraw],
+    mask: Option<SliceId>,
 }
 
 // ---------- renderer ----------
@@ -471,6 +491,11 @@ pub struct SceneRenderer {
     colormaps: HashMap<Colormap, LutTexture>,
     meshes: HashMap<MeshId, GpuMesh>,
     slices: HashMap<SliceId, SliceTexture>,
+    /// Masker jaringan lapisan tile 2D (alfa), per irisan.
+    tile_masks: HashMap<SliceId, SliceTexture>,
+    /// Masker 1×1 opak: dipasang di grup 2 bila lapisan tanpa masker
+    /// (shader tetap mengabaikannya lewat `Layer.mask.z`).
+    mask_none: SliceTexture,
 
     slots: Vec<FrameSlot>,
 }
@@ -526,8 +551,11 @@ impl SceneRenderer {
         let lut_layout = lut_bind_group_layout(device);
         let globals_layout =
             uniform_layout(device, "h3d-globals3d", wgpu::ShaderStages::VERTEX_FRAGMENT);
-        let mesh_params_layout =
-            uniform_layout(device, "h3d-mesh-params", wgpu::ShaderStages::FRAGMENT);
+        let mesh_params_layout = uniform_layout(
+            device,
+            "h3d-mesh-params",
+            wgpu::ShaderStages::VERTEX_FRAGMENT,
+        );
         let slice_params_layout = uniform_layout(
             device,
             "h3d-slice-params",
@@ -567,9 +595,24 @@ impl SceneRenderer {
         });
         let tile_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("h3d-tiles"),
-            bind_group_layouts: &[Some(&layer_layout), Some(tiles.layout())],
+            bind_group_layouts: &[
+                Some(&layer_layout),
+                Some(tiles.layout()),
+                Some(&slice_tex_layout),
+            ],
             immediate_size: 0,
         });
+        let mask_none = SliceTexture::upload(
+            device,
+            queue,
+            &slice_tex_layout,
+            &slice_sampler,
+            1,
+            1,
+            &[255, 255, 255, 255],
+            max_texture_dim,
+        )
+        .expect("tekstur 1×1 selalu muat");
         let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("h3d-solid"),
             bind_group_layouts: &[Some(&layer_layout)],
@@ -834,6 +877,8 @@ impl SceneRenderer {
             colormaps: HashMap::new(),
             meshes: HashMap::new(),
             slices: HashMap::new(),
+            tile_masks: HashMap::new(),
+            mask_none,
             slots: Vec::new(),
         }
     }
@@ -956,6 +1001,47 @@ impl SceneRenderer {
         self.slices.contains_key(&id)
     }
 
+    /// Unggah masker jaringan lapisan tile 2D: citra RGBA8 `width × height`
+    /// yang menutupi seluruh irisan, kanal alfa = jaringan (lihat
+    /// [`TileMask`]). Masker lama dengan `id` sama diganti.
+    pub fn upload_tile_mask(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        id: SliceId,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), RenderError> {
+        let tex = SliceTexture::upload(
+            device,
+            queue,
+            &self.slice_tex_layout,
+            &self.slice_sampler,
+            width,
+            height,
+            rgba,
+            self.max_texture_dim,
+        )?;
+        self.tile_masks.insert(id, tex);
+        Ok(())
+    }
+
+    /// Hapus masker jaringan lapisan tile.
+    pub fn remove_tile_mask(&mut self, id: SliceId) -> bool {
+        self.tile_masks.remove(&id).is_some()
+    }
+
+    /// Benar bila masker jaringan `id` ada.
+    pub fn has_tile_mask(&self, id: SliceId) -> bool {
+        self.tile_masks.contains_key(&id)
+    }
+
+    /// Buang semua masker jaringan (peringatan memori / ganti proyek).
+    pub fn clear_tile_masks(&mut self) {
+        self.tile_masks.clear();
+    }
+
     fn ensure_colormap(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, cm: Colormap) {
         if !self.colormaps.contains_key(&cm) {
             let lut = LutTexture::from_colormap(device, queue, &self.lut_layout, cm);
@@ -999,7 +1085,12 @@ impl SceneRenderer {
     ) {
         let view = &scene.view;
         let mut planned: Vec<PlannedLayer<'_>> = Vec::new();
+        // Masker hanya dipakai bila teksturnya sudah diunggah.
+        let mask_of = |l: &TileLayerDraw| -> Option<TileMask> {
+            l.mask.filter(|m| self.tile_masks.contains_key(&m.texture))
+        };
         if let Some(base) = &scene.base {
+            let mask = mask_of(base);
             planned.push(PlannedLayer {
                 kind: LayerKind::Tile,
                 uniform: layer_uniform(
@@ -1009,8 +1100,10 @@ impl SceneRenderer {
                     LayerMode::Normal as u32,
                     0.0,
                     ppp,
+                    mask.as_ref(),
                 ),
                 tiles: &base.tiles,
+                mask: mask.map(|m| m.texture),
             });
         }
         if let Some(cmp) = &scene.compare {
@@ -1028,6 +1121,7 @@ impl SceneRenderer {
                     ),
                 };
                 let affine = layer.map(|l| l.affine).unwrap_or(Affine2::IDENTITY);
+                let mask = layer.and_then(mask_of);
                 planned.push(PlannedLayer {
                     kind,
                     uniform: layer_uniform(
@@ -1037,8 +1131,10 @@ impl SceneRenderer {
                         pass.mode as u32,
                         pass.checker_px,
                         ppp,
+                        mask.as_ref(),
                     ),
                     tiles: layer.map(|l| l.tiles.as_slice()).unwrap_or(&[]),
+                    mask: mask.map(|m| m.texture),
                 });
             }
         }
@@ -1052,8 +1148,10 @@ impl SceneRenderer {
                     u32::from(lbl.outline),
                     0.0,
                     ppp,
+                    None,
                 ),
                 tiles: &lbl.tiles,
+                mask: None,
             });
         }
 
@@ -1099,6 +1197,7 @@ impl SceneRenderer {
                 kind: layer.kind,
                 ubo: li,
                 tiles,
+                mask: layer.mask,
             });
         }
         fs.prepared = Prepared::TwoD(cmds);
@@ -1164,6 +1263,12 @@ impl SceneRenderer {
                     inst.scalar_range[0],
                     inst.scalar_range[1],
                 ],
+                offset: [
+                    inst.offset_mm[0],
+                    inst.offset_mm[1],
+                    inst.offset_mm[2],
+                    inst.highlight.clamp(0.0, 1.0),
+                ],
             };
             queue.write_buffer(&fs.mesh_ubos[n].buf, 0, bytemuck::bytes_of(&u));
             let cmd = MeshCmd {
@@ -1174,7 +1279,16 @@ impl SceneRenderer {
             if opacity >= 1.0 {
                 opaque.push(cmd);
             } else {
-                transparent.push((cmd, mesh.bounds_center_mm()));
+                // Pusat untuk urutan belakang-ke-depan ikut geseran tampilan.
+                let c = mesh.bounds_center_mm();
+                transparent.push((
+                    cmd,
+                    [
+                        c[0] + inst.offset_mm[0],
+                        c[1] + inst.offset_mm[1],
+                        c[2] + inst.offset_mm[2],
+                    ],
+                ));
             }
             n += 1;
         }
@@ -1287,13 +1401,19 @@ impl SceneRenderer {
                 continue;
             };
             rpass.set_vertex_buffer(0, ibuf.slice(..));
+            let mask = cmd
+                .mask
+                .and_then(|id| self.tile_masks.get(&id))
+                .unwrap_or(&self.mask_none);
             let cache = match cmd.kind {
                 LayerKind::Tile => {
                     rpass.set_pipeline(&self.tile_pipeline);
+                    rpass.set_bind_group(2, &mask.bind_group, &[]);
                     &self.tiles
                 }
                 LayerKind::TileAdditive => {
                     rpass.set_pipeline(&self.tile_additive_pipeline);
+                    rpass.set_bind_group(2, &mask.bind_group, &[]);
                     &self.tiles
                 }
                 LayerKind::Overlay => {
@@ -1508,13 +1628,13 @@ mod tests {
 
     #[test]
     fn uniform_sizes_are_16_byte_multiples() {
-        assert_eq!(std::mem::size_of::<LayerUniform>(), 80);
+        assert_eq!(std::mem::size_of::<LayerUniform>(), 96);
         assert_eq!(std::mem::size_of::<Globals3D>(), 160);
         assert_eq!(sanitize_z_scale(f32::NAN), 1.0);
         assert_eq!(sanitize_z_scale(0.0), 1.0);
         assert_eq!(sanitize_z_scale(-3.0), 1.0);
         assert_eq!(sanitize_z_scale(4.0), 4.0);
-        assert_eq!(std::mem::size_of::<MeshParamsUniform>(), 32);
+        assert_eq!(std::mem::size_of::<MeshParamsUniform>(), 48);
         assert_eq!(std::mem::size_of::<SliceParamsUniform>(), 80);
     }
 
@@ -1529,13 +1649,45 @@ mod tests {
             viewport_min_pt: [10.0, 20.0],
             viewport_size_pt: [800.0, 600.0],
         };
-        let u = layer_uniform(&t, &view, 0.5, LayerMode::CheckerOdd as u32, 32.0, 2.0);
+        let u = layer_uniform(
+            &t,
+            &view,
+            0.5,
+            LayerMode::CheckerOdd as u32,
+            32.0,
+            2.0,
+            None,
+        );
         assert_eq!(u.affine0, [1.0, 2.0, 3.0, 0.0]);
         assert_eq!(u.affine1, [4.0, 5.0, 6.0, 0.0]);
         assert_eq!(u.view, [100.0, 200.0, 0.5, 0.0]);
         assert_eq!(u.viewport, [800.0, 600.0, 0.5, 2.0]);
         // Ukuran kotak dan asal viewport dikalikan pixels_per_point.
         assert_eq!(u.params, [64.0, 20.0, 40.0, 0.0]);
+        // Tanpa masker: nonaktif, ukuran aman (bukan nol).
+        assert_eq!(u.mask, [1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn mask_params_rejects_invalid_size() {
+        let ok = TileMask {
+            texture: SliceId(3),
+            size_um: [2000.0, 1500.0],
+        };
+        assert_eq!(mask_params(Some(&ok)), [2000.0, 1500.0, 1.0, 0.0]);
+        for bad in [
+            [0.0, 10.0],
+            [10.0, f64::NAN],
+            [-1.0, 5.0],
+            [f64::INFINITY, 1.0],
+        ] {
+            let m = TileMask {
+                texture: SliceId(3),
+                size_um: bad,
+            };
+            assert_eq!(mask_params(Some(&m))[2], 0.0, "{bad:?}");
+        }
+        assert_eq!(mask_params(None)[2], 0.0);
     }
 
     #[test]

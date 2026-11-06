@@ -23,6 +23,7 @@ pub mod track;
 
 pub use error::VolError;
 pub use grid::StackGrid;
+pub use h3d_core::SplitParams;
 pub use measure::{
     cavalieri, cavalieri_areas, label_area_um2, measure_label, LabelMeasurement, Warning,
 };
@@ -33,8 +34,8 @@ pub use phantom3d::{
 };
 pub use recon::{
     build_label_stack, build_label_stack_from_masks, build_voxel_mask, extract_mesh, layer_sources,
-    plan_grid, reconstruct_label, reconstruct_label_objects, resample_masks, GridPlan,
-    LabelSampler, LabelStack, LayerSource, SdfProvider, SliceInput, SphereSdf, VoxelMask,
+    layer_sources_for, plan_grid, reconstruct_label, reconstruct_label_objects, resample_masks,
+    GridPlan, LabelSampler, LabelStack, LayerSource, SdfProvider, SliceInput, SphereSdf, VoxelMask,
 };
 pub use spatial::{
     analyze, attr_stats, capsule_penetration, contact, depth, distance_uncertainty, foci,
@@ -44,6 +45,6 @@ pub use spatial::{
     MarginStatus, Patch, SizeResult, SpatialAnalysis, Uncertainty,
 };
 pub use track::{
-    component_masks, instance_masks, link_components, track_label, ComponentMask, ObjectTrack,
-    TrackEvent, TrackMember, TrackParams, TrackSet, DEFAULT_MIN_IOU,
+    component_masks, component_masks_split, instance_masks, link_components, track_label,
+    ComponentMask, ObjectTrack, TrackEvent, TrackMember, TrackParams, TrackSet, DEFAULT_MIN_IOU,
 };

@@ -30,6 +30,7 @@ pub mod pyramid;
 pub mod threshold;
 pub mod tissue;
 pub mod warp;
+pub mod watershed;
 
 pub use color::{
     deconvolve, hematoxylin_channel, od_of, od_total, percentile, percentile_stretch, rgb_to_od,
@@ -51,7 +52,7 @@ pub use ihc::{
     NuclearScore,
 };
 pub use metrics::{dice, moments, mutual_information, ncc_masked, Moments};
-pub use morphology::{close, dilate_disc, erode_disc, fill_holes, open};
+pub use morphology::{close, dilate_disc, erode_disc, fill_holes, fill_narrow_mouthed_holes, open};
 pub use nuclei::{
     detect_nuclei, disc_mean, measure_chromogen, nuclei_density_per_mm2, NucleiParams, Nucleus,
 };
@@ -61,3 +62,4 @@ pub use pyramid::{
 pub use threshold::{otsu, otsu_masked};
 pub use tissue::{apply_tissue_alpha, mask_to_alpha, tissue_alpha, tissue_mask, FEATHER_PX};
 pub use warp::{resize_f32, warp_affine_f32, warp_affine_rgba, warp_affine_u8, Interp};
+pub use watershed::split_touching;

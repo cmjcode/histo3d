@@ -474,7 +474,18 @@ impl Session {
                 return Err(EngineError::SlideNotFound(*id));
             }
         }
-        let mut new_order = current.clone();
+        self.recorded("undo-order-suggestion", |sess| {
+            sess.apply_order_inner(s, accept, &current)
+        })
+    }
+
+    fn apply_order_inner(
+        &mut self,
+        s: &OrderSuggestion,
+        accept: &[SlideId],
+        current: &[SlideId],
+    ) -> Result<(), EngineError> {
+        let mut new_order = current.to_vec();
         let slots: Vec<usize> = current
             .iter()
             .enumerate()
@@ -572,7 +583,9 @@ impl Session {
         let moving: Vec<[f64; 2]> = pairs.iter().map(|p| p.0).collect();
         let fixed_pts: Vec<[f64; 2]> = pairs.iter().map(|p| p.1).collect();
         let p = from_landmarks(&moving, &fixed_pts)?;
-        self.set_manual_pairwise(slide, fixed, p, "manual-landmarks")
+        self.recorded("undo-landmarks", |s| {
+            s.set_manual_pairwise(slide, fixed, p, "manual-landmarks")
+        })
     }
 
     /// Koreksi geser/putar manual (8.4.5). `t_new` = `T_i` baru irisan ini,
@@ -592,7 +605,27 @@ impl Session {
             )));
         }
         let inv = nb.transform.affine().try_inverse()?;
-        self.set_manual_pairwise(slide, fixed, inv.compose(&t_new), "manual-transform")
+        self.recorded("undo-manual-transform", |s| {
+            s.set_manual_pairwise(slide, fixed, inv.compose(&t_new), "manual-transform")
+        })
+    }
+
+    /// Terima hasil registrasi yang gagal QC apa adanya (8.4.5): tanda
+    /// `flagged` dihapus tanpa mengubah transformasi, dan catatan ditandai
+    /// `manual` sebagai jejak bahwa pengguna sudah memeriksanya. Hanya atas
+    /// klik pengguna (aturan keras 8); galat bila irisan belum terdaftar.
+    pub fn accept_registration(&mut self, slide: SlideId) -> Result<(), EngineError> {
+        self.recorded("undo-accept-registration", |s| {
+            let entry = s.slide_mut(slide)?;
+            let Some(reg) = entry.reg.as_mut() else {
+                return Err(EngineError::invalid(format!(
+                    "irisan {slide} belum terdaftar sehingga tidak ada hasil QC yang bisa diterima"
+                )));
+            };
+            reg.flagged = false;
+            reg.manual = true;
+            s.save_project()
+        })
     }
 
     fn correction_target(&self, slide: SlideId) -> Result<SlideId, EngineError> {

@@ -20,6 +20,7 @@ use crate::error::EngineError;
 mod attrs;
 mod export;
 mod figures;
+mod history;
 mod images;
 mod import;
 mod labels;
@@ -101,6 +102,8 @@ pub struct Session {
     pub(crate) analysis: Option<(u64, SpatialAnalysis)>,
     pub(crate) attr_notes: Vec<String>,
     pub(crate) project_dirty: bool,
+    /// Riwayat undo/redo manifes (lihat `history.rs`).
+    pub(crate) history: history::ProjectHistory,
     /// Irisan `External` yang berkasnya tidak cocok dengan sidik jari saat
     /// impor (diisi saat proyek dibuka dan tiap kali pembacaan mendapati
     /// ketidakcocokan). `Mutex` karena pembacaan piksel berjalan lewat `&self`.
@@ -142,6 +145,7 @@ impl Session {
             analysis: None,
             attr_notes: Vec::new(),
             project_dirty: false,
+            history: history::ProjectHistory::default(),
             changed: Mutex::new(BTreeSet::new()),
             sources: Mutex::new(images::SourceCache::new(
                 Budgets::for_platform().max_open_slides,
@@ -307,6 +311,7 @@ impl Session {
         }
         self.labels.remove(&slide);
         self.invalidate_source(slide);
+        self.clear_project_history();
         let s = self.slide_mut(slide)?;
         s.mpp = mpp;
         s.reg = None;
@@ -327,10 +332,12 @@ impl Session {
                 "jarak irisan tidak sah: {spacing_um}"
             )));
         }
-        self.project.recon.default_spacing_um = spacing_um;
-        self.project.recompute_default_z(spacing_um);
-        self.project_dirty = true;
-        Ok(())
+        self.recorded("undo-spacing", |s| {
+            s.project.recon.default_spacing_um = spacing_um;
+            s.project.recompute_default_z(spacing_um);
+            s.project_dirty = true;
+            Ok(())
+        })
     }
 
     /// Isi `z_um` satu irisan dengan tangan (tidak lagi dihitung otomatis).
@@ -338,19 +345,23 @@ impl Session {
         if !z_um.is_finite() {
             return Err(EngineError::invalid("z_um tidak sah"));
         }
-        let s = self.slide_mut(slide)?;
-        s.z_um = z_um;
-        s.z_is_default = false;
-        Ok(())
+        self.recorded("undo-z", |sess| {
+            let s = sess.slide_mut(slide)?;
+            s.z_um = z_um;
+            s.z_is_default = false;
+            Ok(())
+        })
     }
 
     /// Ubah status irisan. Catatan registrasi yang tetangganya berubah
     /// dibuang; `z_um` irisan lain tidak bergeser (5.5).
     pub fn set_status(&mut self, slide: SlideId, status: SlideStatus) -> Result<(), EngineError> {
-        self.slide_mut(slide)?.status = status;
-        self.drop_stale_registrations();
-        self.recompose_chain();
-        Ok(())
+        self.recorded("undo-status", |s| {
+            s.slide_mut(slide)?.status = status;
+            s.drop_stale_registrations();
+            s.recompose_chain();
+            Ok(())
+        })
     }
 
     /// Pilih irisan acuan (`None` = irisan `Ok` di tengah tumpukan).
@@ -362,11 +373,13 @@ impl Session {
                 )));
             }
         }
-        self.project.reference = reference;
-        self.project_dirty = true;
-        self.drop_stale_registrations();
-        self.recompose_chain();
-        Ok(())
+        self.recorded("undo-reference", |s| {
+            s.project.reference = reference;
+            s.project_dirty = true;
+            s.drop_stale_registrations();
+            s.recompose_chain();
+            Ok(())
+        })
     }
 
     /// Atur urutan dengan tangan. `order` harus memuat semua irisan tepat
@@ -374,18 +387,20 @@ impl Session {
     /// tetangganya berubah dibuang. Label tidak terpengaruh.
     pub fn reorder(&mut self, order: &[SlideId]) -> Result<(), EngineError> {
         self.check_permutation(order)?;
-        for (i, id) in order.iter().enumerate() {
-            let s = self.slide_mut(*id)?;
-            if s.order != i as u32 {
-                s.order = i as u32;
-                s.order_source = h3d_core::OrderSource::Manual;
+        self.recorded("undo-reorder", |sess| {
+            for (i, id) in order.iter().enumerate() {
+                let s = sess.slide_mut(*id)?;
+                if s.order != i as u32 {
+                    s.order = i as u32;
+                    s.order_source = h3d_core::OrderSource::Manual;
+                }
             }
-        }
-        let spacing = self.project.recon.default_spacing_um;
-        self.project.recompute_default_z(spacing);
-        self.drop_stale_registrations();
-        self.recompose_chain();
-        Ok(())
+            let spacing = sess.project.recon.default_spacing_um;
+            sess.project.recompute_default_z(spacing);
+            sess.drop_stale_registrations();
+            sess.recompose_chain();
+            Ok(())
+        })
     }
 
     pub(crate) fn check_permutation(&self, order: &[SlideId]) -> Result<(), EngineError> {
@@ -515,6 +530,7 @@ impl Session {
     /// slide `External` tidak disentuh.
     pub fn remove_slide(&mut self, slide: SlideId) -> Result<(), EngineError> {
         self.slide(slide)?;
+        self.clear_project_history();
         self.project.slides.retain(|s| s.id != slide);
         self.project.annotations.retain(|a| a.slide != slide);
         if self.project.reference == Some(slide) {

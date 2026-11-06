@@ -1,7 +1,8 @@
 //! Bilah atas mengambang (pola `ducad-ui/src/top_bar.rs`): menu burger
 //! (proyek, impor, ekspor, laporan, pengaturan, tentang), nama proyek,
 //! pemilih tampilan 3D/2D di tengah, dan di kanan tombol laci, laporan,
-//! urung/ulang (2D), tema, bahasa.
+//! urung/ulang (label di 2D Tandai, riwayat proyek di tampilan lain),
+//! tema, bahasa.
 //!
 //! Pemetaan fitur lama: menu Berkas (Baru/Buka/Simpan) dan Impor dari mode
 //! Irisan; Ekspor (7 jenis) dari mode Laporan; urung/ulang dari Segmentasi.
@@ -12,11 +13,18 @@ use h3d_i18n::{t, Language};
 
 use crate::features::{report::ExportChoice, segment, slides};
 use crate::platform;
-use crate::state::{AppState, Drawer, JobOutput, View};
+use crate::state::{AppState, Drawer, JobOutput, SliceMode, View};
 use crate::ui_util::icon_label;
 
 /// Tinggi bilah atas termasuk margin bawahnya (point).
 pub const TOP_BAR_HEIGHT: f32 = 56.0;
+
+/// Lebar bagian geser slider jarak irisan di bilah atas (point).
+const SPACING_SLIDER_WIDTH: f32 = 140.0;
+
+/// Sisa lebar minimum setelah pemilih tampilan agar slider jarak irisan
+/// ditampilkan: slider + angka + label kiri dan kontrol kanan (~6 tombol).
+const SPACING_SLIDER_MIN_FREE_WIDTH: f32 = 620.0;
 
 /// Gambar bilah atas di tepi atas `canvas`. Mengembalikan tinggi yang
 /// dipakai (untuk menempatkan panel lain di bawahnya).
@@ -61,6 +69,29 @@ pub fn show(app: &mut AppState, mut sess: Option<&mut Session>, ui: &mut Ui, can
                         let spacer = (x - ui.cursor().left()).max(8.0);
                         ui.add_space(spacer);
                         ui.add_enabled_ui(!busy, |ui| view_switch(app, ui));
+                        // Slider jarak irisan di sebelah pemilih saat 3D aktif;
+                        // disembunyikan bila bilah terlalu sempit (ponsel
+                        // tegak) agar kontrol kanan tidak tergeser keluar.
+                        if app.view == View::Stack3D
+                            && ui.available_width() >= SPACING_SLIDER_MIN_FREE_WIDTH
+                        {
+                            if let Some(sess) = sess.as_deref_mut() {
+                                ui.add_space(12.0);
+                                ui.add_enabled_ui(!busy, |ui| {
+                                    ui.label(icon_label(
+                                        h3d_ui::icons::EXPAND_Z,
+                                        &t!("slides-spacing-short"),
+                                    ));
+                                    ui.spacing_mut().slider_width = SPACING_SLIDER_WIDTH;
+                                    crate::ui_util::spacing_slider(
+                                        ui,
+                                        sess,
+                                        &mut app.toasts,
+                                        &mut app.recon.spacing_preview,
+                                    );
+                                });
+                            }
+                        }
                     }
 
                     // Kanan: laci, laporan, urung/ulang, tema, bahasa.
@@ -179,52 +210,82 @@ fn right_controls(app: &mut AppState, sess: Option<&mut Session>, ui: &mut Ui, b
         }
     });
 
-    // Urung/ulang: suntingan label irisan aktif (tampilan 2D).
-    if app.view == View::Slice2D {
-        ui.separator();
-        let (can_undo, can_redo) = match (&sess, app.current) {
-            (Some(s), Some(c)) => (s.can_undo(c), s.can_redo(c)),
-            _ => (false, false),
-        };
-        let shortcut = ui.ctx().input(|i| {
-            let cmd = i.modifiers.command;
-            let z = i.key_pressed(egui::Key::Z);
-            (
-                cmd && z && !i.modifiers.shift,
-                cmd && z && i.modifiers.shift,
+    // Urung/ulang. Di tampilan 2D mode Tandai: suntingan label irisan
+    // aktif; selain itu: riwayat proyek (koreksi manual, urutan, status,
+    // acuan, z, jarak). Keduanya memakai tombol dan pintasan yang sama.
+    ui.separator();
+    let label_history = app.view == View::Slice2D && app.slice_mode == SliceMode::Annotate;
+    let (can_undo, can_redo, undo_name) = match &sess {
+        Some(s) if label_history => match app.current {
+            Some(c) => (s.can_undo(c), s.can_redo(c), None),
+            None => (false, false, None),
+        },
+        Some(s) => (
+            s.can_undo_project(),
+            s.can_redo_project(),
+            s.project_undo_name().map(|k| k.to_owned()),
+        ),
+        None => (false, false, None),
+    };
+    let shortcut = ui.ctx().input(|i| {
+        let cmd = i.modifiers.command;
+        let z = i.key_pressed(egui::Key::Z);
+        (
+            cmd && z && !i.modifiers.shift,
+            cmd && z && i.modifiers.shift,
+        )
+    });
+    let redo_clicked = ui
+        .add_enabled_ui(can_redo, |ui| {
+            h3d_ui::widgets::tool_button(ui, h3d_ui::icons::REDO, false, &t!("action-redo"), None)
+        })
+        .inner
+        .clicked();
+    let undo_subtitle = undo_name.as_deref().map(|k| t!(k));
+    let undo_clicked = ui
+        .add_enabled_ui(can_undo, |ui| {
+            h3d_ui::widgets::tool_button(
+                ui,
+                h3d_ui::icons::UNDO,
+                false,
+                &t!("action-undo"),
+                undo_subtitle.as_deref(),
             )
-        });
-        let redo_clicked = ui
-            .add_enabled_ui(can_redo, |ui| {
-                h3d_ui::widgets::tool_button(
-                    ui,
-                    h3d_ui::icons::REDO,
-                    false,
-                    &t!("action-redo"),
-                    None,
-                )
-            })
-            .inner
-            .clicked();
-        let undo_clicked = ui
-            .add_enabled_ui(can_undo, |ui| {
-                h3d_ui::widgets::tool_button(
-                    ui,
-                    h3d_ui::icons::UNDO,
-                    false,
-                    &t!("action-undo"),
-                    None,
-                )
-            })
-            .inner
-            .clicked();
-        if let Some(s) = sess {
-            if can_undo && (undo_clicked || shortcut.0) {
+        })
+        .inner
+        .clicked();
+    if let Some(s) = sess {
+        let do_undo = can_undo && (undo_clicked || shortcut.0);
+        let do_redo = !do_undo && can_redo && (redo_clicked || shortcut.1);
+        if label_history {
+            if do_undo {
                 segment::undo(app, s, false);
-            } else if can_redo && (redo_clicked || shortcut.1) {
+            } else if do_redo {
                 segment::undo(app, s, true);
             }
+        } else if do_undo || do_redo {
+            project_history_step(app, s, do_redo);
         }
+    }
+}
+
+/// Batalkan/ulangi satu langkah riwayat proyek lalu buang pratinjau koreksi
+/// yang belum diterapkan dan tandai turunan proyek perlu dimuat ulang.
+fn project_history_step(app: &mut AppState, sess: &mut Session, redo: bool) {
+    let res = if redo {
+        sess.redo_project()
+    } else {
+        sess.undo_project()
+    };
+    match res {
+        Ok(Some(_)) => {
+            app.recon.edit.reset();
+            app.register.reset_edit();
+            app.invalidate_derived();
+            app.recon.fitted = false;
+        }
+        Ok(None) => {}
+        Err(e) => app.toasts.engine_error(&e),
     }
 }
 

@@ -86,6 +86,10 @@ pub const DRAW: MaterialIcon = icons::ICON_DRAW;
 pub const FLIP: MaterialIcon = icons::ICON_FLIP;
 /// Balik urutan (atas-bawah).
 pub const SWAP_VERT: MaterialIcon = icons::ICON_SWAP_VERT;
+/// Balik irisan kiri-kanan (cermin sumbu x).
+pub const FLIP_H: MaterialIcon = icons::ICON_FLIP_HORIZONTAL;
+/// Balik irisan atas-bawah (cermin sumbu y).
+pub const FLIP_V: MaterialIcon = icons::ICON_FLIP_VERTICAL;
 /// Putar.
 pub const ROTATE: MaterialIcon = icons::ICON_ROTATE_RIGHT;
 /// Tandai (QC gagal / rusak).
@@ -210,9 +214,20 @@ pub const EXIT_FULLSCREEN: MaterialIcon = icons::ICON_CLOSE_FULLSCREEN;
 pub const UPDATE: MaterialIcon = icons::ICON_SYSTEM_UPDATE_ALT;
 /// Pasang dan mulai ulang.
 pub const RESTART: MaterialIcon = icons::ICON_RESTART_ALT;
+/// Fokus dua irisan di tumpukan 3D (irisan terpilih + patokannya).
+pub const FOCUS_PAIR: MaterialIcon = icons::ICON_FILTER_CENTER_FOCUS;
 
 /// Semua ikon bernama (dipakai tes `named_icons_render`).
-pub const ALL: [MaterialIcon; 97] = [
+/// Pilih objek 3D (rekonstruksi per objek).
+pub const OBJECT_PICK: MaterialIcon = icons::ICON_ADS_CLICK;
+/// Angkat objek terpilih keluar dari tumpukan.
+pub const OBJECT_LIFT: MaterialIcon = icons::ICON_MOVE_UP;
+/// Isolasi objek terpilih (objek lain diredupkan).
+pub const OBJECT_ISOLATE: MaterialIcon = icons::ICON_HIGHLIGHT_ALT;
+/// Daftar objek hasil penautan.
+pub const OBJECT_LIST: MaterialIcon = icons::ICON_BUBBLE_CHART;
+
+pub const ALL: [MaterialIcon; 102] = [
     MENU,
     BACK,
     STACK_3D,
@@ -310,4 +325,9 @@ pub const ALL: [MaterialIcon; 97] = [
     KIND_OTHER,
     UPDATE,
     RESTART,
+    FOCUS_PAIR,
+    OBJECT_PICK,
+    OBJECT_LIFT,
+    OBJECT_ISOLATE,
+    OBJECT_LIST,
 ];

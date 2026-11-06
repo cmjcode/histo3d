@@ -2,7 +2,7 @@
 //! aksi untuk irisan terpilih.
 //!
 //! - Tumpukan 3D: "n. nama · z", lencana QC/status, Buka 2D, Jadikan acuan,
-//!   Tandai rusak / batalkan, Sembunyikan di 3D.
+//!   Tandai rusak / batalkan, Sembunyikan di 3D, Fokus 2 irisan.
 //! - Irisan 2D: Kembali ke 3D, irisan sebelumnya / "i dari n" / berikutnya.
 
 use egui::{Rect, Ui};
@@ -38,6 +38,7 @@ pub fn show(app: &mut AppState, sess: Option<&mut Session>, ui: &mut Ui, work: R
     let mut set_ref = false;
     let mut toggle_damaged = false;
     let mut toggle_hidden = false;
+    let mut toggle_focus = false;
 
     egui::Area::new(egui::Id::new("h3d-context-bar"))
         .order(egui::Order::Middle)
@@ -112,6 +113,22 @@ pub fn show(app: &mut AppState, sess: Option<&mut Session>, ui: &mut Ui, work: R
                         {
                             toggle_hidden = true;
                         }
+                        let focused = app.recon.focus.is_some();
+                        if ui
+                            .add_enabled(
+                                focused || app.recon.slices.len() >= 2,
+                                egui::Button::new(h3d_ui::icons::FOCUS_PAIR.rich_text())
+                                    .selected(focused),
+                            )
+                            .on_hover_text(if focused {
+                                t!("stack-focus-show-all")
+                            } else {
+                                t!("stack-focus-pair-hint")
+                            })
+                            .clicked()
+                        {
+                            toggle_focus = true;
+                        }
                     }
                     View::Slice2D => {
                         if icon_text_button(ui, h3d_ui::icons::BACK, &t!("view-back-to-3d"))
@@ -181,6 +198,13 @@ pub fn show(app: &mut AppState, sess: Option<&mut Session>, ui: &mut Ui, work: R
     }
     if toggle_hidden && !app.recon.hidden_slices.remove(&slide) {
         app.recon.hidden_slices.insert(slide);
+    }
+    if toggle_focus {
+        if app.recon.focus.is_some() {
+            crate::features::reconstruct::focus_clear(&mut app.recon);
+        } else {
+            crate::features::reconstruct::focus_on(app, sess, slide);
+        }
     }
 }
 

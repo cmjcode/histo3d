@@ -103,7 +103,7 @@ fn tissue_thumbnail_has_transparent_background_and_is_cached() {
     assert!(std::fs::read_dir(dir.join("cache").join("thumbs"))
         .unwrap()
         .filter_map(Result::ok)
-        .any(|e| e.file_name().to_string_lossy().ends_with("-64-tissue.png")));
+        .any(|e| e.file_name().to_string_lossy().ends_with("-64-tissue2.png")));
 }
 
 #[test]
@@ -689,6 +689,34 @@ fn landmark_correction_recomposes_downstream_only_without_reregistering() {
     let path = s.path().to_path_buf();
     drop(s);
     assert_eq!(Session::open(&path).unwrap().project(), &saved);
+}
+
+#[test]
+fn accept_registration_clears_flag_without_touching_transform() {
+    let mut s = open_copy("terima-qc");
+    let reference = s.project().effective_reference().unwrap();
+    let id = SlideId(5);
+    let t_before = s.slide(id).unwrap().transform.affine();
+    let reg_before = s.slide(id).unwrap().reg.clone().unwrap();
+    assert!(!reg_before.flagged);
+
+    // Terima: tanda hilang, catatan jadi manual, transformasi dan P tetap.
+    s.accept_registration(id).unwrap();
+    let e = s.slide(id).unwrap();
+    assert_eq!(e.transform.affine(), t_before);
+    let reg = e.reg.as_ref().unwrap();
+    assert!(!reg.flagged && reg.manual);
+    assert_eq!(reg.pairwise, reg_before.pairwise);
+    assert_eq!(reg.method, reg_before.method);
+
+    // Acuan tidak punya catatan registrasi → galat, bukan panik.
+    assert!(s.accept_registration(reference).is_err());
+
+    // Tersimpan: terbuka kembali dengan tanda sudah hilang.
+    let path = s.path().to_path_buf();
+    drop(s);
+    let s = Session::open(&path).unwrap();
+    assert!(s.slide(id).unwrap().reg.as_ref().unwrap().manual);
 }
 
 #[test]
@@ -1786,4 +1814,73 @@ fn ui_paths_never_build_pyramids_and_job_migrates_old_cache() {
     let failed = s.prepare_pyramids(&[ids[0], ids[2]], &NoProgress).unwrap();
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0].0, ids[2]);
+}
+
+#[test]
+fn project_history_undoes_manual_corrections_status_and_order_exactly() {
+    let mut s = open_copy("riwayat-proyek");
+    assert!(!s.can_undo_project() && !s.can_redo_project());
+    let p0 = s.project().clone();
+
+    // Langkah 1: koreksi geser manual irisan 15 (T_i baru = geser ∘ T lama).
+    let t_old = s.slide(SlideId(15)).unwrap().transform.affine();
+    let t_new = Affine2::translation(40.0, -25.0).compose(&t_old);
+    s.apply_manual_transform(SlideId(15), t_new).unwrap();
+    let p1 = s.project().clone();
+    assert_ne!(p1, p0);
+    assert_eq!(s.project_undo_name(), Some("undo-manual-transform"));
+
+    // Langkah 2: status irisan 3 rusak. Langkah 3: acuan baru.
+    s.set_status(SlideId(3), SlideStatus::Damaged).unwrap();
+    let p2 = s.project().clone();
+    s.set_reference(Some(SlideId(10))).unwrap();
+    let p3 = s.project().clone();
+    assert_eq!(s.project_undo_name(), Some("undo-reference"));
+
+    // Menyetel status yang sama tidak menambah entri.
+    s.set_status(SlideId(3), SlideStatus::Damaged).unwrap();
+    assert_eq!(s.project_undo_name(), Some("undo-reference"));
+
+    // Operasi yang gagal tidak meninggalkan entri maupun perubahan.
+    assert!(s.set_reference(Some(SlideId(3))).is_err());
+    assert_eq!(s.project(), &p3);
+    assert_eq!(s.project_undo_name(), Some("undo-reference"));
+
+    // Undo mundur satu per satu sampai keadaan awal, persis.
+    assert_eq!(s.undo_project().unwrap().as_deref(), Some("undo-reference"));
+    assert_eq!(s.project(), &p2);
+    assert_eq!(s.undo_project().unwrap().as_deref(), Some("undo-status"));
+    assert_eq!(s.project(), &p1);
+    assert_eq!(
+        s.undo_project().unwrap().as_deref(),
+        Some("undo-manual-transform")
+    );
+    assert_eq!(s.project(), &p0);
+    assert!(!s.can_undo_project());
+    assert_eq!(s.undo_project().unwrap(), None);
+
+    // Redo maju lagi; langkah baru membuang riwayat redo.
+    assert_eq!(
+        s.redo_project().unwrap().as_deref(),
+        Some("undo-manual-transform")
+    );
+    assert_eq!(s.project(), &p1);
+    let order: Vec<SlideId> = {
+        let mut o: Vec<SlideId> = s.slides().iter().map(|e| e.id).collect();
+        o.swap(0, 1);
+        o
+    };
+    s.reorder(&order).unwrap();
+    assert!(!s.can_redo_project());
+    assert_eq!(s.project_undo_name(), Some("undo-reorder"));
+    assert_eq!(s.undo_project().unwrap().as_deref(), Some("undo-reorder"));
+    assert_eq!(s.project(), &p1);
+
+    // Undo tersimpan ke disk: proyek yang dibuka ulang sama dengan p1,
+    // dan riwayat tidak ikut tersimpan.
+    let path = s.path().to_path_buf();
+    drop(s);
+    let s = Session::open(&path).unwrap();
+    assert_eq!(s.project(), &p1);
+    assert!(!s.can_undo_project() && !s.can_redo_project());
 }

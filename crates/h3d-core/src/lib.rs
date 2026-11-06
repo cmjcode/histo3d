@@ -31,7 +31,7 @@ pub use error::CoreError;
 pub use ids::{AttrId, LabelId, SlideId};
 pub use label::{LabelDef, LabelKind, VesselKind};
 pub use progress::{NoProgress, Progress};
-pub use project::{Project, ReconConfig, SpatialConfig, FORMAT_VERSION};
+pub use project::{Project, ReconConfig, SpatialConfig, SplitParams, FORMAT_VERSION};
 pub use slide::{
     Chromogen, IhcPanel, IhcScoring, OrderSource, PreanalyticMeta, RegRecord, SlideEntry,
     SlideSourceRef, SlideStatus, Stain, StainPattern,

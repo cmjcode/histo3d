@@ -39,6 +39,39 @@ pub struct ReconConfig {
     pub per_object: bool,
     /// Ambang IoU penautan objek antar irisan bertetangga (bawaan 0,2).
     pub track_min_iou: f64,
+    /// Pemisah objek yang bersentuhan pada satu irisan (watershed EDT);
+    /// bawaan nonaktif.
+    pub track_split: SplitParams,
+    /// Jumlah irisan berlabel yang boleh dilompati saat menautkan objek
+    /// (objek luput di satu irisan tetap satu objek); bawaan 1.
+    pub track_max_skip: u32,
+}
+
+/// Parameter pemisah objek bersentuhan (`h3d_imgproc::split_touching`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SplitParams {
+    /// Aktif?
+    pub enabled: bool,
+    /// Jarak minimum antar puncak EDT, µm (bawaan 40).
+    pub min_seed_distance_um: f64,
+    /// Kedalaman lembah minimum agar dua puncak dianggap dua objek, µm
+    /// (bawaan 8).
+    pub h_um: f64,
+    /// Wilayah hasil pembelahan yang lebih kecil dari ini (µm²) digabung ke
+    /// tetangga terluas; bawaan 0 = tidak ada.
+    pub min_area_um2: f64,
+}
+
+impl Default for SplitParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_seed_distance_um: 40.0,
+            h_um: 8.0,
+            min_area_um2: 0.0,
+        }
+    }
 }
 
 impl Default for ReconConfig {
@@ -54,6 +87,8 @@ impl Default for ReconConfig {
             mpp_label: 4.0,
             per_object: false,
             track_min_iou: 0.2,
+            track_split: SplitParams::default(),
+            track_max_skip: 1,
         }
     }
 }

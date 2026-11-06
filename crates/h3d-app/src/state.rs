@@ -213,6 +213,8 @@ pub struct AppState {
     pub thumbs: ThumbCache,
     /// Pembuat thumbnail di thread latar.
     pub thumb_worker: crate::thumbs::ThumbWorker,
+    /// Irisan yang masker jaringan 2D-nya gagal dibuat (tidak diulang).
+    pub tissue_mask_failed: std::collections::HashSet<SlideId>,
     /// Suntingan label terakhir; turunan (mesh, laporan) dihitung ulang
     /// setelah jeda singkat, bukan di tengah rangkaian goresan.
     pub last_edit: Option<std::time::Instant>,
@@ -283,6 +285,7 @@ impl AppState {
             toasts: Toasts::default(),
             thumbs: ThumbCache::default(),
             thumb_worker: crate::thumbs::ThumbWorker::new(),
+            tissue_mask_failed: std::collections::HashSet::new(),
             last_edit: None,
             current: None,
             touch: TouchTracker::default(),
@@ -330,6 +333,7 @@ impl AppState {
         self.tiles.reset();
         self.thumbs.clear();
         self.thumb_worker.clear();
+        self.tissue_mask_failed.clear();
         self.last_edit = None;
         self.slides = Default::default();
         self.register = Default::default();

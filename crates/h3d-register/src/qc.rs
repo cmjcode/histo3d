@@ -251,17 +251,45 @@ impl Default for QcThresholds {
     }
 }
 
+/// Ambang mana yang dilanggar satu hasil registrasi; dipakai UI untuk
+/// menjelaskan *mengapa* irisan gagal QC, bukan hanya *bahwa* ia gagal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QcViolations {
+    /// `ncc < ncc_min` (atau tak-finit).
+    pub ncc: bool,
+    /// `mask_dice < dice_min` (atau tak-finit).
+    pub dice: bool,
+    /// `area_ratio` di luar rentang (atau tak-finit).
+    pub area_ratio: bool,
+}
+
+impl QcViolations {
+    /// Ada ambang yang dilanggar.
+    pub fn any(self) -> bool {
+        self.ncc || self.dice || self.area_ratio
+    }
+}
+
+impl QcThresholds {
+    /// Periksa tiap metrik terhadap ambangnya. Nilai tak-finit dihitung
+    /// sebagai pelanggaran metrik itu.
+    pub fn violations(&self, ncc: f32, mask_dice: f32, area_ratio: f32) -> QcViolations {
+        QcViolations {
+            ncc: !ncc.is_finite() || ncc < self.ncc_min,
+            dice: !mask_dice.is_finite() || mask_dice < self.dice_min,
+            area_ratio: !area_ratio.is_finite()
+                || area_ratio < self.area_ratio.0
+                || area_ratio > self.area_ratio.1,
+        }
+    }
+}
+
 /// Benar bila hasil gagal salah satu ambang (atau memuat nilai tak-finit).
 pub fn flag(result: &RegResult, thr: &QcThresholds) -> bool {
-    let bad_num = !result.ncc.is_finite()
-        || !result.mask_dice.is_finite()
-        || !result.area_ratio.is_finite()
-        || !result.transform.is_finite();
-    bad_num
-        || result.ncc < thr.ncc_min
-        || result.mask_dice < thr.dice_min
-        || result.area_ratio < thr.area_ratio.0
-        || result.area_ratio > thr.area_ratio.1
+    !result.transform.is_finite()
+        || thr
+            .violations(result.ncc, result.mask_dice, result.area_ratio)
+            .any()
 }
 
 /// Bangun `RegRecord` dari hasil registrasi terhadap irisan `fixed`.

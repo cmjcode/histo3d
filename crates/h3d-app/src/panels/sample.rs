@@ -66,7 +66,14 @@ pub fn combo<T: PartialEq + Clone>(
 }
 
 /// Bagian nama, catatan, faktor susut, dan jarak irisan.
-pub fn sample_ui(ui: &mut Ui, session: &mut Session, toasts: &mut Toasts) {
+/// `spacing_preview` = nilai slider jarak irisan yang sedang digeser
+/// (lihat `ui_util::spacing_slider`).
+pub fn sample_ui(
+    ui: &mut Ui,
+    session: &mut Session,
+    toasts: &mut Toasts,
+    spacing_preview: &mut Option<f64>,
+) {
     let sample = session.project().sample.clone();
     let mut name = sample.name.clone();
     let mut notes = sample.notes.clone();
@@ -99,19 +106,7 @@ pub fn sample_ui(ui: &mut Ui, session: &mut Session, toasts: &mut Toasts) {
             ui.end_row();
 
             ui.label(t!("slides-spacing"));
-            let mut spacing = session.project().recon.default_spacing_um;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut spacing)
-                        .range(0.1..=100_000.0)
-                        .speed(0.5),
-                )
-                .changed()
-            {
-                if let Err(e) = session.set_spacing(spacing) {
-                    toasts.engine_error(&e);
-                }
-            }
+            crate::ui_util::spacing_slider(ui, session, toasts, spacing_preview);
             ui.end_row();
         });
     if changed {

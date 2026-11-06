@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use egui::Ui;
 use glam::{Mat4, Vec3};
-use h3d_core::{Colormap, LabelId, SlideId, SlideStatus};
+use h3d_core::{Affine2, Colormap, LabelId, SlideId, SlideStatus};
 use h3d_engine::{LabelMesh, Session};
 use h3d_i18n::t;
 use h3d_render::{
@@ -24,6 +24,7 @@ use h3d_render::{
 use h3d_ui::{ViewCube, ViewCubeAction};
 
 use crate::features::slides::OrderPreview;
+use crate::geom::manual_adjusted_transform;
 use crate::gpu::Gpu;
 use crate::state::AppState;
 use crate::ui_util::icon_label;
@@ -37,12 +38,22 @@ pub const Z_SCALE_RANGE: std::ops::RangeInclusive<f32> = 1.0..=400.0;
 /// Tebal tumpukan yang dituju renggang otomatis, relatif terhadap sisi XY
 /// terpanjang (0,5 = setengah lebar).
 const AUTO_THICKNESS_RATIO: f32 = 0.5;
+/// Faktor opasitas objek lain saat isolasi aktif.
+const ISOLATE_DIM: f32 = 0.12;
+/// Kekuatan sorot objek terpilih (0..1; bentuk tetap terbaca).
+const SELECT_HIGHLIGHT: f32 = 0.45;
+/// Tinggi maksimum daftar objek per label di laci (point).
+const OBJECT_LIST_MAX_HEIGHT: f32 = 160.0;
+/// Rentang penggeser angkat objek (mm, ruang R).
+pub const LIFT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=50.0;
 
 /// Hasil klik pada mesh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PickInfo {
     /// Label mesh yang kena.
     pub label: LabelId,
+    /// Id objek bila mesh hasil rekonstruksi per objek.
+    pub instance_id: Option<u32>,
     /// Titik kena (µm, ruang W).
     pub point_um: [f64; 3],
     /// Nilai lapisan skalar di titik itu dan satuannya (bila ada lapisan).
@@ -62,8 +73,6 @@ pub struct SliceItem {
     pub draw: SliceDraw,
     /// Gagal QC registrasi.
     pub flagged: bool,
-    /// Belum punya `T_i` (bukan acuan, belum terdaftar).
-    pub unregistered: bool,
     /// Bagian dari pratinjau usulan (bukan susunan proyek).
     pub preview: bool,
 }
@@ -77,6 +86,239 @@ pub enum CanvasEvent {
     Selected(SlideId),
     /// Irisan diminta dibuka di 2D (klik ganda).
     OpenSlice(SlideId),
+}
+
+/// Alat kanvas 3D: orbit kamera, atau koreksi geser/putar irisan terpilih
+/// (8.4.5) langsung di tumpukan, supaya kesesuaiannya dengan irisan lain
+/// terlihat saat disetel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StackTool {
+    /// Seret = orbit kamera (bawaan).
+    #[default]
+    Orbit,
+    /// Seret pada irisan terpilih = putar di bidangnya.
+    Rotate,
+    /// Seret pada irisan terpilih = geser di bidangnya.
+    Translate,
+    /// Klik mesh = pilih objek 3D (lalu bisa diangkat/diisolasi, tampilan
+    /// saja); seret tetap orbit kamera.
+    Object,
+}
+
+impl StackTool {
+    /// Alat ini mengoreksi irisan (putar/geser), bukan memilih objek.
+    pub fn corrects_slice(self) -> bool {
+        matches!(self, StackTool::Rotate | StackTool::Translate)
+    }
+}
+
+/// Koreksi irisan terpilih yang belum diterapkan (pratinjau di kanvas).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StackEdit {
+    /// Irisan yang sedang dikoreksi.
+    pub slide: Option<SlideId>,
+    /// Putaran (radian) di sekitar pusat irisan, ruang W.
+    pub angle: f64,
+    /// Geseran (µm, W).
+    pub shift: [f64; 2],
+    /// Cermin: `[kiri-kanan, atas-bawah]` di sekitar pusat irisan.
+    pub flip: [bool; 2],
+    /// Irisan sesudahnya di rantai: `T`-nya ikut berubah saat diterapkan
+    /// (8.4.5), jadi dipratinjau bersama.
+    pub downstream: Vec<SlideId>,
+    /// Seretan yang sedang berlangsung mengedit irisan, bukan kamera.
+    pub dragging: bool,
+}
+
+impl StackEdit {
+    /// Ada geser/putar/balik yang belum diterapkan.
+    pub fn has_change(&self) -> bool {
+        self.shift != [0.0, 0.0] || self.angle != 0.0 || self.flip != [false, false]
+    }
+
+    /// Buang koreksi yang belum diterapkan (irisan dan rantai dipertahankan).
+    pub fn reset(&mut self) {
+        self.angle = 0.0;
+        self.shift = [0.0, 0.0];
+        self.flip = [false, false];
+        self.dragging = false;
+    }
+}
+
+/// Koreksi irisan sedang berlangsung: alat koreksi aktif, **atau** ada
+/// koreksi tertunda yang belum diterapkan. Koreksi tidak dibuang saat
+/// berganti alat (putar → geser → balik) supaya Terapkan cukup sekali di
+/// akhir; ia hanya dibuang lewat Atur ulang, Terapkan, atau ganti irisan.
+pub fn editing_active(st: &ReconState) -> bool {
+    st.tool.corrects_slice() || st.edit.has_change()
+}
+
+/// Bilah pilihan alat 3D perlu tampil: koreksi berlangsung atau fokus dua
+/// irisan aktif (bilah memuat pemilih patokan dan Tampilkan semua).
+pub fn options_bar_active(st: &ReconState) -> bool {
+    editing_active(st) || st.focus.is_some()
+}
+
+/// Transformasi irisan yang sedang dikoreksi: `(T lama, T baru, pivot W)`;
+/// keduanya memetakan U irisan → W. `None` bila tidak ada irisan diedit
+/// atau irisan tidak ada di cache.
+pub fn edit_transforms(st: &ReconState) -> Option<(SlideId, Affine2, Affine2, [f64; 2])> {
+    if !editing_active(st) {
+        return None;
+    }
+    let id = st.edit.slide?;
+    let it = st.slices.iter().find(|s| s.id == id && !s.preview)?;
+    let t_old = it.draw.affine;
+    let pivot = t_old.apply([it.draw.size_um[0] / 2.0, it.draw.size_um[1] / 2.0]);
+    let t_new =
+        manual_adjusted_transform(&t_old, st.edit.shift, st.edit.angle, st.edit.flip, pivot);
+    Some((id, t_old, t_new, pivot))
+}
+
+/// Irisan `Ok` yang berada **sesudah** `slide` di rantai registrasi (lebih
+/// jauh dari acuan, sisi yang sama). Koreksi `slide` menggeser semuanya.
+pub fn downstream_of(sess: &Session, slide: SlideId) -> Vec<SlideId> {
+    let project = sess.project();
+    let Some(reference) = project.effective_reference() else {
+        return Vec::new();
+    };
+    let usable: Vec<SlideId> = project
+        .usable_slides_ordered()
+        .iter()
+        .map(|s| s.id)
+        .collect();
+    let (Some(i), Some(r)) = (
+        usable.iter().position(|s| *s == slide),
+        usable.iter().position(|s| *s == reference),
+    ) else {
+        return Vec::new();
+    };
+    match i.cmp(&r) {
+        std::cmp::Ordering::Less => usable[..i].to_vec(),
+        std::cmp::Ordering::Greater => usable[i + 1..].to_vec(),
+        std::cmp::Ordering::Equal => Vec::new(),
+    }
+}
+
+/// Samakan irisan yang diedit dengan irisan aktif: ganti irisan membuang
+/// koreksi yang belum diterapkan dan menghitung ulang rantai sesudahnya.
+pub fn sync_edit(app: &mut AppState, sess: &Session) {
+    let st = &mut app.recon;
+    if !editing_active(st) {
+        return;
+    }
+    if st.edit.slide != app.current {
+        st.edit.reset();
+        st.edit.slide = app.current;
+        st.edit.downstream = app
+            .current
+            .map(|id| downstream_of(sess, id))
+            .unwrap_or_default();
+    }
+}
+
+/// Irisan `id` ikut digambar di tumpukan: tidak disembunyikan pengguna dan,
+/// bila fokus dua irisan aktif, termasuk pasangan fokus.
+pub fn slice_visible(st: &ReconState, id: SlideId) -> bool {
+    !st.hidden_slices.contains(&id) && st.focus.is_none_or(|(a, b)| a == id || b == id)
+}
+
+/// Nyalakan fokus dua irisan untuk `slide`: patokan bawaan adalah tetangga
+/// ke arah acuan (irisan yang menjadi target registrasinya); bila tidak ada
+/// (irisan acuan sendiri), dipakai irisan terdekat lain di tumpukan. `None`
+/// bila tidak ada irisan lain. Kamera dipaskan ulang ke pasangan.
+pub fn focus_on(app: &mut AppState, sess: &Session, slide: SlideId) -> Option<(SlideId, SlideId)> {
+    let partner = crate::features::register::neighbor_of(sess, slide)
+        .filter(|p| *p != slide)
+        .or_else(|| nearest_other_slice(&app.recon.slices, slide))?;
+    app.recon.focus = Some((slide, partner));
+    app.recon.fitted = false;
+    Some((slide, partner))
+}
+
+/// Matikan fokus dua irisan: semua irisan tampil lagi, kamera dipaskan ulang.
+pub fn focus_clear(st: &mut ReconState) {
+    if st.focus.take().is_some() {
+        st.fitted = false;
+    }
+}
+
+/// Irisan lain (bukan pratinjau) dengan `z` terdekat ke `slide`.
+fn nearest_other_slice(items: &[SliceItem], slide: SlideId) -> Option<SlideId> {
+    let z = items
+        .iter()
+        .find(|i| i.id == slide && !i.preview)?
+        .draw
+        .z_um;
+    items
+        .iter()
+        .filter(|i| i.id != slide && !i.preview)
+        .min_by(|a, b| {
+            (a.draw.z_um - z)
+                .abs()
+                .total_cmp(&(b.draw.z_um - z).abs())
+                .then(a.id.0.cmp(&b.id.0))
+        })
+        .map(|i| i.id)
+}
+
+/// Samakan fokus dengan keadaan tumpukan: pasangan yang sudah tidak ada di
+/// tumpukan membatalkan fokus; memilih irisan ketiga (dari daftar atau
+/// kanvas) menjadikannya irisan yang dikoreksi dengan patokan tetap, supaya
+/// irisan yang dipilih tidak pernah tersembunyi.
+pub fn sync_focus(app: &mut AppState) {
+    let st = &mut app.recon;
+    let Some((a, b)) = st.focus else {
+        return;
+    };
+    let present = |id: SlideId| st.slices.iter().any(|s| s.id == id && !s.preview);
+    if !present(a) || !present(b) || a == b {
+        focus_clear(st);
+        return;
+    }
+    if let Some(cur) = app.current {
+        if cur != a && cur != b {
+            st.focus = Some((cur, b));
+            st.fitted = false;
+        }
+    }
+}
+
+/// Potong `ray` dengan **bidang** (tak terbatas) quad irisan bermatriks
+/// `model`; hasil di ruang W (µm, XY). `None` bila sejajar atau di belakang.
+fn plane_hit_w(ray: &Ray, model: &Mat4, center_um: [f64; 3]) -> Option<[f64; 2]> {
+    if model.determinant().abs() < 1e-18 {
+        return None;
+    }
+    let inv = model.inverse();
+    let o = inv.project_point3(ray.origin);
+    let d = inv.transform_vector3(ray.dir);
+    if d.z.abs() < 1e-12 {
+        return None;
+    }
+    let t = -o.z / d.z;
+    if !(t.is_finite() && t > 0.0) {
+        return None;
+    }
+    let p = ray.origin + ray.dir * t;
+    let w = render_to_world_um(p.to_array(), center_um);
+    Some([w[0], w[1]])
+}
+
+/// Sudut `p` relatif `pivot` di bidang W.
+fn angle_about(p: [f64; 2], pivot: [f64; 2]) -> f64 {
+    (p[1] - pivot[1]).atan2(p[0] - pivot[0])
+}
+
+/// Selisih sudut terkecil `a1 − a0` dalam `(−π, π]`.
+fn wrap_angle(d: f64) -> f64 {
+    let mut d = d;
+    if d > std::f64::consts::PI {
+        d -= std::f64::consts::TAU;
+    } else if d < -std::f64::consts::PI {
+        d += std::f64::consts::TAU;
+    }
+    d
 }
 
 /// Keadaan kanvas 3D dan rekonstruksi.
@@ -119,6 +361,10 @@ pub struct ReconState {
     pub hide_background: bool,
     /// Irisan yang disembunyikan dari tumpukan (hanya tampilan).
     pub hidden_slices: BTreeSet<SlideId>,
+    /// Fokus dua irisan (koreksi QC gagal di tengah urutan): hanya
+    /// `(irisan yang dikoreksi, patokan)` yang digambar; irisan lain
+    /// disembunyikan sementara (tampilan saja). `None` = tampilkan semua.
+    pub focus: Option<(SlideId, SlideId)>,
     /// Irisan yang thumbnailnya sudah diunggah.
     pub uploaded_slices: BTreeSet<SlideId>,
     /// Cache irisan yang digambar frame terakhir (dipakai saat sesi terkunci).
@@ -129,6 +375,10 @@ pub struct ReconState {
     pub z_scale: f32,
     /// Renggang Z masih otomatis (belum disentuh pengguna).
     pub z_scale_auto: bool,
+    /// Jarak irisan (µm) yang sedang digeser di slider tetapi belum
+    /// dikomit ke sesi: `z_um` bawaan digambar dengan nilai ini supaya
+    /// tumpukan bereaksi langsung; satu entri undo dibuat saat dilepas.
+    pub spacing_preview: Option<f64>,
     /// Lapisan skalar terpilih (nama `MeshScalars`).
     pub scalar: Option<String>,
     /// Rentang lapisan skalar; `None` = otomatis p2–p98.
@@ -137,12 +387,27 @@ pub struct ReconState {
     pub colormap: Colormap,
     /// Hasil klik terakhir pada mesh.
     pub pick: Option<PickInfo>,
+    /// Objek 3D terpilih (klik di kanvas atau daftar objek).
+    pub selected: Option<MeshKey>,
+    /// Angkat objek terpilih sepanjang +Z ruang R (mm, setelah renggang Z);
+    /// tampilan saja, tidak pernah menyentuh data.
+    pub lift_mm: f32,
+    /// Isolasi: objek selain yang terpilih diredupkan (tampilan saja).
+    pub isolate: bool,
+    /// Permintaan memaskan kamera ke kotak `(lo, hi)` (mm, ruang R
+    /// berenggang) pada frame kanvas berikutnya, saat rasio viewport
+    /// diketahui.
+    pub fit_request: Option<(Vec3, Vec3)>,
     /// Kunci mesh `(label, id objek)` yang ada di GPU.
     pub gpu_meshes: BTreeSet<MeshKey>,
     /// Pilih lapisan skalar pertama begitu tersedia (argumen `--analyze`).
     pub want_first_scalar: bool,
     /// Kubus orientasi.
     pub viewcube: ViewCube,
+    /// Alat aktif di kanvas.
+    pub tool: StackTool,
+    /// Koreksi irisan terpilih yang belum diterapkan.
+    pub edit: StackEdit,
 }
 
 impl Default for ReconState {
@@ -166,18 +431,26 @@ impl Default for ReconState {
             slice_alpha: 0.9,
             hide_background: true,
             hidden_slices: BTreeSet::new(),
+            focus: None,
             uploaded_slices: BTreeSet::new(),
             slices: Vec::new(),
             hovered_slice: None,
             z_scale: 1.0,
             z_scale_auto: true,
+            spacing_preview: None,
             scalar: None,
             range: None,
             colormap: Colormap::Viridis,
             pick: None,
+            selected: None,
+            lift_mm: 0.0,
+            isolate: false,
+            fit_request: None,
             gpu_meshes: BTreeSet::new(),
             want_first_scalar: false,
             viewcube: ViewCube::default(),
+            tool: StackTool::Orbit,
+            edit: StackEdit::default(),
         }
     }
 }
@@ -364,11 +637,18 @@ pub fn unscale_ray(ray: &Ray, z_scale: f32) -> Ray {
 
 /// Susunan irisan untuk digambar: susunan proyek, atau pratinjau usulan bila
 /// ada (urutan usulan × jarak irisan, orientasi usulan relatif acuan).
-pub fn slice_items(sess: &Session, preview: Option<&OrderPreview>, alpha: f32) -> Vec<SliceItem> {
+/// `spacing_preview` = jarak irisan (µm) yang sedang digeser di slider;
+/// `z_um` yang masih bawaan dihitung dari nilai itu (tampilan saja, sesi
+/// tidak disentuh); `None` = pakai `z_um` manifes.
+pub fn slice_items(
+    sess: &Session,
+    preview: Option<&OrderPreview>,
+    alpha: f32,
+    spacing_preview: Option<f64>,
+) -> Vec<SliceItem> {
     let project = sess.project();
-    let reference = project.effective_reference();
+    let spacing = spacing_preview.unwrap_or(project.recon.default_spacing_um);
     if let Some(p) = preview {
-        let spacing = project.recon.default_spacing_um;
         let z0 = project
             .usable_slides_ordered()
             .iter()
@@ -414,7 +694,6 @@ pub fn slice_items(sess: &Session, preview: Option<&OrderPreview>, alpha: f32) -
                         alpha: alpha * 0.55,
                     },
                     flagged: p.suggestion.uncertain.contains(id),
-                    unregistered: false,
                     preview: true,
                 })
             })
@@ -430,11 +709,13 @@ pub fn slice_items(sess: &Session, preview: Option<&OrderPreview>, alpha: f32) -
                 slice: SliceId(e.id.0),
                 affine: e.transform.affine(),
                 size_um: e.size_um(),
-                z_um: e.z_um,
+                z_um: match spacing_preview {
+                    Some(sp) if e.z_is_default => f64::from(e.order) * sp,
+                    _ => e.z_um,
+                },
                 alpha,
             },
             flagged: e.reg.as_ref().is_some_and(|r| r.flagged),
-            unregistered: Some(e.id) != reference && e.reg.is_none(),
             preview: false,
         })
         .collect()
@@ -471,7 +752,51 @@ fn reload(app: &mut AppState, sess: &Session) {
         st.scalar = names.first().cloned();
     }
     st.pick = None;
+    if st
+        .selected
+        .is_some_and(|k| !st.meshes.iter().any(|m| mesh_key(m) == k))
+    {
+        select_object(st, None);
+    }
     st.needs_upload = true;
+}
+
+/// Pilih (atau lepas) objek 3D; angkat dan isolasi ikut dibuang saat
+/// pilihan dilepas supaya tidak ada objek "tersangkut" di udara.
+pub fn select_object(st: &mut ReconState, key: Option<MeshKey>) {
+    if key != st.selected {
+        st.lift_mm = 0.0;
+    }
+    st.selected = key;
+    if key.is_none() {
+        st.isolate = false;
+    }
+}
+
+/// Offset tampilan mesh `key` (mm, ruang R setelah renggang Z): objek
+/// terpilih diangkat `lift_mm`, lainnya nol.
+pub fn mesh_offset_mm(st: &ReconState, key: MeshKey) -> [f32; 3] {
+    if st.selected == Some(key) && st.lift_mm != 0.0 {
+        [0.0, 0.0, st.lift_mm]
+    } else {
+        [0.0; 3]
+    }
+}
+
+/// Kotak pembatas mesh `key` (mm, ruang R, setelah renggang Z dan offset);
+/// dipakai untuk memfokuskan kamera ke objek terpilih.
+pub fn mesh_bounds_mm(st: &ReconState, key: MeshKey) -> Option<(Vec3, Vec3)> {
+    let m = st.meshes.iter().find(|m| mesh_key(m) == key)?;
+    let (lo, hi) = m.bbox()?;
+    let s = h3d_render::sanitize_z_scale(st.z_scale);
+    let off = Vec3::from(mesh_offset_mm(st, key));
+    let a = Vec3::from(world_um_to_render_mm(lo, st.center_um));
+    let b = Vec3::from(world_um_to_render_mm(hi, st.center_um));
+    let (a, b) = (a.min(b), a.max(b));
+    Some((
+        Vec3::new(a.x, a.y, a.z * s) + off,
+        Vec3::new(b.x, b.y, b.z * s) + off,
+    ))
 }
 
 /// Pusat dan kotak pembatas mesh (tanpa GPU: hanya statistik).
@@ -537,9 +862,14 @@ fn upload(app: &mut AppState, gpu: &Gpu) {
 
 /// Segarkan cache irisan dan unggah thumbnail yang belum ada (kuota per frame).
 fn refresh_slices(app: &mut AppState, sess: &Session, gpu: Option<&Gpu>, ctx: &egui::Context) {
+    // Slider jarak hilang di tengah geser (laci ditutup) → pratinjau basi
+    // dibuang begitu tombol tetikus/jari dilepas.
+    if app.recon.spacing_preview.is_some() && !ctx.input(|i| i.pointer.any_down()) {
+        app.recon.spacing_preview = None;
+    }
     let preview = app.slides.order_preview.as_ref();
     let alpha = app.recon.slice_alpha;
-    let items = slice_items(sess, preview, alpha);
+    let items = slice_items(sess, preview, alpha, app.recon.spacing_preview);
     let st = &mut app.recon;
     // Tanpa mesh, pusat volume = pusat tumpukan (pusat berubah → pas ulang).
     if st.meshes.is_empty() {
@@ -649,11 +979,7 @@ fn canvas_bounds(st: &ReconState) -> Option<(Vec3, Vec3)> {
         }
     }
     if st.show_slices {
-        for it in st
-            .slices
-            .iter()
-            .filter(|i| !st.hidden_slices.contains(&i.id))
-        {
+        for it in st.slices.iter().filter(|i| slice_visible(st, i.id)) {
             let m = slice_model_matrix_scaled(
                 &slice_model_matrix(&it.draw.affine, it.draw.size_um, it.draw.z_um, st.center_um),
                 s,
@@ -711,6 +1037,8 @@ pub fn canvas(
             }
         }
         refresh_slices(app, sess, gpu, &ctx);
+        sync_focus(app);
+        sync_edit(app, sess);
     }
 
     let response = ui.interact(
@@ -727,6 +1055,10 @@ pub fn canvas(
             st.camera.fit_bounds(lo, hi, aspect);
             st.fitted = true;
         }
+    }
+    if let Some((lo, hi)) = st.fit_request.take() {
+        st.camera.fit_bounds(lo, hi, aspect);
+        st.fitted = true;
     }
 
     // Masukan kamera: seret = orbit, seret kanan/tengah atau Shift = geser,
@@ -747,9 +1079,63 @@ pub fn canvas(
         let pan = response.dragged_by(egui::PointerButton::Secondary)
             || response.dragged_by(egui::PointerButton::Middle)
             || (shift && response.dragged_by(egui::PointerButton::Primary));
+        // Koreksi irisan: seretan yang dimulai di irisan terpilih memutar /
+        // menggeser irisan itu di bidangnya; seretan di luar tetap orbit.
+        let edit_ctx = sess
+            .and(edit_transforms(st))
+            .filter(|_| st.tool.corrects_slice());
+        if let Some((_, _, t_now, pivot)) = edit_ctx {
+            let z_scale = h3d_render::sanitize_z_scale(st.z_scale);
+            let item = st.slices.iter().find(|s| Some(s.id) == st.edit.slide);
+            let model = item.map(|it| {
+                slice_model_matrix_scaled(
+                    &slice_model_matrix(&t_now, it.draw.size_um, it.draw.z_um, st.center_um),
+                    z_scale,
+                )
+            });
+            if let Some(model) = model {
+                if response.drag_started_by(egui::PointerButton::Primary) && !shift {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let ray = ray_from_screen(&st.camera, rect, pos);
+                        st.edit.dragging = pick_slice(&ray, &model).is_some();
+                    }
+                }
+                if response.drag_stopped() {
+                    st.edit.dragging = false;
+                }
+                if st.edit.dragging && response.dragged_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        let prev = pos - d;
+                        let r1 = ray_from_screen(&st.camera, rect, pos);
+                        let r0 = ray_from_screen(&st.camera, rect, prev);
+                        let hit = (
+                            plane_hit_w(&r0, &model, st.center_um),
+                            plane_hit_w(&r1, &model, st.center_um),
+                        );
+                        if let (Some(w0), Some(w1)) = hit {
+                            match st.tool {
+                                StackTool::Rotate => {
+                                    let p =
+                                        [pivot[0] + st.edit.shift[0], pivot[1] + st.edit.shift[1]];
+                                    st.edit.angle +=
+                                        wrap_angle(angle_about(w1, p) - angle_about(w0, p));
+                                }
+                                StackTool::Translate => {
+                                    st.edit.shift[0] += w1[0] - w0[0];
+                                    st.edit.shift[1] += w1[1] - w0[1];
+                                }
+                                StackTool::Orbit | StackTool::Object => {}
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            st.edit.dragging = false;
+        }
         if pan {
             st.camera.pan(d.x, d.y, rect.height());
-        } else if response.dragged_by(egui::PointerButton::Primary) {
+        } else if response.dragged_by(egui::PointerButton::Primary) && !st.edit.dragging {
             st.camera.orbit(d.x, d.y);
         }
         if response.contains_pointer() {
@@ -762,20 +1148,47 @@ pub fn canvas(
         }
     }
 
+    if st.selected.is_some()
+        && response.contains_pointer()
+        && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+    {
+        select_object(st, None);
+        st.pick = None;
+    }
+
     let z_scale = h3d_render::sanitize_z_scale(st.z_scale);
     let view_proj = st.camera.view_proj(aspect);
     let previewing = st.slices.iter().any(|s| s.preview);
 
     // Irisan yang digambar + matriks model berenggang (untuk picking/garis).
+    // Koreksi yang belum diterapkan dipratinjau: irisan yang diedit memakai
+    // `T` baru, irisan sesudahnya di rantai ikut `T_baru ∘ T_lama⁻¹` (8.4.5).
     let draw_slices = st.show_slices;
+    let edit_ctx = sess.and(edit_transforms(st));
+    let chain_delta =
+        edit_ctx.and_then(|(_, t_old, t_new, _)| t_old.inverse().map(|inv| t_new.compose(&inv)));
+    let edit_id = edit_ctx.map(|(id, ..)| id);
     let visible: Vec<(SliceItem, Mat4)> = st
         .slices
         .iter()
-        .filter(|it| draw_slices && !st.hidden_slices.contains(&it.id))
+        .filter(|it| draw_slices && slice_visible(st, it.id))
         .map(|it| {
+            let mut it = it.clone();
+            if !it.preview {
+                if Some(it.id) == edit_id {
+                    if let Some((_, _, t_new, _)) = edit_ctx {
+                        it.draw.affine = t_new;
+                    }
+                } else if st.edit.downstream.contains(&it.id) {
+                    if let Some(delta) = chain_delta {
+                        it.draw.affine = delta.compose(&it.draw.affine);
+                    }
+                }
+            }
             let m =
                 slice_model_matrix(&it.draw.affine, it.draw.size_um, it.draw.z_um, st.center_um);
-            (it.clone(), slice_model_matrix_scaled(&m, z_scale))
+            let ms = slice_model_matrix_scaled(&m, z_scale);
+            (it, ms)
         })
         .collect();
 
@@ -784,7 +1197,7 @@ pub fn canvas(
     let mut event = CanvasEvent::None;
     st.hovered_slice = None;
     let pointer = response.hover_pos().filter(|p| rect.contains(*p));
-    if sess.is_some() && !response.dragged() {
+    if sess.is_some() && !response.dragged() && !st.edit.dragging {
         if let Some(pos) = pointer {
             let ray = ray_from_screen(&st.camera, rect, pos);
             let mut best: Option<(SlideId, f32)> = None;
@@ -813,10 +1226,18 @@ pub fn canvas(
                             .map(mesh_key)
                             .filter(|k| st.gpu_meshes.contains(k) && !st.hidden.contains(&k.0))
                             .collect();
+                        let offsets: Vec<[f32; 3]> =
+                            keys.iter().map(|k| mesh_offset_mm(st, *k)).collect();
                         g.with(|r, _, _| {
                             let mut best: Option<(MeshKey, h3d_render::PickHit)> = None;
-                            for k in keys {
-                                if let Some(h) = r.mesh(mesh_id(k)).and_then(|m| m.pick(&unscaled))
+                            for (k, off) in keys.into_iter().zip(offsets) {
+                                // Offset angkat diterapkan setelah renggang Z,
+                                // jadi dibagi balik sebelum ray yang belum
+                                // direnggangkan.
+                                let off = [off[0], off[1], off[2] / z_scale];
+                                if let Some(h) = r
+                                    .mesh(mesh_id(k))
+                                    .and_then(|m| m.pick_offset(&unscaled, off))
                                 {
                                     if best.as_ref().is_none_or(|(_, b)| h.t < b.t) {
                                         best = Some((k, h));
@@ -841,14 +1262,20 @@ pub fn canvas(
                         });
                         st.pick = Some(PickInfo {
                             label,
+                            instance_id: key.1,
                             point_um,
                             value,
                             nearest_slide: sess.and_then(|s| nearest_slide(s, point_um[2])),
                         });
+                        select_object(st, Some(key));
                     }
                     _ => {
                         if let Some(id) = st.hovered_slice.filter(|_| !previewing) {
                             event = CanvasEvent::Selected(id);
+                        } else if st.tool == StackTool::Object {
+                            // Klik ruang kosong dengan alat objek = lepas pilihan.
+                            select_object(st, None);
+                            st.pick = None;
                         }
                     }
                 }
@@ -875,19 +1302,27 @@ pub fn canvas(
                 .scalar
                 .as_ref()
                 .is_some_and(|n| m.scalars.iter().any(|s| &s.name == n));
+            let key = mesh_key(m);
+            let is_sel = st.selected == Some(key);
+            let mut opacity = st.opacity.get(&m.label).copied().unwrap_or(1.0);
+            if st.isolate && st.selected.is_some() && !is_sel {
+                opacity *= ISOLATE_DIM;
+            }
             instances.push(MeshInstance {
-                mesh: mesh_id(mesh_key(m)),
+                mesh: mesh_id(key),
                 color: [
                     f32::from(color[0]) / 255.0,
                     f32::from(color[1]) / 255.0,
                     f32::from(color[2]) / 255.0,
                     1.0,
                 ],
-                opacity: st.opacity.get(&m.label).copied().unwrap_or(1.0),
+                opacity,
                 visible: !st.hidden.contains(&m.label),
                 scalar_mode: has_scalar,
                 scalar_range: range.unwrap_or([0.0, 1.0]),
                 colormap: st.colormap,
+                offset_mm: mesh_offset_mm(st, key),
+                highlight: if is_sel { SELECT_HIGHLIGHT } else { 0.0 },
             });
         }
     }
@@ -941,17 +1376,17 @@ pub fn canvas(
             Some(egui::Stroke::new(2.0, h3d_ui::theme::ACCENT))
         } else if is_hover {
             Some(egui::Stroke::new(1.5, egui::Color32::WHITE))
+        } else if edit_id.is_some() && st.edit.downstream.contains(&it.id) {
+            Some(egui::Stroke::new(
+                1.0,
+                h3d_ui::theme::ACCENT_LIGHT.gamma_multiply(0.8),
+            ))
         } else if it.flagged {
             Some(egui::Stroke::new(1.0, h3d_ui::theme::WARNING))
         } else if it.preview {
             Some(egui::Stroke::new(
                 1.0,
                 h3d_ui::theme::ACCENT_LIGHT.gamma_multiply(0.6),
-            ))
-        } else if it.unregistered {
-            Some(egui::Stroke::new(
-                1.0,
-                egui::Color32::from_gray(140).gamma_multiply(0.7),
             ))
         } else {
             None
@@ -975,6 +1410,35 @@ pub fn canvas(
                     label,
                     egui::FontId::proportional(12.0),
                     stroke.color,
+                );
+            }
+        }
+    }
+
+    // Pegangan koreksi: pivot di pusat irisan yang diedit (sama dengan 2D).
+    if let Some((id, _, _, pivot)) = edit_ctx.filter(|_| st.tool.corrects_slice()) {
+        let z_um = visible
+            .iter()
+            .find(|(it, _)| it.id == id)
+            .map(|(it, _)| it.draw.z_um);
+        if let Some(z_um) = z_um {
+            let p = [pivot[0] + st.edit.shift[0], pivot[1] + st.edit.shift[1]];
+            let r = world_um_to_render_mm([p[0], p[1], z_um], st.center_um);
+            let r = Vec3::new(r[0], r[1], r[2] * z_scale);
+            if let Some(c) = project(&view_proj, rect, r) {
+                let accent = h3d_ui::theme::ACCENT;
+                painter.circle_filled(c, 13.0, egui::Color32::from_black_alpha(160));
+                let icon = if st.tool == StackTool::Translate {
+                    h3d_ui::icons::MOVE
+                } else {
+                    h3d_ui::icons::ROTATE
+                };
+                painter.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    icon.codepoint,
+                    egui::FontId::new(18.0, icon.font_family()),
+                    accent,
                 );
             }
         }
@@ -1021,10 +1485,419 @@ pub fn canvas(
             ui.visuals().weak_text_color(),
         );
     }
-    if st.hovered_slice.is_some() {
+    if st.edit.dragging {
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    } else if st.tool.corrects_slice() && edit_id.is_some() && st.hovered_slice == edit_id {
+        ctx.set_cursor_icon(egui::CursorIcon::Grab);
+    } else if st.hovered_slice.is_some() {
         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     event
+}
+
+/// Setel alat kanvas 3D (dari rel alat); memilih alat yang sudah aktif
+/// mengembalikan ke orbit. Koreksi yang belum diterapkan **dipertahankan**
+/// (tetap dipratinjau dan bilah Terapkan tetap tampil) supaya pengguna bisa
+/// menggabungkan balik, putar, dan geser lalu menerapkan sekali.
+pub fn set_tool(app: &mut AppState, tool: StackTool) {
+    let st = &mut app.recon;
+    st.tool = if st.tool == tool {
+        StackTool::Orbit
+    } else {
+        tool
+    };
+    st.edit.dragging = false;
+}
+
+/// Bilah opsi alat koreksi di kanvas 3D: sudut dan geseran yang belum
+/// diterapkan (bisa diketik), putar ±90°, Terapkan, dan atur ulang.
+/// Penerapan memakai jalur yang sama dengan mode 2D (`apply_manual_transform`).
+pub fn tool_options(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
+    sync_focus(app);
+    sync_edit(app, sess);
+    focus_options(app, sess, ui);
+    if app.recon.tool == StackTool::Object {
+        object_options(app, sess, ui);
+        return;
+    }
+    if !editing_active(&app.recon) {
+        return;
+    }
+    let Some(slide) = app.current else {
+        ui.weak(t!("stack-edit-no-selection"));
+        return;
+    };
+    let neighbor = crate::features::register::neighbor_of(sess, slide);
+    let n_down = app.recon.edit.downstream.len();
+    ui.horizontal_wrapped(|ui| {
+        crate::ui_util::strong(ui, crate::ui_util::slide_title(sess, slide));
+        let st = &mut app.recon;
+        ui.label(t!("register-rotate"));
+        let mut deg = st.edit.angle.to_degrees();
+        if ui
+            .add(
+                egui::DragValue::new(&mut deg)
+                    .speed(0.5)
+                    .range(-360.0..=360.0)
+                    .suffix(" deg"),
+            )
+            .changed()
+        {
+            st.edit.angle = deg.to_radians();
+        }
+        if ui.button("-90").clicked() {
+            st.edit.angle = wrap_angle(st.edit.angle - std::f64::consts::FRAC_PI_2);
+        }
+        if ui.button("+90").clicked() {
+            st.edit.angle = wrap_angle(st.edit.angle + std::f64::consts::FRAC_PI_2);
+        }
+        ui.label(format!(
+            "{}: {:.0}, {:.0} {}",
+            t!("register-translate"),
+            st.edit.shift[0],
+            st.edit.shift[1],
+            t!("unit-um")
+        ));
+        crate::features::register::flip_buttons(ui, &mut st.edit.flip);
+        if crate::ui_util::icon_text_button_enabled(
+            ui,
+            st.edit.has_change() && neighbor.is_some(),
+            h3d_ui::icons::CHECK,
+            &t!("action-apply"),
+        )
+        .clicked()
+        {
+            if let Ok(entry) = sess.slide(slide) {
+                let t_old = entry.transform.affine();
+                let size = entry.size_um();
+                let pivot = t_old.apply([size[0] / 2.0, size[1] / 2.0]);
+                // `t_new` memetakan U irisan → W (arah `T_i`, 5.3).
+                let t_new = manual_adjusted_transform(
+                    &t_old,
+                    st.edit.shift,
+                    st.edit.angle,
+                    st.edit.flip,
+                    pivot,
+                );
+                match sess.apply_manual_transform(slide, t_new) {
+                    Ok(()) => {
+                        st.edit.reset();
+                        app.toasts.info(t!("register-correction-applied"));
+                        app.invalidate_derived();
+                    }
+                    Err(e) => app.toasts.engine_error(&e),
+                }
+            }
+        }
+        if ui.button(t!("register-reset-transform")).clicked() {
+            app.recon.edit.reset();
+        }
+    });
+    if neighbor.is_none() {
+        ui.small(t!("stack-edit-reference"));
+    } else {
+        ui.small(t!("stack-edit-hint", n = n_down.to_string()));
+    }
+}
+
+/// Nama tampilan objek `key` (`Label` atau `Label#id`).
+pub fn object_title(sess: &Session, key: MeshKey) -> String {
+    let name = sess
+        .project()
+        .label(key.0)
+        .map_or_else(|| key.0.to_string(), |l| l.name.clone());
+    match key.1 {
+        Some(id) => format!("{name}#{id}"),
+        None => name,
+    }
+}
+
+/// Minta kamera difokuskan ke objek terpilih (kotak pembatasnya, termasuk
+/// angkat); dipenuhi kanvas pada frame berikutnya.
+fn focus_camera_on_selected(st: &mut ReconState) {
+    st.fit_request = st.selected.and_then(|k| mesh_bounds_mm(st, k));
+}
+
+/// Bilah opsi alat objek: nama objek terpilih, penggeser Angkat, Isolasi,
+/// Fokus kamera, Kembalikan, dan lepas pilihan. Semua hanya tampilan.
+fn object_options(app: &mut AppState, sess: &Session, ui: &mut Ui) {
+    let st = &mut app.recon;
+    let Some(key) = st.selected else {
+        ui.small(t!("recon-object-none"));
+        return;
+    };
+    let title = object_title(sess, key);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(icon_label(
+            h3d_ui::icons::OBJECT_PICK,
+            &t!("recon-object-title"),
+        ));
+        crate::ui_util::strong(ui, title);
+        ui.label(icon_label(
+            h3d_ui::icons::OBJECT_LIFT,
+            &t!("recon-object-lift"),
+        ));
+        ui.add(
+            egui::Slider::new(&mut st.lift_mm, LIFT_RANGE)
+                .suffix(format!(" {}", t!("unit-mm")))
+                .show_value(true),
+        )
+        .on_hover_text(t!("recon-object-lift-hint"));
+        ui.checkbox(&mut st.isolate, t!("recon-object-isolate"))
+            .on_hover_text(t!("recon-object-isolate-hint"));
+        if crate::ui_util::icon_text_button(
+            ui,
+            h3d_ui::icons::CENTER_VIEW,
+            &t!("recon-object-focus"),
+        )
+        .clicked()
+        {
+            focus_camera_on_selected(st);
+        }
+        if crate::ui_util::icon_text_button_enabled(
+            ui,
+            st.lift_mm != 0.0 || st.isolate,
+            h3d_ui::icons::UNDO,
+            &t!("recon-object-restore"),
+        )
+        .clicked()
+        {
+            st.lift_mm = 0.0;
+            st.isolate = false;
+        }
+        if crate::ui_util::icon_text_button(ui, h3d_ui::icons::CLOSE, &t!("recon-object-deselect"))
+            .clicked()
+        {
+            select_object(st, None);
+            st.pick = None;
+        }
+    });
+    ui.small(t!("stack-tool-object-hint"));
+}
+
+/// Baris fokus dua irisan di bilah pilihan alat: irisan yang dikoreksi,
+/// pemilih patokan (irisan lain mana pun di tumpukan), Tukar, dan Tampilkan
+/// semua. Kosong bila fokus tidak aktif.
+fn focus_options(app: &mut AppState, sess: &Session, ui: &mut Ui) {
+    let Some((target, partner)) = app.recon.focus else {
+        return;
+    };
+    let others: Vec<SlideId> = app
+        .recon
+        .slices
+        .iter()
+        .filter(|s| !s.preview && s.id != target)
+        .map(|s| s.id)
+        .collect();
+    let mut new_partner = partner;
+    let mut swap = false;
+    let mut show_all = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(icon_label(
+            h3d_ui::icons::FOCUS_PAIR,
+            &t!("stack-focus-title"),
+        ));
+        crate::ui_util::strong(ui, crate::ui_util::slide_title(sess, target));
+        ui.label(t!("stack-focus-partner"));
+        egui::ComboBox::from_id_salt("stack-focus-partner")
+            .selected_text(crate::ui_util::slide_title(sess, partner))
+            .show_ui(ui, |ui| {
+                for id in &others {
+                    ui.selectable_value(
+                        &mut new_partner,
+                        *id,
+                        crate::ui_util::slide_title(sess, *id),
+                    );
+                }
+            });
+        if ui
+            .add(egui::Button::new(h3d_ui::icons::SWAP_VERT.rich_text()))
+            .on_hover_text(t!("stack-focus-swap-hint"))
+            .clicked()
+        {
+            swap = true;
+        }
+        if crate::ui_util::icon_text_button(
+            ui,
+            h3d_ui::icons::VISIBILITY_ON,
+            &t!("stack-focus-show-all"),
+        )
+        .clicked()
+        {
+            show_all = true;
+        }
+    });
+    if !editing_active(&app.recon) {
+        ui.small(t!("stack-focus-hint"));
+    }
+    let st = &mut app.recon;
+    if show_all {
+        focus_clear(st);
+    } else if swap {
+        st.focus = Some((partner, target));
+        app.current = Some(partner);
+    } else if new_partner != partner {
+        st.focus = Some((target, new_partner));
+        st.fitted = false;
+    }
+}
+
+/// Parameter rekonstruksi per objek di laci: saklar per objek, pemisah
+/// objek menempel (watershed), IoU penautan, dan jumlah irisan hilang yang
+/// dijembatani. Mengembalikan `true` bila ada yang berubah (konfigurasi
+/// ikut kunci cache, jadi rekonstruksi dibangun ulang).
+fn object_params(ui: &mut Ui, cfg: &mut h3d_core::ReconConfig) -> bool {
+    let mut changed = false;
+    changed |= ui
+        .checkbox(&mut cfg.per_object, t!("recon-per-object"))
+        .on_hover_text(t!("recon-per-object-hint"))
+        .changed();
+    if !cfg.per_object {
+        return changed;
+    }
+    changed |= ui
+        .checkbox(&mut cfg.track_split.enabled, t!("recon-split-enable"))
+        .on_hover_text(t!("recon-split-enable-hint"))
+        .changed();
+    egui::Grid::new("recon-object-params-grid")
+        .num_columns(2)
+        .show(ui, |ui| {
+            if cfg.track_split.enabled {
+                ui.label(t!("recon-split-seed-distance"));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut cfg.track_split.min_seed_distance_um)
+                            .range(0.0..=5000.0)
+                            .speed(1.0),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label(t!("recon-split-h"));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut cfg.track_split.h_um)
+                            .range(0.0..=1000.0)
+                            .speed(0.5),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label(t!("recon-split-min-area"));
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut cfg.track_split.min_area_um2)
+                            .range(0.0..=1.0e8)
+                            .speed(10.0),
+                    )
+                    .changed();
+                ui.end_row();
+            }
+            ui.label(t!("recon-track-min-iou"));
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut cfg.track_min_iou)
+                        .range(0.0..=1.0)
+                        .speed(0.01),
+                )
+                .changed();
+            ui.end_row();
+            ui.label(t!("recon-track-max-skip"))
+                .on_hover_text(t!("recon-track-max-skip-hint"));
+            changed |= ui
+                .add(egui::DragValue::new(&mut cfg.track_max_skip).range(0..=5))
+                .changed();
+            ui.end_row();
+        });
+    changed
+}
+
+/// Daftar objek di laci: satu baris per mesh ber-`instance_id`, dikelompokkan
+/// per label, dengan jumlah irisan dan rentang z dari `tracks.json`. Klik
+/// baris = pilih (sama dengan klik di kanvas). Kosong bila tidak ada objek.
+fn object_list(app: &mut AppState, sess: &Session, ui: &mut Ui) {
+    let st = &mut app.recon;
+    if !st.meshes.iter().any(|m| m.instance_id.is_some()) {
+        return;
+    }
+    let tracks = sess.tracks().ok().flatten();
+    let mut labels: Vec<LabelId> = st.meshes.iter().map(|m| m.label).collect();
+    labels.dedup();
+    egui::CollapsingHeader::new(icon_label(
+        h3d_ui::icons::OBJECT_LIST,
+        &t!("recon-object-list"),
+    ))
+    .default_open(true)
+    .show(ui, |ui| {
+        ui.small(t!("recon-object-list-hint"));
+        let mut clicked: Option<MeshKey> = None;
+        for label in labels {
+            let def = sess.project().label(label).cloned();
+            let set = tracks.as_ref().and_then(|t| t.set(label));
+            let name = def
+                .as_ref()
+                .map_or_else(|| label.to_string(), |d| d.name.clone());
+            ui.horizontal(|ui| {
+                if let Some(d) = &def {
+                    h3d_ui::widgets::color_swatch(ui, d.color);
+                }
+                crate::ui_util::strong(ui, name);
+                if let Some(set) = set {
+                    ui.weak(t!(
+                        "recon-object-events",
+                        n = set.event_count().to_string(),
+                        b = set.bridged.to_string()
+                    ));
+                }
+            });
+            let rows: Vec<(MeshKey, String, f64)> = st
+                .meshes
+                .iter()
+                .filter(|m| m.label == label)
+                .map(|m| {
+                    let key = mesh_key(m);
+                    let text = match key.1 {
+                        Some(id) => {
+                            let track = set.and_then(|s| s.track(id));
+                            let (z0, z1) = track.and_then(|t| t.z_range_um()).unwrap_or((0.0, 0.0));
+                            t!(
+                                "recon-object-row",
+                                id = id.to_string(),
+                                slices = track.map_or(0, |t| t.members.len()).to_string(),
+                                z0 = format!("{:.2}", z0 / 1000.0),
+                                z1 = format!("{:.2}", z1 / 1000.0)
+                            )
+                        }
+                        None => t!("recon-object-whole"),
+                    };
+                    (key, text, m.signed_volume_um3())
+                })
+                .collect();
+            egui::ScrollArea::vertical()
+                .id_salt(("object-list", label.0))
+                .max_height(OBJECT_LIST_MAX_HEIGHT)
+                .show(ui, |ui| {
+                    for (key, text, vol) in rows {
+                        let sel = st.selected == Some(key);
+                        let r = ui.selectable_label(sel, text).on_hover_text(t!(
+                            "recon-object-volume",
+                            v = format!("{:.4}", vol / 1e9)
+                        ));
+                        if r.clicked() {
+                            clicked = Some(key);
+                        }
+                    }
+                });
+        }
+        if let Some(key) = clicked {
+            if st.selected == Some(key) {
+                select_object(st, None);
+            } else {
+                select_object(st, Some(key));
+                if st.tool == StackTool::Orbit {
+                    st.tool = StackTool::Object;
+                }
+            }
+        }
+    });
 }
 
 /// ViewCube di pojok kanan atas `work` (area kanvas di luar laci), digambar
@@ -1103,6 +1976,7 @@ pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Opti
                         .changed();
                     ui.end_row();
                 });
+            changed |= object_params(ui, &mut cfg);
             if changed {
                 if let Err(e) = sess.set_recon_config(cfg) {
                     app.toasts.engine_error(&e);
@@ -1151,6 +2025,8 @@ pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Opti
             }
         });
 
+    object_list(app, sess, ui);
+
     egui::CollapsingHeader::new(icon_label(h3d_ui::icons::IMAGE, &t!("recon-slices-in-3d")))
         .default_open(false)
         .show(ui, |ui| {
@@ -1183,8 +2059,15 @@ pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Opti
                     st.fitted = false;
                 }
             });
+            ui.horizontal(|ui| {
+                ui.label(icon_label(h3d_ui::icons::EXPAND_Z, &t!("slides-spacing")));
+                crate::ui_util::spacing_slider(ui, sess, &mut app.toasts, &mut st.spacing_preview);
+            });
             if !st.hidden_slices.is_empty() && ui.button(t!("stack-slice-shown")).clicked() {
                 st.hidden_slices.clear();
+            }
+            if st.focus.is_some() && ui.button(t!("stack-focus-show-all")).clicked() {
+                focus_clear(st);
             }
         });
 
@@ -1277,9 +2160,7 @@ pub fn tumor_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Opti
     if let Some(pick) = app.recon.pick.clone() {
         ui.separator();
         crate::ui_util::strong(ui, t!("recon-pick-title"));
-        if let Some(def) = sess.project().label(pick.label) {
-            ui.label(&def.name);
-        }
+        ui.label(object_title(sess, (pick.label, pick.instance_id)));
         match &pick.value {
             Some((v, unit)) => {
                 ui.label(t!(
@@ -1354,7 +2235,6 @@ mod tests {
                 alpha: 1.0,
             },
             flagged: false,
-            unregistered: false,
             preview: false,
         }
     }
@@ -1427,5 +2307,102 @@ mod tests {
     fn viewcube_actions_map_to_presets() {
         assert_eq!(preset_for(ViewCubeAction::Top), ViewPreset::Top);
         assert_eq!(preset_for(ViewCubeAction::Left), ViewPreset::Left);
+    }
+
+    #[test]
+    fn wrap_angle_keeps_smallest_difference() {
+        let pi = std::f64::consts::PI;
+        assert!((wrap_angle(1.5 * pi) - (-0.5 * pi)).abs() < 1e-12);
+        assert!((wrap_angle(-1.5 * pi) - 0.5 * pi).abs() < 1e-12);
+        assert!((wrap_angle(0.3) - 0.3).abs() < 1e-12);
+        assert!((angle_about([1.0, 1.0], [0.0, 0.0]) - pi / 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn focus_pair_hides_other_slices_and_fits_camera() {
+        let mut st = ReconState {
+            slices: (0..5)
+                .map(|i| item(i, f64::from(i) * 4.0, 1000.0, 500.0))
+                .collect(),
+            fitted: true,
+            ..Default::default()
+        };
+        assert!((0..5).all(|i| slice_visible(&st, SlideId(i))));
+        st.focus = Some((SlideId(2), SlideId(1)));
+        assert!(slice_visible(&st, SlideId(2)) && slice_visible(&st, SlideId(1)));
+        assert!(!slice_visible(&st, SlideId(0)) && !slice_visible(&st, SlideId(3)));
+        // Sembunyikan manual tetap berlaku di dalam fokus.
+        st.hidden_slices.insert(SlideId(1));
+        assert!(!slice_visible(&st, SlideId(1)));
+        // Kotak kanvas hanya memuat pasangan fokus: tebal Z = 0 (hanya z=8).
+        st.hidden_slices.clear();
+        st.focus = Some((SlideId(2), SlideId(2)));
+        let (lo, hi) = canvas_bounds(&st).unwrap();
+        assert!((hi.z - lo.z).abs() < 1e-6);
+        // Tampilkan semua memaskan ulang kamera; tanpa fokus tidak berubah.
+        focus_clear(&mut st);
+        assert!(st.focus.is_none() && !st.fitted);
+        st.fitted = true;
+        focus_clear(&mut st);
+        assert!(st.fitted);
+    }
+
+    #[test]
+    fn nearest_other_slice_is_deterministic() {
+        let items: Vec<SliceItem> = [(0, 0.0), (1, 4.0), (2, 8.0), (3, 12.0)]
+            .iter()
+            .map(|(i, z)| item(*i, *z, 100.0, 100.0))
+            .collect();
+        // Dua tetangga sama jauh → id terkecil.
+        assert_eq!(nearest_other_slice(&items, SlideId(2)), Some(SlideId(1)));
+        assert_eq!(nearest_other_slice(&items, SlideId(0)), Some(SlideId(1)));
+        assert_eq!(nearest_other_slice(&items, SlideId(9)), None);
+        assert_eq!(nearest_other_slice(&items[..1], SlideId(0)), None);
+    }
+
+    #[test]
+    fn edit_transforms_rotate_about_slice_centre_and_follow_tool() {
+        let mut st = ReconState {
+            slices: vec![item(0, 0.0, 1000.0, 500.0), item(1, 10.0, 1000.0, 500.0)],
+            edit: StackEdit {
+                slide: Some(SlideId(1)),
+                angle: std::f64::consts::FRAC_PI_2,
+                shift: [20.0, -30.0],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Orbit dengan koreksi tertunda: tetap dipratinjau (koreksi tidak
+        // hilang saat berganti alat); orbit tanpa koreksi: tidak ada pratinjau.
+        assert!(editing_active(&st) && edit_transforms(&st).is_some());
+        let quiet = ReconState {
+            slices: st.slices.clone(),
+            edit: StackEdit {
+                slide: Some(SlideId(1)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!editing_active(&quiet) && edit_transforms(&quiet).is_none());
+        st.tool = StackTool::Rotate;
+        let (id, t_old, t_new, pivot) = edit_transforms(&st).unwrap();
+        assert_eq!(id, SlideId(1));
+        assert_eq!(pivot, [500.0, 250.0]);
+        // Pusat irisan hanya tergeser `shift`; titik lain berputar 90°.
+        let c = t_new.apply([500.0, 250.0]);
+        assert!((c[0] - 520.0).abs() < 1e-9 && (c[1] - 220.0).abs() < 1e-9);
+        let p = t_new.apply([600.0, 250.0]);
+        assert!((p[0] - 520.0).abs() < 1e-9 && (p[1] - 320.0).abs() < 1e-9);
+        // Irisan sesudahnya ikut `T_baru ∘ T_lama⁻¹`: untuk T lama identitas
+        // sama dengan T baru.
+        let delta = t_new.compose(&t_old.inverse().unwrap());
+        assert_eq!(delta.m, t_new.m);
+        // Irisan yang tidak ada di cache → tidak ada pratinjau.
+        st.edit.slide = Some(SlideId(9));
+        assert!(edit_transforms(&st).is_none());
+        // Atur ulang membuang perubahan tetapi mempertahankan irisan.
+        st.edit.reset();
+        assert!(!st.edit.has_change());
+        assert_eq!(st.edit.slide, Some(SlideId(9)));
     }
 }

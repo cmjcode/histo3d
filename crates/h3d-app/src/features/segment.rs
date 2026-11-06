@@ -28,7 +28,10 @@ use crate::panels::sample::combo;
 use crate::state::{AppState, Drawer, JobOutput};
 use crate::tiles::{label_tiles_touched, palette_from_labels};
 use crate::ui_util::{icon_label, icon_text_button, icon_text_button_enabled};
-use crate::viewer::{label_layer, paint_background, slide_layer, Viewer2D};
+use crate::viewer::{
+    hide_background_checkbox, label_layer, paint_background, slide_layer, tissue_mask_if_enabled,
+    Viewer2D,
+};
 
 /// Alat aktif penandaan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -486,6 +489,7 @@ pub fn tool_options(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
             &mut app.segment.outline,
             icon_label(h3d_ui::icons::OUTLINE, &t!("segment-outline")),
         );
+        hide_background_checkbox(app, ui);
         if crate::platform::is_mobile() || app.settings.finger_draw {
             let mut on = app.settings.finger_draw;
             if ui
@@ -959,8 +963,9 @@ pub fn viewer(app: &mut AppState, sess: &mut Session, ui: &mut Ui, gpu: Option<&
         );
     }
 
-    // Adegan: gambar + overlay label.
-    let base = slide_layer(&mut app.tiles, sess, gpu, slide, &t_affine, &frame.view);
+    // Adegan: gambar (latar kaca disembunyikan bila diminta) + overlay label.
+    let mut base = slide_layer(&mut app.tiles, sess, gpu, slide, &t_affine, &frame.view);
+    base.mask = tissue_mask_if_enabled(app, sess, gpu, ui.ctx(), slide);
     let mut label_layers = Vec::new();
     match sess.labels(slide) {
         Ok(_) => {}

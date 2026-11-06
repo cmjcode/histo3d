@@ -18,6 +18,7 @@ build_app() {
   # Pembaru (proses terpisah; h3d-app sendiri tanpa HTTP, aturan 11).
   cp "target/$SUB/histo3d-updater" "$DIST/histo3d-updater"
   chmod +x "$DIST/$BIN_NAME" "$DIST/histo3d-updater"
+  cp crates/h3d-app/assets/histo3d-512.png "$DIST/$BIN_NAME.png"
   cat > "$DIST/$BIN_NAME.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -25,6 +26,7 @@ Version=1.0
 Name=$APP_NAME
 Comment=Rekonstruksi 3D tumor dari irisan histologi serial (hanya untuk riset, bukan untuk diagnosis)
 Exec=$DIST/$BIN_NAME
+Icon=$DIST/$BIN_NAME.png
 Terminal=false
 Categories=Science;MedicalSoftware;Graphics;
 StartupWMClass=$APP_NAME

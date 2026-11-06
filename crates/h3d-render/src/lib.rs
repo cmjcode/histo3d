@@ -33,8 +33,9 @@ pub use colormap::{LutTexture, Palette256};
 pub use compare::{CompareMode, CompareParams};
 pub use error::RenderError;
 pub use mesh::{
-    pick_triangle, ray_from_screen, render_to_world_um, sort_back_to_front, upload_mesh,
-    world_um_to_render_mm, GpuMesh, MeshId, MeshInstance, MeshVertex, PickHit, Ray, NODATA_SCALAR,
+    pick_offset_cpu, pick_triangle, ray_from_screen, render_to_world_um, sort_back_to_front,
+    upload_mesh, world_um_to_render_mm, GpuMesh, MeshId, MeshInstance, MeshVertex, PickHit, Ray,
+    NODATA_SCALAR,
 };
 pub use overlay::{default_palette, LabelOverlayDraw};
 pub use scene::{
@@ -46,6 +47,7 @@ pub use slices3d::{
     SliceId, SlicePick, SliceTexture,
 };
 pub use tiles::{
-    GpuTile, GpuTileCache, TileCacheIndex, TileDraw, TileKey, TileLayerDraw, TileTextureId,
-    TileTextureKind, UploadStatus, DEFAULT_MAX_UPLOADS_PER_FRAME, DEFAULT_STALE_AFTER_FRAMES,
+    GpuTile, GpuTileCache, TileCacheIndex, TileDraw, TileKey, TileLayerDraw, TileMask,
+    TileTextureId, TileTextureKind, UploadStatus, DEFAULT_MAX_UPLOADS_PER_FRAME,
+    DEFAULT_STALE_AFTER_FRAMES,
 };

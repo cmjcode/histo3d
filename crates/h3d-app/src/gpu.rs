@@ -51,11 +51,13 @@ impl Gpu {
         Some(f(renderer, &self.rs.device, &self.rs.queue))
     }
 
-    /// Kosongkan cache tile GPU (peringatan memori, 9.4).
+    /// Kosongkan cache tile GPU dan masker jaringan 2D (peringatan memori,
+    /// 9.4). Masker dibuat ulang otomatis saat dibutuhkan.
     pub fn clear_tile_caches(&self) {
         self.with(|r, _, _| {
             r.tiles.clear();
             r.labels.clear();
+            r.clear_tile_masks();
         });
     }
 }

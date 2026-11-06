@@ -542,7 +542,7 @@ fn order_suggestion_is_applied_only_through_accept() {
         out.textures_delta.clear();
         assert_eq!(decision, slides::OrderDecision::None);
     }
-    let items = h3d_app::features::reconstruct::slice_items(&s, Some(&preview), 1.0);
+    let items = h3d_app::features::reconstruct::slice_items(&s, Some(&preview), 1.0, None);
     assert_eq!(items.len(), 5);
     assert!(items.iter().all(|i| i.preview));
     let numbers: Vec<u32> = items.iter().map(|i| i.number).collect();
@@ -557,6 +557,50 @@ fn order_suggestion_is_applied_only_through_accept() {
         .slides()
         .iter()
         .any(|e| e.order_source == h3d_core::OrderSource::Suggested));
+}
+
+#[test]
+fn spacing_preview_moves_default_z_only_in_display() {
+    use h3d_app::features::reconstruct::slice_items;
+    let fx = phantom(4);
+    let path = project(&fx);
+    let mut s = Session::open(&path).unwrap();
+    let spacing = s.project().recon.default_spacing_um;
+    // Irisan ke-3 diisi tangan: tidak boleh ikut pratinjau.
+    let ids: Vec<SlideId> = s.slides().iter().map(|e| e.id).collect();
+    s.set_z(ids[2], 777.0).unwrap();
+    let before: Vec<f64> = slice_items(&s, None, 1.0, None)
+        .iter()
+        .map(|i| i.draw.z_um)
+        .collect();
+    let preview = slice_items(&s, None, 1.0, Some(spacing * 3.0));
+    for (it, z_before) in preview.iter().zip(&before) {
+        let e = s.slide(it.id).unwrap();
+        if e.z_is_default {
+            assert!((it.draw.z_um - f64::from(e.order) * spacing * 3.0).abs() < 1e-9);
+        } else {
+            assert_eq!(it.draw.z_um, *z_before);
+            assert_eq!(it.draw.z_um, 777.0);
+        }
+    }
+    // Pratinjau tidak menyentuh manifes; komit lewat `set_spacing` = satu
+    // langkah undo yang mengembalikan z bawaan.
+    assert_eq!(s.project().recon.default_spacing_um, spacing);
+    assert!(!s.can_undo_project() || s.project_undo_name() != Some("undo-spacing"));
+    s.set_spacing(spacing * 3.0).unwrap();
+    assert_eq!(s.project_undo_name(), Some("undo-spacing"));
+    let after: Vec<f64> = slice_items(&s, None, 1.0, None)
+        .iter()
+        .map(|i| i.draw.z_um)
+        .collect();
+    let want: Vec<f64> = preview.iter().map(|i| i.draw.z_um).collect();
+    assert_eq!(after, want);
+    s.undo_project().unwrap();
+    let restored: Vec<f64> = slice_items(&s, None, 1.0, None)
+        .iter()
+        .map(|i| i.draw.z_um)
+        .collect();
+    assert_eq!(restored, before);
 }
 
 #[test]
