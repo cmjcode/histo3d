@@ -460,6 +460,46 @@ fn vox_and_mesh_cache_roundtrip_and_corruption() {
     let bytes = encode_mesh(&mesh).unwrap();
     let back = decode_mesh(&bytes, p).unwrap();
     assert_eq!(back, mesh);
+    // Warna pulasan dan oklusi ambien ikut tersimpan.
+    let n = mesh.positions_um.len();
+    mesh.colors = (0..n).map(|i| [(i % 256) as u8, 7, 200]).collect();
+    mesh.occlusion = (0..n).map(|i| (i % 10) as f32 / 10.0).collect();
+    let bytes = encode_mesh(&mesh).unwrap();
+    let back = decode_mesh(&bytes, p).unwrap();
+    assert_eq!(back, mesh);
+    assert!(decode_mesh(&bytes[..bytes.len() - 1], p).is_err());
+
     assert!(decode_mesh(&bytes[..bytes.len() - 5], p).is_err());
     assert!(decode_mesh(&encode_vox(&mask).unwrap(), p).is_err());
+}
+
+#[test]
+fn glb_writes_stain_colours_as_linear_color_0() {
+    let mut mesh = common::sphere_mesh();
+    let n = mesh.positions_um.len();
+    mesh.colors = vec![[255, 128, 0]; n];
+    let meshes = [GlbMesh {
+        name: "Tumor",
+        color: [220, 40, 40, 255],
+        mesh: &mesh,
+    }];
+    let bytes = encode_glb(&meshes, None).unwrap();
+    let (doc, bin) = parse_glb(&bytes).unwrap();
+    check_gltf_consistency(&doc, &bin);
+    let prim = &doc["meshes"][0]["primitives"][0];
+    let a = prim["attributes"]["COLOR_0"].as_u64().expect("COLOR_0");
+    assert_eq!(doc["accessors"][a as usize]["type"], "VEC3");
+    let c = read_f32(&bin, &doc, a);
+    assert_eq!(c.len(), 3 * n);
+    assert!((c[0] - 1.0).abs() < 1e-6);
+    // sRGB 128 ≈ 0,2158 linear.
+    assert!((c[1] - 0.2158).abs() < 1e-3, "{}", c[1]);
+    assert_eq!(c[2], 0.0);
+    assert_eq!(doc["meshes"][0]["extras"]["h3d_vertex_color"], "stain");
+    // Material putih agar warna verteks tidak tercampur warna label.
+    let mat = prim["material"].as_u64().unwrap() as usize;
+    assert_eq!(
+        doc["materials"][mat]["pbrMetallicRoughness"]["baseColorFactor"][0],
+        1.0
+    );
 }

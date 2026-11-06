@@ -7,6 +7,8 @@
 //!   colormap, dan nilai mentahnya sebagai atribut verteks `_H3D_<NAMA>`
 //!   (`f32`). glTF melarang NaN di accessor, jadi NODATA ditulis sebagai
 //!   [`GLB_NODATA`] dan dicatat di `extras`.
+//! - Tanpa skalar terpilih, warna pulasan verteks (`LabelMesh::colors`)
+//!   ditulis sebagai `COLOR_0` VEC3 float linear.
 
 use h3d_core::Colormap;
 use h3d_volume::LabelMesh;
@@ -52,6 +54,16 @@ pub struct GlbScalar<'a> {
     pub colormap: Colormap,
     /// Rentang tampilan; `None` = persentil 2–98 nilai finit semua mesh.
     pub range: Option<[f32; 2]>,
+}
+
+/// sRGB 8-bit → linear `[0, 1]` (IEC 61966-2-1).
+pub fn srgb_u8_to_linear(v: u8) -> f32 {
+    let c = f32::from(v) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Nama atribut verteks glTF untuk skalar: `_H3D_<NAMA>` (huruf besar ASCII,
@@ -265,6 +277,22 @@ pub fn encode_glb(
                 extras.insert("h3d_scalar_range".into(), json!([lo as f64, hi as f64]));
                 extras.insert("h3d_scalar_nodata".into(), json!(GLB_NODATA as f64));
             }
+        }
+        // Tanpa skalar terpilih: warna pulasan verteks (sRGB → linear, sebab
+        // COLOR_0 glTF berada di ruang linear) sebagai VEC3 float.
+        if !has_color && m.mesh.colors.len() == n_vert {
+            let view = b.push_view(
+                &f32_bytes(m.mesh.colors.iter().flat_map(|c| c.map(srgb_u8_to_linear))),
+                TARGET_ARRAY_BUFFER,
+            );
+            let mut acc = Map::new();
+            acc.insert("componentType".into(), json!(COMPONENT_F32));
+            acc.insert("count".into(), json!(n_vert));
+            acc.insert("type".into(), json!("VEC3"));
+            let a = b.push_accessor(acc, view);
+            attributes.insert("COLOR_0".into(), json!(a));
+            has_color = true;
+            extras.insert("h3d_vertex_color".into(), json!("stain"));
         }
 
         // Indeks (orientasi ditukar untuk kerangka tangan-kanan).

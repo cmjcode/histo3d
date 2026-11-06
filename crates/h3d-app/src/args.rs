@@ -7,7 +7,7 @@ use crate::state::{Drawer, View};
 /// Teks bantuan.
 pub const USAGE: &str = "Pemakaian: histo3d [--project <folder.h3d>] [--view 3d|2d] \
 [--drawer layers|sample|labels|align|tumor3d] [--report] [--slide <nomor urut>] [--analyze] \
-[--screenshot <berkas.png>] [--lang id|en] [--theme dark|light]";
+[--screenshot <berkas.png>] [--lang id|en] [--theme dark|light] [--look technical|tissue]";
 
 /// Argumen yang sudah diurai.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -30,6 +30,8 @@ pub struct CliArgs {
     pub slide: Option<usize>,
     /// Jalankan analisis spasial saat mulai (mengisi lapisan skalar mesh).
     pub analyze: bool,
+    /// Gaya tampilan 3D awal.
+    pub look: Option<crate::features::reconstruct::ViewLook>,
     /// Hanya cetak bantuan.
     pub help: bool,
 }
@@ -106,6 +108,15 @@ impl CliArgs {
                         _ => return Err(format!("tema tidak dikenal: {v}")),
                     });
                 }
+                "--look" => {
+                    use crate::features::reconstruct::ViewLook;
+                    let v = value("--look")?;
+                    out.look = Some(match v.to_ascii_lowercase().as_str() {
+                        "technical" | "teknis" => ViewLook::Technical,
+                        "tissue" | "jaringan" => ViewLook::Tissue,
+                        _ => return Err(format!("gaya tampilan tidak dikenal: {v}")),
+                    });
+                }
                 other => return Err(format!("argumen tidak dikenal: {other}")),
             }
         }
@@ -140,8 +151,13 @@ mod tests {
             "--slide",
             "3",
             "--analyze",
+            "--look",
+            "jaringan",
         ])
         .unwrap();
+        assert_eq!(a.look, Some(crate::features::reconstruct::ViewLook::Tissue));
+        assert!(parse(&["--look", "mewah"]).is_err());
+
         assert_eq!(a.project, Some(PathBuf::from("/tmp/x.h3d")));
         assert_eq!(a.view, Some(View::Slice2D));
         assert_eq!(a.drawer, Some(Drawer::Labels));

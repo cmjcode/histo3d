@@ -13,6 +13,11 @@ use crate::tiles::TileSink;
 /// dengan render pass egui (catatan modul `h3d_render::scene`).
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Sampel MSAA render pass egui (`NativeOptions::multisampling`). WebGPU
+/// menjamin 4× untuk format warna/depth yang dapat dirender, termasuk di
+/// Metal (macOS/iPad). Semua pipeline `SceneRenderer` memakai nilai ini.
+pub const MSAA_SAMPLES: u16 = 4;
+
 /// Bagi anggaran GPU `Budgets` menjadi cache tile gambar (7/8) dan cache
 /// tile label (1/8). Angka byte hanya berasal dari `Budgets` (aturan 15).
 pub fn render_budgets(b: &Budgets) -> RenderBudgets {
@@ -34,6 +39,7 @@ impl Gpu {
             &rs.queue,
             rs.target_format,
             Some(DEPTH_FORMAT),
+            u32::from(MSAA_SAMPLES),
             render_budgets(budgets),
         );
         rs.renderer.write().callback_resources.insert(renderer);

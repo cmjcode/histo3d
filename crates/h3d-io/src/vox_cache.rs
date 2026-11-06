@@ -35,6 +35,12 @@ struct MeshHeader {
     n_normals: usize,
     n_indices: usize,
     scalars: Vec<(String, String)>,
+    /// Warna verteks (0 atau `n_vertices`), 3 byte sRGB masing-masing.
+    #[serde(default)]
+    n_colors: usize,
+    /// Oklusi ambien verteks (0 atau `n_vertices`), `f32` masing-masing.
+    #[serde(default)]
+    n_occlusion: usize,
 }
 
 fn frame(magic: &[u8; 4], header_json: &[u8], payload: &[u8]) -> Vec<u8> {
@@ -125,6 +131,8 @@ pub fn encode_mesh(mesh: &LabelMesh) -> Result<Vec<u8>, IoError> {
             .iter()
             .map(|s| (s.name.clone(), s.unit.clone()))
             .collect(),
+        n_colors: if mesh.colors.len() == n { n } else { 0 },
+        n_occlusion: if mesh.occlusion.len() == n { n } else { 0 },
     };
     let json =
         serde_json::to_vec(&header).map_err(|e| IoError::json(Path::new("cache.mesh"), e))?;
@@ -149,6 +157,16 @@ pub fn encode_mesh(mesh: &LabelMesh) -> Result<Vec<u8>, IoError> {
             payload.extend_from_slice(&v.to_le_bytes());
         }
     }
+    if header.n_colors == n {
+        for c in &mesh.colors {
+            payload.extend_from_slice(c);
+        }
+    }
+    if header.n_occlusion == n {
+        for v in &mesh.occlusion {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+    }
     Ok(frame(MESH_MAGIC, &json, &payload))
 }
 
@@ -169,8 +187,15 @@ pub fn decode_mesh(bytes: &[u8], path: &Path) -> Result<LabelMesh, IoError> {
                 .and_then(|s| s.checked_mul(4))
                 .and_then(|b| a.checked_add(b))
         })
+        .and_then(|a| h.n_colors.checked_mul(3).and_then(|b| a.checked_add(b)))
+        .and_then(|a| h.n_occlusion.checked_mul(4).and_then(|b| a.checked_add(b)))
         .ok_or_else(bad)?;
-    if payload.len() != need || !h.n_indices.is_multiple_of(3) {
+    let attr_ok = |n: usize| n == 0 || n == h.n_vertices;
+    if payload.len() != need
+        || !h.n_indices.is_multiple_of(3)
+        || !attr_ok(h.n_colors)
+        || !attr_ok(h.n_occlusion)
+    {
         return Err(bad());
     }
     let mut o = 0usize;
@@ -213,6 +238,15 @@ pub fn decode_mesh(bytes: &[u8], path: &Path) -> Result<LabelMesh, IoError> {
         }
         scalars.push(MeshScalars { name, unit, values });
     }
+    let mut colors = Vec::with_capacity(h.n_colors);
+    for _ in 0..h.n_colors {
+        colors.push([payload[o], payload[o + 1], payload[o + 2]]);
+        o += 3;
+    }
+    let mut occlusion = Vec::with_capacity(h.n_occlusion);
+    for _ in 0..h.n_occlusion {
+        occlusion.push(f32_next(&mut o));
+    }
     Ok(LabelMesh {
         label: LabelId(h.label),
         positions_um,
@@ -220,5 +254,7 @@ pub fn decode_mesh(bytes: &[u8], path: &Path) -> Result<LabelMesh, IoError> {
         indices,
         scalars,
         instance_id: h.instance_id,
+        colors,
+        occlusion,
     })
 }

@@ -425,6 +425,27 @@ recon-pick-value = Value: { $value } { $unit }
 recon-pick-nearest-slice = Nearest slice: { $n }
 recon-reset-camera = Reset camera
 recon-mesh-stats = { $vertices } vertices, { $triangles } triangles
+recon-sdf-smooth = Between-section smoothing (sigma Z, µm)
+recon-sdf-smooth-hint = Smooths the "staircase" between sections before the surface is built. Mesh shape only; volume, margins, and all analyses are still computed from the voxel mask.
+recon-subdivision = Surface subdivision
+recon-stain-recon = Colour mesh from sections
+recon-stain-colors-hint = Surface colour is taken from the nearest H&E section (tissue-masked thumbnail). Display and GLB export only.
+recon-stain-colors-missing = The mesh carries no stain colours yet; enable "Colour mesh from sections" and rebuild.
+recon-organic-preset = Organic surface
+recon-organic-preset-hint = Fill in between-section smoothing, subdivision, and stain colours, then switch to the tissue illustration style. Rebuild the reconstruction to apply.
+recon-look = Display style
+recon-look-technical = Technical
+recon-look-tissue = Tissue illustration
+recon-stain-colors = Stain colours
+recon-glass = Sections as glass slides
+recon-cell-bumps = Cell bumps (illustrative)
+recon-cell-size = Display cell size (µm)
+recon-cell-strength = Bump strength
+recon-illustrative-warning = Illustrative: cell bumps are procedural, not reconstructed cells. Their size and number carry no meaning and are never used for measurement.
+recon-auto-rotate = Auto-rotate
+recon-explode = Explode objects
+recon-explode-hint = Move each object away from the stack centre so inner structure becomes visible. Display only.
+
 
 # --- Report mode ---
 report-title = Report

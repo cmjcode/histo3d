@@ -28,6 +28,7 @@ mod models;
 mod recon;
 mod register;
 mod spatial;
+mod surface;
 
 pub use attrs::AttrParams;
 pub use export::ExportKind;
@@ -496,7 +497,11 @@ impl Session {
             && cfg.decimate_error_factor.is_finite()
             && cfg.decimate_error_factor >= 0.0
             && cfg.default_spacing_um.is_finite()
-            && cfg.default_spacing_um > 0.0;
+            && cfg.default_spacing_um > 0.0
+            && cfg.sdf_smooth_sigma_um.is_finite()
+            && cfg.sdf_smooth_sigma_um >= 0.0
+            && cfg.subdivision_levels <= h3d_volume::MAX_SUBDIVISION_LEVELS;
+
         if !ok {
             return Err(EngineError::invalid("konfigurasi rekonstruksi tidak sah"));
         }

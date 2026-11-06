@@ -36,6 +36,9 @@ pub fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         depth_buffer: 32,
+        // Tepi mesh halus; harus sama dengan sampel pipeline `SceneRenderer`.
+        multisampling: crate::gpu::MSAA_SAMPLES,
+
         viewport,
         // `persistence` hanya dipakai agar eframe memanggil `App::save`.
         persist_window: false,
@@ -118,6 +121,10 @@ impl H3dApp {
             state.toggle_drawer(drawer);
         }
         state.report_open = args.report;
+        if let Some(look) = args.look {
+            state.recon.set_look(look);
+        }
+
         if args.analyze {
             state.recon.want_first_scalar = true;
             state.start_job(h3d_i18n::t!("recon-analyze"), |s, p| {

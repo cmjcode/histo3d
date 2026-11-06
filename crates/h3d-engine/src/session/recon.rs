@@ -484,7 +484,7 @@ impl Session {
                     if p.is_cancelled() {
                         return Err(EngineError::Cancelled);
                     }
-                    let sub = SubProgress::new(p, i as f32 / n, (i + 1) as f32 / n);
+                    let sub = SubProgress::new(p, 0.9 * i as f32 / n, 0.9 * (i + 1) as f32 / n);
                     if l.reconstruct && cfg.per_object {
                         // Per objek: masker label utuh untuk analisis spasial,
                         // mesh terpisah per objek hasil penautan antar irisan.
@@ -508,6 +508,9 @@ impl Session {
                 if p.is_cancelled() {
                     return Err(EngineError::Cancelled);
                 }
+                // Hiasan tampilan (oklusi, warna pulasan); tidak memengaruhi
+                // masker voxel atau pengukuran.
+                self.decorate_meshes(&mut meshes, &data, &plan, &SubProgress::new(p, 0.9, 1.0));
                 if !sets.is_empty() {
                     // Gagal menulis tracks.json bukan galat rekonstruksi.
                     if let Err(e) = self.save_track_sets(sets) {

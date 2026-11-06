@@ -425,6 +425,27 @@ recon-pick-value = Nilai: { $value } { $unit }
 recon-pick-nearest-slice = Irisan terdekat: { $n }
 recon-reset-camera = Atur ulang kamera
 recon-mesh-stats = { $vertices } titik, { $triangles } segitiga
+recon-sdf-smooth = Penghalusan antar irisan (sigma Z, µm)
+recon-sdf-smooth-hint = Menghaluskan "tangga" antar irisan sebelum permukaan dibentuk. Hanya bentuk mesh; volume, margin, dan semua analisis tetap dihitung dari masker voxel.
+recon-subdivision = Subdivisi permukaan
+recon-stain-recon = Warnai mesh dari irisan
+recon-stain-colors-hint = Warna permukaan diambil dari irisan H&E terdekat (thumbnail bermasker jaringan). Hanya tampilan dan ekspor GLB.
+recon-stain-colors-missing = Mesh belum membawa warna pulasan; aktifkan "Warnai mesh dari irisan" lalu bangun ulang.
+recon-organic-preset = Permukaan organik
+recon-organic-preset-hint = Isi penghalusan antar irisan, subdivisi, dan warna pulasan, lalu pakai gaya ilustrasi jaringan. Bangun ulang rekonstruksi agar berlaku.
+recon-look = Gaya tampilan
+recon-look-technical = Teknis
+recon-look-tissue = Ilustrasi jaringan
+recon-stain-colors = Warna pulasan
+recon-glass = Irisan seperti kaca objek
+recon-cell-bumps = Tonjolan sel (ilustratif)
+recon-cell-size = Ukuran sel tampilan (µm)
+recon-cell-strength = Kekuatan tonjolan
+recon-illustrative-warning = Ilustratif: tonjolan sel dibuat prosedural, bukan sel hasil rekonstruksi. Ukuran dan jumlahnya tidak bermakna dan tidak dipakai pengukuran.
+recon-auto-rotate = Putar otomatis
+recon-explode = Pisahkan objek
+recon-explode-hint = Geser tiap objek menjauhi pusat tumpukan agar struktur dalam terlihat. Hanya tampilan.
+
 
 # --- Mode Laporan ---
 report-title = Laporan

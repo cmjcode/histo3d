@@ -24,7 +24,9 @@ use crate::camera::{OrbitCamera, View2D};
 use crate::colormap::{lut_bind_group_layout, LutTexture, Palette256};
 use crate::compare::{compare_passes, CompareParams, CompareSource, LayerMode};
 use crate::error::RenderError;
-use crate::mesh::{mesh_vertex_layout, sort_back_to_front, GpuMesh, MeshId, MeshInstance};
+use crate::mesh::{
+    mesh_vertex_layout, sort_back_to_front, GpuMesh, MeshId, MeshInstance, MeshMaterial,
+};
 use crate::overlay::{create_overlay_pipeline, default_palette, LabelOverlayDraw};
 use crate::slices3d::{
     slice_model_matrix, slice_model_matrix_scaled, slice_texture_layout, SliceDraw, SliceId,
@@ -73,8 +75,11 @@ pub struct Lighting {
     pub dir1: [f32; 3],
     /// Intensitas lampu pengisi.
     pub intensity1: f32,
-    /// Ambient RGB.
+    /// Ambient RGB dari "langit" (permukaan menghadap +Z).
     pub ambient: [f32; 3],
+    /// Ambient RGB dari "tanah" (permukaan menghadap −Z); sama dengan
+    /// `ambient` = ambient seragam.
+    pub ground: [f32; 3],
 }
 
 impl Default for Lighting {
@@ -85,6 +90,22 @@ impl Default for Lighting {
             dir1: [-0.6, -0.4, 0.3],
             intensity1: 0.35,
             ambient: [0.25, 0.25, 0.25],
+            ground: [0.25, 0.25, 0.25],
+        }
+    }
+}
+
+impl Lighting {
+    /// Pencahayaan studio untuk tampilan ilustrasi jaringan: lampu kunci
+    /// hangat, pengisi dingin, ambient langit kebiruan dan tanah keunguan.
+    pub fn studio() -> Self {
+        Self {
+            dir0: [0.45, 0.35, 0.82],
+            intensity0: 0.85,
+            dir1: [-0.7, -0.3, 0.25],
+            intensity1: 0.4,
+            ambient: [0.34, 0.36, 0.44],
+            ground: [0.20, 0.14, 0.22],
         }
     }
 }
@@ -201,6 +222,8 @@ struct Globals3D {
     clip_plane: [f32; 4],
     /// `x` = faktor renggang Z (lihat [`Scene3D::z_scale`]).
     params: [f32; 4],
+    /// `rgb` = ambient tanah.
+    ground: [f32; 4],
 }
 
 #[repr(C)]
@@ -210,6 +233,45 @@ struct MeshParamsUniform {
     params: [f32; 4],
     /// `xyz` = geseran tampilan (mm, ruang R, setelah renggang Z), `w` = sorot 0..1.
     offset: [f32; 4],
+    /// `(kilau, eksponen, difus terbungkus, oklusi)`.
+    material: [f32; 4],
+    /// `rgb` = warna rim, `w` = kekuatan.
+    rim: [f32; 4],
+    /// `(ukuran sel mm, kekuatan, campuran inti, warna pulasan 0/1)`.
+    cells: [f32; 4],
+}
+
+/// Uniform material dari [`MeshMaterial`]; nilai tak finit → bawaan aman.
+fn material_uniform(m: &MeshMaterial) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    let f = |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+    let material = [
+        f(m.specular, 0.0, 1.0, 0.0),
+        f(m.shininess, 1.0, 512.0, 32.0),
+        f(m.wrap, 0.0, 1.0, 0.0),
+        f(m.occlusion, 0.0, 1.0, 0.0),
+    ];
+    let rim = [
+        f(m.rim_color[0], 0.0, 1.0, 1.0),
+        f(m.rim_color[1], 0.0, 1.0, 1.0),
+        f(m.rim_color[2], 0.0, 1.0, 1.0),
+        f(m.rim, 0.0, 1.0, 0.0),
+    ];
+    let (size, strength, nuc) = match m.cells {
+        Some(c) if c.size_mm.is_finite() && c.size_mm > 0.0 => (
+            c.size_mm,
+            f(c.strength, 0.0, 1.0, 0.0),
+            f(c.nucleus_mix, 0.0, 1.0, 0.0),
+        ),
+        _ => (0.0, 0.0, 0.0),
+    };
+    // `w` > 0,5 = mode warna pulasan; nilainya = penguat saturasi.
+    let stain = if m.stain_colors {
+        f(m.stain_saturation, 0.6, 3.0, 1.0)
+    } else {
+        0.0
+    };
+    let cells = [size, strength, nuc, stain];
+    (material, rim, cells)
 }
 
 #[repr(C)]
@@ -463,6 +525,7 @@ struct PlannedLayer<'a> {
 /// Renderer adegan yang hidup di `egui_wgpu::CallbackResources`.
 pub struct SceneRenderer {
     depth_format: Option<wgpu::TextureFormat>,
+    sample_count: u32,
     max_texture_dim: u32,
 
     layer_layout: wgpu::BindGroupLayout,
@@ -538,14 +601,24 @@ impl SceneRenderer {
     /// (`WgpuRenderState::target_format`); `depth_format` = format depth yang
     /// dipasang eframe (`NativeOptions::depth_buffer` → `Some(Depth32Float)`),
     /// `None` bila tidak ada (mesh 3D hanya mengandalkan urutan gambar).
+    /// `sample_count` = jumlah sampel MSAA render pass egui
+    /// (`NativeOptions::multisampling`, minimal 1); semua pipeline memakai
+    /// nilai yang sama dengan render pass.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
         depth_format: Option<wgpu::TextureFormat>,
+        sample_count: u32,
         budgets: RenderBudgets,
     ) -> Self {
         let max_texture_dim = device.limits().max_texture_dimension_2d;
+        let sample_count = sample_count.max(1);
+        let multisample = wgpu::MultisampleState {
+            count: sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        };
 
         let layer_layout = uniform_layout(device, "h3d-layer", wgpu::ShaderStages::VERTEX_FRAGMENT);
         let lut_layout = lut_bind_group_layout(device);
@@ -663,7 +736,7 @@ impl SceneRenderer {
                     ..Default::default()
                 },
                 depth_stencil: depth_2d.clone(),
-                multisample: Default::default(),
+                multisample,
                 multiview_mask: None,
                 cache: None,
             })
@@ -697,6 +770,7 @@ impl SceneRenderer {
             device,
             color_format,
             depth_2d,
+            multisample,
             &layer_layout,
             labels.layout(),
             &lut_layout,
@@ -755,7 +829,7 @@ impl SceneRenderer {
                     ..Default::default()
                 },
                 depth_stencil: depth_state(write_depth),
-                multisample: Default::default(),
+                multisample,
                 multiview_mask: None,
                 cache: None,
             })
@@ -802,7 +876,7 @@ impl SceneRenderer {
                 ..Default::default()
             },
             depth_stencil: depth_state(false),
-            multisample: Default::default(),
+            multisample,
             multiview_mask: None,
             cache: None,
         });
@@ -845,7 +919,7 @@ impl SceneRenderer {
                 ..Default::default()
             },
             depth_stencil: depth_state(false),
-            multisample: Default::default(),
+            multisample,
             multiview_mask: None,
             cache: None,
         });
@@ -854,6 +928,7 @@ impl SceneRenderer {
 
         Self {
             depth_format,
+            sample_count,
             max_texture_dim,
             layer_layout,
             lut_layout,
@@ -886,6 +961,11 @@ impl SceneRenderer {
     /// Format depth yang dipakai pipeline 3D.
     pub fn depth_format(&self) -> Option<wgpu::TextureFormat> {
         self.depth_format
+    }
+
+    /// Jumlah sampel MSAA semua pipeline.
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
     }
 
     /// `device.limits().max_texture_dimension_2d`.
@@ -1226,6 +1306,7 @@ impl SceneRenderer {
             ambient: [l.ambient[0], l.ambient[1], l.ambient[2], 0.0],
             clip_plane: scene.clip_plane.unwrap_or(CLIP_DISABLED),
             params: [sanitize_z_scale(scene.z_scale), 0.0, 0.0, 0.0],
+            ground: [l.ground[0], l.ground[1], l.ground[2], 0.0],
         };
 
         let fs = &mut self.slots[slot];
@@ -1255,7 +1336,11 @@ impl SceneRenderer {
                 "h3d-mesh-params",
             );
             let opacity = inst.opacity.clamp(0.0, 1.0);
+            let (material, rim, cells) = material_uniform(&inst.material);
             let u = MeshParamsUniform {
+                material,
+                rim,
+                cells,
                 color: inst.color,
                 params: [
                     opacity,
@@ -1322,7 +1407,16 @@ impl SceneRenderer {
             let model = slice_model_matrix(&d.affine, d.size_um, d.z_um, scene.center_um);
             let u = SliceParamsUniform {
                 model: model.to_cols_array_2d(),
-                alpha: [d.alpha.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+                alpha: [
+                    d.alpha.clamp(0.0, 1.0),
+                    if d.glass.is_finite() {
+                        d.glass.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                    0.0,
+                ],
             };
             queue.write_buffer(&fs.slice_ubos[si].buf, 0, bytemuck::bytes_of(&u));
             let c = slice_model_matrix_scaled(&model, z_scale)
@@ -1629,13 +1723,50 @@ mod tests {
     #[test]
     fn uniform_sizes_are_16_byte_multiples() {
         assert_eq!(std::mem::size_of::<LayerUniform>(), 96);
-        assert_eq!(std::mem::size_of::<Globals3D>(), 160);
+        assert_eq!(std::mem::size_of::<Globals3D>(), 176);
         assert_eq!(sanitize_z_scale(f32::NAN), 1.0);
         assert_eq!(sanitize_z_scale(0.0), 1.0);
         assert_eq!(sanitize_z_scale(-3.0), 1.0);
         assert_eq!(sanitize_z_scale(4.0), 4.0);
-        assert_eq!(std::mem::size_of::<MeshParamsUniform>(), 48);
+        assert_eq!(std::mem::size_of::<MeshParamsUniform>(), 96);
         assert_eq!(std::mem::size_of::<SliceParamsUniform>(), 80);
+    }
+
+    #[test]
+    fn material_uniform_defaults_match_technical_look_and_clamp() {
+        let (m, rim, cells) = material_uniform(&MeshMaterial::default());
+        assert_eq!(m, [0.0, 32.0, 0.0, 0.0]);
+        assert_eq!(rim[3], 0.0);
+        assert_eq!(cells, [0.0; 4]);
+        let wild = MeshMaterial {
+            specular: f32::NAN,
+            shininess: 0.0,
+            wrap: 9.0,
+            occlusion: -1.0,
+            rim_color: [2.0, f32::INFINITY, 0.5],
+            rim: 0.4,
+            stain_colors: true,
+            stain_saturation: f32::NAN,
+            cells: Some(crate::mesh::CellBumps {
+                size_mm: 0.1,
+                strength: 3.0,
+                nucleus_mix: 0.5,
+            }),
+        };
+        let (m, rim, cells) = material_uniform(&wild);
+        assert_eq!(m, [0.0, 1.0, 1.0, 0.0]);
+        assert_eq!(rim, [1.0, 1.0, 0.5, 0.4]);
+        assert_eq!(cells, [0.1, 1.0, 0.5, 1.0]);
+        // Ukuran sel tak sah → efek mati.
+        let off = MeshMaterial {
+            cells: Some(crate::mesh::CellBumps {
+                size_mm: f32::NAN,
+                strength: 1.0,
+                nucleus_mix: 1.0,
+            }),
+            ..MeshMaterial::default()
+        };
+        assert_eq!(material_uniform(&off).2, [0.0; 4]);
     }
 
     #[test]

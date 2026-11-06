@@ -947,7 +947,8 @@ pub fn render_markdown(r: &Report, clinical: ClinicalScope<'_>) -> String {
     let _ = writeln!(
         o,
         "- {}: s_xy = {} µm, z_factor_max = {}, band_px = {}, max_gap_um = {}, \
-         smooth_iterations = {}, decimate_error_factor = {}, mpp_label = {} µm",
+         smooth_iterations = {}, decimate_error_factor = {}, mpp_label = {} µm, \
+         sdf_smooth_sigma_um = {}, subdivision_levels = {}, stain_colors = {}",
         t::PARAMS_RECON,
         c.s_xy_um,
         c.z_factor_max,
@@ -956,7 +957,12 @@ pub fn render_markdown(r: &Report, clinical: ClinicalScope<'_>) -> String {
         c.smooth_iterations,
         c.decimate_error_factor,
         c.mpp_label,
+        c.sdf_smooth_sigma_um,
+        c.subdivision_levels,
+        c.stain_colors,
     );
+    let _ = writeln!(o, "- {}", t::MESH_DISPLAY_NOTE);
+
     let s = &r.spatial;
     let _ = writeln!(
         o,

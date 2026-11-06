@@ -1884,3 +1884,41 @@ fn project_history_undoes_manual_corrections_status_and_order_exactly() {
     assert_eq!(s.project(), &p1);
     assert!(!s.can_undo_project() && !s.can_redo_project());
 }
+
+#[test]
+fn reconstruction_bakes_occlusion_and_stain_colours_without_touching_measurements() {
+    let mut s = open_copy("warna");
+    let meshes = s.reconstruct(&NoProgress).unwrap();
+    assert!(!meshes.is_empty());
+    for m in &meshes {
+        let n = m.positions_um.len();
+        assert_eq!(m.occlusion.len(), n, "oklusi per verteks");
+        assert!(m.occlusion.iter().all(|o| (0.0..=1.0).contains(o)));
+        assert_eq!(m.colors.len(), n, "warna pulasan per verteks");
+    }
+    // Warna tidak putih polos: berasal dari jaringan terpulas.
+    let c = meshes[0].colors[0];
+    assert!(c != [255, 255, 255], "{c:?}");
+    // Cache disk membawa warna dan oklusi.
+    let other = Session::open(s.path()).unwrap();
+    assert_eq!(other.meshes().unwrap(), meshes);
+    drop(other);
+    let rep_on = s.measure().unwrap();
+
+    let mut cfg = s.project().recon.clone();
+    cfg.stain_colors = false;
+    s.set_recon_config(cfg).unwrap();
+    let plain = s.reconstruct(&NoProgress).unwrap();
+    assert!(plain.iter().all(|m| m.colors.is_empty()));
+    // Geometri dan pengukuran tidak bergantung pada warna.
+    assert_eq!(plain[0].positions_um, meshes[0].positions_um);
+    let rep_off = s.measure().unwrap();
+    assert_eq!(
+        rep_on.labels[0].volume_cavalieri_um3,
+        rep_off.labels[0].volume_cavalieri_um3
+    );
+    assert_eq!(
+        rep_on.labels[0].volume_mesh_um3,
+        rep_off.labels[0].volume_mesh_um3
+    );
+}

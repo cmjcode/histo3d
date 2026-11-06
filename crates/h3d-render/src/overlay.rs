@@ -57,6 +57,7 @@ pub(crate) fn create_overlay_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
     depth_stencil: Option<wgpu::DepthStencilState>,
+    multisample: wgpu::MultisampleState,
     layer_layout: &wgpu::BindGroupLayout,
     label_tile_layout: &wgpu::BindGroupLayout,
     lut_layout: &wgpu::BindGroupLayout,
@@ -99,7 +100,8 @@ pub(crate) fn create_overlay_pipeline(
             ..Default::default()
         },
         depth_stencil,
-        multisample: Default::default(),
+        multisample,
+
         multiview_mask: None,
         cache: None,
     })

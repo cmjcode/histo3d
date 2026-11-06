@@ -223,6 +223,17 @@ enum Command {
         /// menautkan objek.
         #[arg(long = "max-skip")]
         max_skip: Option<u32>,
+        /// Sigma penghalusan Gaussian arah Z SDF sebelum ekstraksi, µm (0 =
+        /// mati); hanya bentuk mesh, pengukuran tetap dari masker voxel.
+
+        #[arg(long = "sdf-smooth")]
+        sdf_smooth: Option<f64>,
+        /// Tingkat subdivisi Loop setelah decimate (0..=2).
+        #[arg(long)]
+        subdivide: Option<u32>,
+        /// Jangan warnai mesh dengan warna pulasan irisan.
+        #[arg(long = "no-stain-colors")]
+        no_stain_colors: bool,
     },
     /// Tabel pengukuran per label.
     Measure {
@@ -1140,6 +1151,9 @@ fn run(cli: Cli) -> Result<Outcome> {
             split_distance,
             split_h,
             max_skip,
+            sdf_smooth,
+            subdivide,
+            no_stain_colors,
         } => {
             let mut s = open(&project)?;
             let mut cfg = s.project().recon.clone();
@@ -1168,7 +1182,17 @@ fn run(cli: Cli) -> Result<Outcome> {
             if per_object {
                 cfg.per_object = true;
             }
+            if let Some(v) = sdf_smooth {
+                cfg.sdf_smooth_sigma_um = v;
+            }
+            if let Some(v) = subdivide {
+                cfg.subdivision_levels = v;
+            }
+            if no_stain_colors {
+                cfg.stain_colors = false;
+            }
             s.set_recon_config(cfg)?;
+
             s.save()?;
             let meshes = s.reconstruct(&NoProgress)?;
             let out = s.bundle().out_mesh_dir();

@@ -24,6 +24,11 @@ use crate::error::VolError;
 use crate::grid::StackGrid;
 use crate::measure::Warning;
 use crate::mesh::LabelMesh;
+use crate::smooth::SmoothedSdf;
+
+/// Tingkat subdivisi Loop maksimum (tiap tingkat × 4 segitiga).
+pub const MAX_SUBDIVISION_LEVELS: u32 = 2;
+
 use crate::track::{component_masks_split, instance_masks, link_components, TrackParams, TrackSet};
 
 /// Sumber label raster satu irisan, dibaca di ruang U (µm). Abstraksi atas
@@ -784,6 +789,23 @@ pub fn extract_mesh(
     if nx == 0 || ny == 0 || nz == 0 {
         return Ok(mesh);
     }
+    // Penghalusan SDF 3D opsional (hanya geometri mesh; masker voxel dan
+    // pengukuran tidak memakainya). Sigma dijepit sepertiga pita SDF agar
+    // nilai terjepit `±band` tidak menggeser permukaan.
+    let smoothed = (cfg.sdf_smooth_sigma_um > 0.0).then(|| {
+        let band = cfg.band_px.max(1.0) * grid.s_xy;
+        SmoothedSdf::new(sdf, cfg.sdf_smooth_sigma_um, band / 3.0)
+    });
+    // Volume SDF asli dan sigma efektif: dipakai memulihkan volume mesh
+    // setelah blur (blur menggeser nol ke dalam ≈ σ²/r).
+    let restore = smoothed
+        .as_ref()
+        .filter(|s| s.sigma_um() > 0.0)
+        .map(|s| (s.target_volume_um3(), s.sigma_um()));
+    let sdf: &dyn SdfProvider = match &smoothed {
+        Some(s) => s,
+        None => sdf,
+    };
     let layer = nx * ny;
     // Lattice diperluas: indeks e = indeks nyata + 1; ukuran n + 3.
     let ext = [nx + 3, ny + 3, nz + 3];
@@ -929,6 +951,18 @@ pub fn extract_mesh(
     progress.set(0.9, "Decimate");
     mesh.decimate(cfg.decimate_error_factor * grid.s_xy);
     mesh.recompute_normals();
+    let levels = cfg.subdivision_levels.min(MAX_SUBDIVISION_LEVELS);
+    if levels > 0 {
+        if progress.is_cancelled() {
+            return Err(VolError::Cancelled);
+        }
+        progress.set(0.95, "Subdivisi Loop");
+        mesh.subdivide_loop(levels);
+    }
+    if let Some((target, sigma)) = restore {
+        mesh.restore_volume(target, sigma);
+    }
+
     progress.set(1.0, "Mesh selesai");
     Ok(mesh)
 }

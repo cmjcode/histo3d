@@ -41,6 +41,14 @@ pub struct LabelMesh {
     /// (`h3d_volume::track`); `None` untuk mesh satu label utuh.
     #[serde(default)]
     pub instance_id: Option<u32>,
+    /// Warna pulasan sRGB per verteks dari irisan terdekat (kosong = tidak
+    /// ada). Hanya tampilan/ekspor; tidak pernah dipakai perhitungan.
+    #[serde(default)]
+    pub colors: Vec<[u8; 3]>,
+    /// Oklusi ambien per verteks, 0 (tertutup) .. 1 (terbuka); kosong =
+    /// belum dibakar. Hanya tampilan.
+    #[serde(default)]
+    pub occlusion: Vec<f32>,
 }
 
 #[inline]
@@ -134,6 +142,24 @@ impl LabelMesh {
             indices: Vec::new(),
             scalars: Vec::new(),
             instance_id: None,
+            colors: Vec::new(),
+            occlusion: Vec::new(),
+        }
+    }
+
+    /// Salin atribut tampilan per verteks (`colors`, `occlusion`) menurut
+    /// `pick(i_baru) = i_lama`; atribut yang panjangnya tidak cocok dengan
+    /// `n_old` dibuang.
+    fn remap_display_attrs(&mut self, n_old: usize, n_new: usize, pick: impl Fn(usize) -> usize) {
+        if self.colors.len() == n_old && n_old > 0 {
+            self.colors = (0..n_new).map(|i| self.colors[pick(i)]).collect();
+        } else {
+            self.colors.clear();
+        }
+        if self.occlusion.len() == n_old && n_old > 0 {
+            self.occlusion = (0..n_new).map(|i| self.occlusion[pick(i)]).collect();
+        } else {
+            self.occlusion.clear();
         }
     }
 
@@ -415,6 +441,14 @@ impl LabelMesh {
 
     fn remap_scalars(&mut self, remap: &[u32]) {
         let n_new = remap.iter().map(|&r| r as usize + 1).max().unwrap_or(0);
+        // Verteks baru mewarisi atribut tampilan kemunculan pertamanya.
+        let mut first = vec![usize::MAX; n_new];
+        for (old, &new) in remap.iter().enumerate() {
+            if first[new as usize] == usize::MAX {
+                first[new as usize] = old;
+            }
+        }
+        self.remap_display_attrs(remap.len(), n_new, |i| first[i]);
         for s in &mut self.scalars {
             let mut v = vec![f32::NAN; n_new];
             for (old, &new) in remap.iter().enumerate() {
@@ -455,6 +489,8 @@ impl LabelMesh {
             }
             s.values = v;
         }
+        let kept: Vec<usize> = (0..n).filter(|&i| used[i]).collect();
+        self.remap_display_attrs(n, kept.len(), |i| kept[i]);
         for i in &mut self.indices {
             *i = remap[*i as usize];
         }
@@ -654,6 +690,18 @@ impl LabelMesh {
         for &o in &origin[nv0..] {
             self.positions_um.push(self.positions_um[o as usize]);
         }
+        let n_after = self.positions_um.len();
+        self.remap_display_attrs(
+            nv0,
+            n_after,
+            |i| {
+                if i < nv0 {
+                    i
+                } else {
+                    origin[i] as usize
+                }
+            },
+        );
         for sc in &mut self.scalars {
             for &o in &origin[nv0..] {
                 let v = sc.values.get(o as usize).copied().unwrap_or(f32::NAN);
@@ -711,6 +759,313 @@ impl LabelMesh {
         } else {
             self.scalars.push(s);
         }
+    }
+
+    /// Subdivisi Loop (Loop 1987) sebanyak `levels` tingkat: tiap segitiga
+    /// menjadi empat, verteks lama dan baru diposisikan ulang dengan aturan
+    /// Loop (sisi batas/tak-manifold memakai aturan lipatan). Karena Loop
+    /// menyusutkan bagian cembung, setelah tiap tingkat semua verteks
+    /// digeser seragam sepanjang normal sejauh `(V₀ − V₁) / A` sehingga
+    /// volume bertanda kembali ≈ semula. Skalar, warna, dan oklusi verteks
+    /// baru = rata-rata kedua ujung sisi. Orientasi segitiga dipertahankan.
+    /// Deterministik (urutan sisi = urutan kemunculan pertama).
+    pub fn subdivide_loop(&mut self, levels: u32) {
+        for _ in 0..levels {
+            if self.triangle_count() == 0 {
+                return;
+            }
+            let v0 = self.signed_volume_um3();
+            self.subdivide_loop_once();
+            self.recompute_normals();
+            self.restore_volume(v0, f64::INFINITY);
+        }
+    }
+
+    /// Geser semua verteks seragam sepanjang normal sejauh `(V* − V) / A`
+    /// (dijepit `±max_shift_um`) agar volume bertanda ≈ `target_um3`.
+    /// Pendekatan orde pertama; normal dihitung ulang. Target atau mesh tak
+    /// sah → tidak berubah. Mengembalikan geseran yang diterapkan (µm).
+    pub fn restore_volume(&mut self, target_um3: f64, max_shift_um: f64) -> f64 {
+        if self.normals.len() != self.positions_um.len() {
+            self.recompute_normals();
+        }
+        let v = self.signed_volume_um3();
+        let a = self.surface_area_um2();
+        if !(target_um3.is_finite() && target_um3 > 0.0 && v.is_finite() && a > 0.0) {
+            return 0.0;
+        }
+        let lim = if max_shift_um.is_nan() {
+            0.0
+        } else {
+            max_shift_um.abs()
+        };
+        let d = ((target_um3 - v) / a).clamp(-lim, lim);
+        if d == 0.0 {
+            return 0.0;
+        }
+        for (p, n) in self.positions_um.iter_mut().zip(&self.normals) {
+            p[0] += d * f64::from(n[0]);
+            p[1] += d * f64::from(n[1]);
+            p[2] += d * f64::from(n[2]);
+        }
+        self.recompute_normals();
+        d
+    }
+
+    fn subdivide_loop_once(&mut self) {
+        struct EdgeRec {
+            a: u32,
+            b: u32,
+            opp: [u32; 2],
+            count: u32,
+        }
+        let nv = self.positions_um.len();
+        let tris: Vec<[u32; 3]> = self.triangles().collect();
+        let key = |a: u32, b: u32| -> u64 {
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+            (u64::from(lo) << 32) | u64::from(hi)
+        };
+        let mut edge_id: HashMap<u64, usize> = HashMap::new();
+        let mut edges: Vec<EdgeRec> = Vec::new();
+        let mut tri_edges: Vec<[usize; 3]> = Vec::with_capacity(tris.len());
+        for t in &tris {
+            let mut te = [0usize; 3];
+            for (k, slot) in te.iter_mut().enumerate() {
+                let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+                let id = *edge_id.entry(key(a, b)).or_insert_with(|| {
+                    edges.push(EdgeRec {
+                        a: a.min(b),
+                        b: a.max(b),
+                        opp: [c, u32::MAX],
+                        count: 0,
+                    });
+                    edges.len() - 1
+                });
+                let e = &mut edges[id];
+                if e.count == 1 {
+                    e.opp[1] = c;
+                }
+                e.count += 1;
+                *slot = id;
+            }
+            tri_edges.push(te);
+        }
+        // Tetangga dan sisi batas per verteks (urutan sisi tetap).
+        let mut nb: Vec<Vec<u32>> = vec![Vec::new(); nv];
+        let mut boundary_nb: Vec<Vec<u32>> = vec![Vec::new(); nv];
+        for e in &edges {
+            nb[e.a as usize].push(e.b);
+            nb[e.b as usize].push(e.a);
+            if e.count != 2 {
+                boundary_nb[e.a as usize].push(e.b);
+                boundary_nb[e.b as usize].push(e.a);
+            }
+        }
+        let p = &self.positions_um;
+        let even: Vec<[f64; 3]> = (0..nv)
+            .into_par_iter()
+            .map(|i| {
+                let v = p[i];
+                let bn = &boundary_nb[i];
+                if !bn.is_empty() {
+                    // Lipatan: hanya bila tepat dua sisi batas; selainnya tetap.
+                    if bn.len() == 2 {
+                        let (x, y) = (p[bn[0] as usize], p[bn[1] as usize]);
+                        return [
+                            0.75 * v[0] + 0.125 * (x[0] + y[0]),
+                            0.75 * v[1] + 0.125 * (x[1] + y[1]),
+                            0.75 * v[2] + 0.125 * (x[2] + y[2]),
+                        ];
+                    }
+                    return v;
+                }
+                let n = nb[i].len();
+                if n == 0 {
+                    return v;
+                }
+                let beta = if n == 3 {
+                    3.0 / 16.0
+                } else {
+                    3.0 / (8.0 * n as f64)
+                };
+                let mut s = [0.0f64; 3];
+                for &j in &nb[i] {
+                    let q = p[j as usize];
+                    s[0] += q[0];
+                    s[1] += q[1];
+                    s[2] += q[2];
+                }
+                let w = 1.0 - n as f64 * beta;
+                [
+                    w * v[0] + beta * s[0],
+                    w * v[1] + beta * s[1],
+                    w * v[2] + beta * s[2],
+                ]
+            })
+            .collect();
+        let odd: Vec<[f64; 3]> = edges
+            .par_iter()
+            .map(|e| {
+                let (a, b) = (p[e.a as usize], p[e.b as usize]);
+                if e.count == 2 {
+                    let (c, d) = (p[e.opp[0] as usize], p[e.opp[1] as usize]);
+                    [
+                        0.375 * (a[0] + b[0]) + 0.125 * (c[0] + d[0]),
+                        0.375 * (a[1] + b[1]) + 0.125 * (c[1] + d[1]),
+                        0.375 * (a[2] + b[2]) + 0.125 * (c[2] + d[2]),
+                    ]
+                } else {
+                    [
+                        0.5 * (a[0] + b[0]),
+                        0.5 * (a[1] + b[1]),
+                        0.5 * (a[2] + b[2]),
+                    ]
+                }
+            })
+            .collect();
+        let mean_f32 = |x: f32, y: f32| -> f32 {
+            match (x.is_nan(), y.is_nan()) {
+                (false, false) => 0.5 * (x + y),
+                (true, false) => y,
+                (false, true) => x,
+                (true, true) => f32::NAN,
+            }
+        };
+        for s in &mut self.scalars {
+            if s.values.len() != nv {
+                s.values = vec![f32::NAN; nv + edges.len()];
+                continue;
+            }
+            let extra: Vec<f32> = edges
+                .iter()
+                .map(|e| mean_f32(s.values[e.a as usize], s.values[e.b as usize]))
+                .collect();
+            s.values.extend(extra);
+        }
+        if self.colors.len() == nv {
+            let extra: Vec<[u8; 3]> = edges
+                .iter()
+                .map(|e| {
+                    let (x, y) = (self.colors[e.a as usize], self.colors[e.b as usize]);
+                    [0, 1, 2].map(|k| (u16::from(x[k]) + u16::from(y[k])).div_ceil(2) as u8)
+                })
+                .collect();
+            self.colors.extend(extra);
+        } else {
+            self.colors.clear();
+        }
+        if self.occlusion.len() == nv {
+            let extra: Vec<f32> = edges
+                .iter()
+                .map(|e| 0.5 * (self.occlusion[e.a as usize] + self.occlusion[e.b as usize]))
+                .collect();
+            self.occlusion.extend(extra);
+        } else {
+            self.occlusion.clear();
+        }
+        let mut idx = Vec::with_capacity(tris.len() * 12);
+        for (t, te) in tris.iter().zip(&tri_edges) {
+            let m = te.map(|e| (nv + e) as u32);
+            // m[0] = sisi t0–t1, m[1] = t1–t2, m[2] = t2–t0.
+            idx.extend_from_slice(&[t[0], m[0], m[2]]);
+            idx.extend_from_slice(&[t[1], m[1], m[0]]);
+            idx.extend_from_slice(&[t[2], m[2], m[1]]);
+            idx.extend_from_slice(&[m[0], m[1], m[2]]);
+        }
+        let mut pos = even;
+        pos.extend(odd);
+        self.positions_um = pos;
+        self.indices = idx;
+        self.normals.clear();
+    }
+
+    /// Bakar oklusi ambien per verteks ke [`LabelMesh::occlusion`]: dari
+    /// `p + ε·n` dilepas `n_dirs` sinar dengan arah tetap berdistribusi
+    /// kosinus (spiral Fibonacci) di belahan normal, sejauh `max_dist_um`.
+    /// Nilai = fraksi sinar yang tidak mengenai mesh ini (1 = terbuka).
+    /// Hanya untuk tampilan (lekukan antar lobus tampak lebih gelap).
+    /// Deterministik: arah tetap, paralel per verteks ke lokasi tetap.
+    /// Mesh kosong atau gagal dibangun → `occlusion` dikosongkan.
+    pub fn bake_occlusion(&mut self, n_dirs: usize, max_dist_um: f64) {
+        use parry3d::math::Vector;
+        use parry3d::query::{Ray, RayCast};
+        self.occlusion.clear();
+        let nv = self.positions_um.len();
+        if nv == 0
+            || self.triangle_count() == 0
+            || n_dirs == 0
+            || max_dist_um.is_nan()
+            || max_dist_um <= 0.0
+        {
+            return;
+        }
+        if self.normals.len() != nv {
+            self.recompute_normals();
+        }
+        // Koordinat lokal relatif pusat kotak pembatas agar f32 cukup teliti.
+        let Some((lo, hi)) = self.bbox() else {
+            return;
+        };
+        let c = [
+            0.5 * (lo[0] + hi[0]),
+            0.5 * (lo[1] + hi[1]),
+            0.5 * (lo[2] + hi[2]),
+        ];
+        let verts: Vec<Vector> = self
+            .positions_um
+            .iter()
+            .map(|p| {
+                Vector::new(
+                    (p[0] - c[0]) as f32,
+                    (p[1] - c[1]) as f32,
+                    (p[2] - c[2]) as f32,
+                )
+            })
+            .collect();
+        let tris: Vec<[u32; 3]> = self.triangles().collect();
+        let Ok(tm) = parry3d::shape::TriMesh::new(verts.clone(), tris) else {
+            return;
+        };
+        let golden = std::f64::consts::PI * (3.0 - 5f64.sqrt());
+        let dirs: Vec<[f64; 3]> = (0..n_dirs)
+            .map(|i| {
+                let u = (i as f64 + 0.5) / n_dirs as f64;
+                let r = u.sqrt();
+                let phi = golden * i as f64;
+                [r * phi.cos(), r * phi.sin(), (1.0 - u).sqrt()]
+            })
+            .collect();
+        let diag = norm(sub(hi, lo));
+        let eps = (1e-4 * diag).max(1e-3) as f32;
+        let max_t = max_dist_um as f32;
+        let normals = &self.normals;
+        self.occlusion = (0..nv)
+            .into_par_iter()
+            .map(|i| {
+                let n = normals[i];
+                let nn = [f64::from(n[0]), f64::from(n[1]), f64::from(n[2])];
+                // Basis ortonormal (Frisvad tanpa cabang, varian Duff dkk.).
+                let sign = if nn[2] >= 0.0 { 1.0 } else { -1.0 };
+                let a = -1.0 / (sign + nn[2]);
+                let b = nn[0] * nn[1] * a;
+                let t = [1.0 + sign * nn[0] * nn[0] * a, sign * b, -sign * nn[0]];
+                let bt = [b, sign + nn[1] * nn[1] * a, -nn[1]];
+                let o = verts[i] + Vector::new(n[0], n[1], n[2]) * eps;
+                let mut free = 0usize;
+                for d in &dirs {
+                    let w = [
+                        d[0] * t[0] + d[1] * bt[0] + d[2] * nn[0],
+                        d[0] * t[1] + d[1] * bt[1] + d[2] * nn[1],
+                        d[0] * t[2] + d[1] * bt[2] + d[2] * nn[2],
+                    ];
+                    let ray = Ray::new(o, Vector::new(w[0] as f32, w[1] as f32, w[2] as f32));
+                    if tm.cast_local_ray(&ray, max_t, false).is_none() {
+                        free += 1;
+                    }
+                }
+                free as f32 / n_dirs as f32
+            })
+            .collect();
     }
 }
 
@@ -1092,8 +1447,10 @@ impl Decimator {
         }
         m.positions_um = pos;
         m.indices = idx;
-        // Skalar lama tidak lagi sahih setelah decimate.
+        // Skalar dan atribut tampilan lama tidak lagi sahih setelah decimate.
         m.scalars.clear();
+        m.colors.clear();
+        m.occlusion.clear();
         m.compact();
     }
 }
@@ -1116,6 +1473,8 @@ mod tests {
             indices: vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
             scalars: Vec::new(),
             instance_id: None,
+            colors: Vec::new(),
+            occlusion: Vec::new(),
         }
     }
 

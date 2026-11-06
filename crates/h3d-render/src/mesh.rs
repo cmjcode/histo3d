@@ -19,7 +19,8 @@ use crate::wgpu;
 /// Nilai skalar NODATA di GPU (pengganti `NaN`, lihat `mesh.wgsl`).
 pub const NODATA_SCALAR: f32 = 3.0e38;
 
-/// Verteks mesh di GPU: posisi mm (ruang R), normal, skalar.
+/// Verteks mesh di GPU: posisi mm (ruang R), normal, skalar, warna pulasan
+/// + oklusi, densitas ternormalisasi.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshVertex {
@@ -29,10 +30,46 @@ pub struct MeshVertex {
     pub normal: [f32; 3],
     /// Skalar per verteks; `NODATA_SCALAR` untuk tanpa data.
     pub scalar: f32,
+    /// Warna pulasan sRGB (`rgb`, putih bila tidak ada) dan oklusi ambien
+    /// (`a`: 255 = terbuka, juga bila tidak ada).
+    pub color: [u8; 4],
+    /// Densitas ternormalisasi 0..1 untuk efek ilustratif; `−1` = tidak ada.
+    pub density: f32,
 }
 
-pub(crate) const MESH_VERTEX_ATTRS: [wgpu::VertexAttribute; 3] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32];
+pub(crate) const MESH_VERTEX_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Unorm8x4, 4 => Float32
+];
+
+/// Atribut verteks opsional saat unggah mesh. Panjang tiap irisan yang ada
+/// harus sama dengan jumlah posisi.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VertexAttrs<'a> {
+    /// Skalar untuk colormap (`NaN` = NODATA).
+    pub scalars: Option<&'a [f32]>,
+    /// Warna pulasan sRGB.
+    pub colors: Option<&'a [[u8; 3]]>,
+    /// Oklusi ambien 0..1.
+    pub occlusion: Option<&'a [f32]>,
+    /// Densitas mentah (mis. sel/mm²); dinormalkan ke persentil 98 nilai
+    /// finit positif saat unggah. `NaN` = tidak ada.
+    pub density: Option<&'a [f32]>,
+}
+
+/// Persentil 98 nilai finit positif; `None` bila tidak ada.
+fn p98_positive(v: &[f32]) -> Option<f32> {
+    let mut f: Vec<f32> = v
+        .iter()
+        .copied()
+        .filter(|x| x.is_finite() && *x > 0.0)
+        .collect();
+    if f.is_empty() {
+        return None;
+    }
+    f.sort_by(f32::total_cmp);
+    let k = ((f.len() - 1) as f64 * 0.98).round() as usize;
+    Some(f[k.min(f.len() - 1)])
+}
 
 pub(crate) fn mesh_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
@@ -70,42 +107,53 @@ pub fn normal_to_render(n: [f32; 3]) -> [f32; 3] {
     [v.x, v.y, v.z]
 }
 
-/// Bangun verteks GPU dari data ruang W. `scalars` boleh `None` (semua NODATA);
-/// `NaN`/tak hingga dipetakan ke [`NODATA_SCALAR`].
+/// Bangun verteks GPU dari data ruang W. Skalar `NaN`/tak hingga dipetakan
+/// ke [`NODATA_SCALAR`]; tanpa warna → putih; tanpa oklusi → terbuka;
+/// tanpa densitas → `−1`.
 pub fn build_vertices(
     positions_um: &[[f64; 3]],
     normals: &[[f32; 3]],
     center_um: [f64; 3],
-    scalars: Option<&[f32]>,
+    attrs: &VertexAttrs<'_>,
 ) -> Result<Vec<MeshVertex>, RenderError> {
-    if normals.len() != positions_um.len() {
-        return Err(RenderError::InvalidMesh(format!(
-            "jumlah normal {} ≠ jumlah posisi {}",
-            normals.len(),
-            positions_um.len()
-        )));
-    }
-    if let Some(s) = scalars {
-        if s.len() != positions_um.len() {
-            return Err(RenderError::InvalidMesh(format!(
-                "jumlah skalar {} ≠ jumlah posisi {}",
-                s.len(),
-                positions_um.len()
-            )));
+    let n = positions_um.len();
+    let check = |what: &str, len: Option<usize>| -> Result<(), RenderError> {
+        match len {
+            Some(l) if l != n => Err(RenderError::InvalidMesh(format!(
+                "jumlah {what} {l} ≠ jumlah posisi {n}"
+            ))),
+            _ => Ok(()),
         }
-    }
+    };
+    check("normal", Some(normals.len()))?;
+    check("skalar", attrs.scalars.map(<[f32]>::len))?;
+    check("warna", attrs.colors.map(<[[u8; 3]]>::len))?;
+    check("oklusi", attrs.occlusion.map(<[f32]>::len))?;
+    check("densitas", attrs.density.map(<[f32]>::len))?;
+    let dens_scale = attrs.density.and_then(p98_positive);
     Ok(positions_um
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let scalar = match scalars {
+            let scalar = match attrs.scalars {
                 Some(s) if s[i].is_finite() => s[i],
                 _ => NODATA_SCALAR,
+            };
+            let rgb = attrs.colors.map_or([255, 255, 255], |c| c[i]);
+            let ao = attrs.occlusion.map_or(255, |o| {
+                let v = if o[i].is_finite() { o[i] } else { 1.0 };
+                (v.clamp(0.0, 1.0) * 255.0).round() as u8
+            });
+            let density = match (attrs.density, dens_scale) {
+                (Some(d), Some(s)) if d[i].is_finite() => (d[i].max(0.0) / s).min(1.0),
+                _ => -1.0,
             };
             MeshVertex {
                 pos: world_um_to_render_mm(*p, center_um),
                 normal: normal_to_render(normals[i]),
                 scalar,
+                color: [rgb[0], rgb[1], rgb[2], ao],
+                density,
             }
         })
         .collect())
@@ -181,7 +229,7 @@ pub fn upload_mesh(
     normals: &[[f32; 3]],
     indices: &[u32],
     center_um: [f64; 3],
-    scalars: Option<&[f32]>,
+    attrs: &VertexAttrs<'_>,
 ) -> Result<GpuMesh, RenderError> {
     use wgpu::util::DeviceExt;
 
@@ -200,7 +248,7 @@ pub fn upload_mesh(
             positions_um.len()
         )));
     }
-    let vertices = build_vertices(positions_um, normals, center_um, scalars)?;
+    let vertices = build_vertices(positions_um, normals, center_um, attrs)?;
     let mut bounds_min = [f32::INFINITY; 3];
     let mut bounds_max = [f32::NEG_INFINITY; 3];
     for v in &vertices {
@@ -255,6 +303,8 @@ pub struct MeshInstance {
     /// Sorot 0..1: campuran warna akhir ke warna sorot (0 = tanpa sorot).
     /// Hanya tampilan.
     pub highlight: f32,
+    /// Material permukaan (tampilan saja).
+    pub material: MeshMaterial,
 }
 
 impl MeshInstance {
@@ -270,6 +320,79 @@ impl MeshInstance {
             colormap: Colormap::default(),
             offset_mm: [0.0; 3],
             highlight: 0.0,
+            material: MeshMaterial::default(),
+        }
+    }
+}
+
+/// Tonjolan "sel" prosedural (Voronoi 3D berbenih tetap) di permukaan.
+/// **Ilustratif**: tidak merepresentasikan sel nyata dan tidak pernah
+/// dipakai pengukuran.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellBumps {
+    /// Jarak antar pusat sel tampilan, mm (ruang R, sebelum renggang Z).
+    pub size_mm: f32,
+    /// Kekuatan kemiringan normal 0..1.
+    pub strength: f32,
+    /// Campuran warna "inti" ungu di tengah sel 0..1.
+    pub nucleus_mix: f32,
+}
+
+/// Material permukaan mesh. Nilai bawaan = tampilan teknis lama (difus dua
+/// lampu + ambient, tanpa kilau/rim/oklusi).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeshMaterial {
+    /// Kekuatan kilau Blinn-Phong 0..1.
+    pub specular: f32,
+    /// Eksponen kilau (≥ 1).
+    pub shininess: f32,
+    /// Difus terbungkus 0..1 (kesan hamburan bawah permukaan jaringan).
+    pub wrap: f32,
+    /// Kekuatan oklusi ambien terbakar 0..1.
+    pub occlusion: f32,
+    /// Warna cahaya tepi (rim) RGB.
+    pub rim_color: [f32; 3],
+    /// Kekuatan cahaya tepi 0..1.
+    pub rim: f32,
+    /// Pakai warna pulasan verteks sebagai warna dasar.
+    pub stain_colors: bool,
+    /// Penguat saturasi warna pulasan (1 = apa adanya; thumbnail H&E
+    /// cenderung pucat).
+    pub stain_saturation: f32,
+    /// Tonjolan sel ilustratif; `None` = mati.
+    pub cells: Option<CellBumps>,
+}
+
+impl Default for MeshMaterial {
+    fn default() -> Self {
+        Self {
+            specular: 0.0,
+            shininess: 32.0,
+            wrap: 0.0,
+            occlusion: 0.0,
+            rim_color: [1.0, 1.0, 1.0],
+            rim: 0.0,
+            stain_colors: false,
+            stain_saturation: 1.0,
+            cells: None,
+        }
+    }
+}
+
+impl MeshMaterial {
+    /// Material "jaringan": kilau lembut basah, difus terbungkus, rim
+    /// kebiruan, oklusi penuh, warna pulasan.
+    pub fn tissue() -> Self {
+        Self {
+            specular: 0.25,
+            shininess: 40.0,
+            wrap: 0.45,
+            occlusion: 0.85,
+            rim_color: [0.55, 0.75, 1.0],
+            rim: 0.35,
+            stain_colors: true,
+            stain_saturation: 1.7,
+            cells: None,
         }
     }
 }
@@ -405,15 +528,51 @@ mod tests {
     fn build_vertices_maps_nan_to_nodata_and_checks_lengths() {
         let pos = [[0.0, 0.0, 0.0], [1000.0, 0.0, 0.0]];
         let nrm = [[0.0, 0.0, 1.0]; 2];
-        let v = build_vertices(&pos, &nrm, [0.0; 3], Some(&[1.5, f32::NAN])).unwrap();
+        let sc = VertexAttrs {
+            scalars: Some(&[1.5, f32::NAN]),
+            ..Default::default()
+        };
+        let v = build_vertices(&pos, &nrm, [0.0; 3], &sc).unwrap();
         assert_eq!(v[0].scalar, 1.5);
         assert_eq!(v[1].scalar, NODATA_SCALAR);
         assert!(v[1].scalar > 1.0e38 && v[1].scalar.is_finite());
-        let none = build_vertices(&pos, &nrm, [0.0; 3], None).unwrap();
+        let none = build_vertices(&pos, &nrm, [0.0; 3], &VertexAttrs::default()).unwrap();
         assert!(none.iter().all(|x| x.scalar == NODATA_SCALAR));
-        assert!(build_vertices(&pos, &nrm[..1], [0.0; 3], None).is_err());
-        assert!(build_vertices(&pos, &nrm, [0.0; 3], Some(&[1.0])).is_err());
-        assert_eq!(std::mem::size_of::<MeshVertex>(), 28);
+        // Tanpa warna/oklusi/densitas: putih, terbuka, densitas −1.
+        assert!(none
+            .iter()
+            .all(|x| x.color == [255; 4] && x.density == -1.0));
+        assert!(build_vertices(&pos, &nrm[..1], [0.0; 3], &VertexAttrs::default()).is_err());
+        let short = VertexAttrs {
+            scalars: Some(&[1.0]),
+            ..Default::default()
+        };
+        assert!(build_vertices(&pos, &nrm, [0.0; 3], &short).is_err());
+        let bad_colors = VertexAttrs {
+            colors: Some(&[[1, 2, 3]]),
+            ..Default::default()
+        };
+        assert!(build_vertices(&pos, &nrm, [0.0; 3], &bad_colors).is_err());
+        assert_eq!(std::mem::size_of::<MeshVertex>(), 36);
+    }
+
+    #[test]
+    fn build_vertices_packs_stain_occlusion_and_normalised_density() {
+        let pos = [[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let nrm = [[0.0, 0.0, 1.0]; 3];
+        let a = VertexAttrs {
+            colors: Some(&[[200, 100, 50], [1, 2, 3], [9, 9, 9]]),
+            occlusion: Some(&[0.0, 0.5, f32::NAN]),
+            density: Some(&[0.0, 500.0, f32::NAN]),
+            ..Default::default()
+        };
+        let v = build_vertices(&pos, &nrm, [0.0; 3], &a).unwrap();
+        assert_eq!(v[0].color, [200, 100, 50, 0]);
+        assert_eq!(v[1].color, [1, 2, 3, 128]);
+        assert_eq!(v[2].color[3], 255, "oklusi NaN → terbuka");
+        assert_eq!(v[0].density, 0.0);
+        assert_eq!(v[1].density, 1.0);
+        assert_eq!(v[2].density, -1.0);
     }
 
     fn quad() -> (Vec<[f32; 3]>, Vec<u32>) {

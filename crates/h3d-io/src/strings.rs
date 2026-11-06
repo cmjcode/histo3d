@@ -239,6 +239,11 @@ pub const ORDER_SUGGESTED: &str = "Urutan irisan berasal dari usulan otomatis ya
 pub const APP_VERSION: &str = "Versi aplikasi";
 /// Parameter rekonstruksi.
 pub const PARAMS_RECON: &str = "Parameter rekonstruksi";
+/// Catatan bahwa parameter tampilan mesh tidak memengaruhi pengukuran.
+pub const MESH_DISPLAY_NOTE: &str = "Penghalusan SDF, subdivisi, warna pulasan, oklusi ambien, \
+     dan efek ilustratif hanya mengubah tampilan mesh; semua pengukuran dan analisis dihitung \
+     dari masker voxel.";
+
 /// Parameter analisis spasial.
 pub const PARAMS_SPATIAL: &str = "Parameter analisis spasial";
 /// Ringkasan irisan.

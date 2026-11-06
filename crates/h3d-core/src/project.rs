@@ -45,6 +45,18 @@ pub struct ReconConfig {
     /// Jumlah irisan berlabel yang boleh dilompati saat menautkan objek
     /// (objek luput di satu irisan tetap satu objek); bawaan 1.
     pub track_max_skip: u32,
+    /// Sigma penghalusan Gaussian arah Z atas SDF sebelum ekstraksi
+    /// permukaan, µm (bawaan 0 = nonaktif). Menghilangkan "tangga" antar
+    /// irisan; sigma efektif dibatasi jari-jari objek dan volume mesh
+    /// dipulihkan. Hanya memengaruhi mesh, tidak pernah masker voxel atau
+    /// pengukuran.
+    pub sdf_smooth_sigma_um: f64,
+    /// Tingkat subdivisi Loop setelah decimate (0..=2, bawaan 0); volume
+    /// mesh dipulihkan setelah tiap tingkat.
+    pub subdivision_levels: u32,
+    /// Warnai verteks mesh dengan warna pulasan irisan terdekat (thumbnail
+    /// bermasker jaringan); bawaan aktif. Hanya tampilan/ekspor.
+    pub stain_colors: bool,
 }
 
 /// Parameter pemisah objek bersentuhan (`h3d_imgproc::split_touching`).
@@ -89,6 +101,9 @@ impl Default for ReconConfig {
             track_min_iou: 0.2,
             track_split: SplitParams::default(),
             track_max_skip: 1,
+            sdf_smooth_sigma_um: 0.0,
+            subdivision_levels: 0,
+            stain_colors: true,
         }
     }
 }

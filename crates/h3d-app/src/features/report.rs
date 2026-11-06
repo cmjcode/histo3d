@@ -848,6 +848,22 @@ fn section_params(ui: &mut Ui, r: &Report) {
                 format!("{}", r.recon.decimate_error_factor),
             ),
             (
+                t!("recon-sdf-smooth"),
+                format!("{}", r.recon.sdf_smooth_sigma_um),
+            ),
+            (
+                t!("recon-subdivision"),
+                r.recon.subdivision_levels.to_string(),
+            ),
+            (
+                t!("recon-stain-recon"),
+                if r.recon.stain_colors {
+                    t!("common-yes")
+                } else {
+                    t!("common-no")
+                },
+            ),
+            (
                 t!("slides-spacing"),
                 format!("{}", r.recon.default_spacing_um),
             ),

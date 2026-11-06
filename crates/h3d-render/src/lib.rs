@@ -34,8 +34,8 @@ pub use compare::{CompareMode, CompareParams};
 pub use error::RenderError;
 pub use mesh::{
     pick_offset_cpu, pick_triangle, ray_from_screen, render_to_world_um, sort_back_to_front,
-    upload_mesh, world_um_to_render_mm, GpuMesh, MeshId, MeshInstance, MeshVertex, PickHit, Ray,
-    NODATA_SCALAR,
+    upload_mesh, world_um_to_render_mm, CellBumps, GpuMesh, MeshId, MeshInstance, MeshMaterial,
+    MeshVertex, PickHit, Ray, VertexAttrs, NODATA_SCALAR,
 };
 pub use overlay::{default_palette, LabelOverlayDraw};
 pub use scene::{

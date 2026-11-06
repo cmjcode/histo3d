@@ -48,4 +48,7 @@ pub use h3d_segment::{
     ClassicParams, ImportSummary, LabelStore, ModelSpec, PaintMode, Proposal, RasterImportSummary,
     StainChannel,
 };
-pub use h3d_volume::{LabelMesh, ObjectTrack, SpatialAnalysis, TrackEvent, TrackSet, VoxelMask};
+pub use h3d_volume::{
+    LabelMesh, ObjectTrack, SpatialAnalysis, TrackEvent, TrackSet, VoxelMask,
+    MAX_SUBDIVISION_LEVELS,
+};

@@ -12,16 +12,20 @@
 //!   semua jarak dilaporkan dengan [`Uncertainty`] (aturan 18).
 //! - Deterministik: urutan pindai tetap `(z, y, x)`, seri → indeks terkecil.
 
+pub mod color;
 pub mod error;
 pub mod grid;
 pub mod measure;
 pub mod mesh;
 pub mod phantom3d;
 pub mod recon;
+pub mod smooth;
 pub mod spatial;
 pub mod track;
 
+pub use color::{sample_vertex_colors, ColorSampler, ColorSlice};
 pub use error::VolError;
+
 pub use grid::StackGrid;
 pub use h3d_core::SplitParams;
 pub use measure::{
@@ -36,7 +40,10 @@ pub use recon::{
     build_label_stack, build_label_stack_from_masks, build_voxel_mask, extract_mesh, layer_sources,
     layer_sources_for, plan_grid, reconstruct_label, reconstruct_label_objects, resample_masks,
     GridPlan, LabelSampler, LabelStack, LayerSource, SdfProvider, SliceInput, SphereSdf, VoxelMask,
+    MAX_SUBDIVISION_LEVELS,
 };
+pub use smooth::SmoothedSdf;
+
 pub use spatial::{
     analyze, attr_stats, capsule_penetration, contact, depth, distance_uncertainty, foci,
     fractions, hypoxia, margin, project_fields_to_mesh, resample_uniform_z, staging_size,

@@ -980,6 +980,19 @@ Per label yang `reconstruct = true`:
    volume secara berarti.
 10. **Decimate.** `baby_shark`, galat maksimum `0,5 × s_xy`.
 11. **Normal** per verteks dihitung ulang (rata-rata berbobot luas).
+12. **Opsional, hanya bentuk mesh** (`ReconConfig`, bawaan mati):
+    `sdf_smooth_sigma_um` = Gaussian **arah Z** atas SDF sebelum langkah 6
+    (menghapus tangga antar irisan; sigma efektif ≤ 0,5 × min(jari-jari
+    dalam XY, setengah tebal Z) objek, lalu volume mesh dipulihkan ke volume
+    SDF asli dengan geseran seragam sepanjang normal), dan
+    `subdivision_levels` (0..=2) = subdivisi Loop setelah langkah 10 dengan
+    pemulihan volume tiap tingkat. Masker voxel, Cavalieri, dan analisis
+    tidak pernah memakai keduanya (aturan 19).
+13. **Hiasan tampilan** (engine, setelah mesh jadi): oklusi ambien per
+    verteks (32 sinar tetap) dan, bila `stain_colors`, warna pulasan per
+    verteks dari thumbnail bermasker jaringan irisan terdekat (`T_i⁻¹`,
+    dua irisan mengapit dicampur menurut Z). Disimpan di cache mesh dan
+    diekspor sebagai `COLOR_0` GLB; tidak pernah masukan perhitungan.
 
 Konvensi SDF: **negatif di dalam**. Orientasi segitiga harus menghasilkan
 volume bertanda positif; ini diuji (bagian 11).
@@ -1229,7 +1242,8 @@ Satu `SceneRenderer` dengan beberapa pipeline wgpu, digambar lewat
 | Tile 2D | Daftar `(rect_w, tekstur)` | Satu quad per tile. Tekstur `Rgba8UnormSrgb` 256/512 px. |
 | Overlay label | Tile `R8Uint` + palet `256 × 1` RGBA | Warna dari palet di shader; opasitas global; mode garis tepi (bandingkan dengan 4 tetangga). |
 | Pembanding registrasi | Dua lapis tile + dua matriks | Mode: tembus pandang, papan catur, selisih warna (tetap = magenta, bergerak = hijau; sejajar = abu-abu). |
-| Mesh 3D | `LabelMesh` → `f32` mm | Pencahayaan sederhana 2 lampu + ambient; alfa per label; bidang potong. |
+| Mesh 3D | `LabelMesh` → `f32` mm | Pencahayaan 2 lampu + ambient langit/tanah; alfa per label; bidang potong. `MeshMaterial`: bawaan = tampilan teknis; gaya "Ilustrasi jaringan" = warna pulasan (penguat saturasi), kilau Blinn-Phong, difus terbungkus, rim, oklusi terbakar, latar gradasi, tiga irisan "kaca", MSAA 4×. Tonjolan sel Voronoi prosedural bertanda **ilustratif** (bawaan mati), dibobot densitas inti bila ada. |
+
 | Skalar di mesh | Buffer `f32` per verteks + colormap `256 × 1` + `[min, max]` | Warna dari colormap di shader; `NaN` → abu-abu; legenda digambar egui di atas viewport (8.12.6). Picking: ray–segitiga di CPU atas mesh yang sudah didecimate, cukup untuk klik. |
 | Irisan di 3D | Quad bertekstur thumbnail di `z_i` dengan `T_i` | Untuk melihat hubungan mesh dengan gambar asli. |
 | Volume (H9) | Tekstur 3D `R8Unorm` | Raymarching; ditunda. |

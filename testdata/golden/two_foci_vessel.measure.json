@@ -327,7 +327,10 @@
     "mpp_label": 4.0,
     "per_object": false,
     "s_xy_um": 16.0,
+    "sdf_smooth_sigma_um": 0.0,
     "smooth_iterations": 10,
+    "stain_colors": true,
+    "subdivision_levels": 0,
     "track_max_skip": 1,
     "track_min_iou": 0.2,
     "track_split": {

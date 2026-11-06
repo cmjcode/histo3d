@@ -28,6 +28,9 @@ pub struct SliceDraw {
     pub z_um: f64,
     /// Alfa 0..1.
     pub alpha: f32,
+    /// Kesan kaca objek 0..1: bingkai terang di tepi quad dan kaca tipis
+    /// kebiruan di latar transparan (0 = mati). Hanya tampilan.
+    pub glass: f32,
 }
 
 /// Bangun matriks model (lihat dokumentasi modul). `center_um` = pusat volume
