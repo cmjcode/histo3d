@@ -122,6 +122,8 @@ impl Drawer {
 /// Jeda setelah suntingan label terakhir sebelum mesh/laporan dihitung
 /// ulang (milidetik).
 pub const DERIVED_DEBOUNCE_MS: u64 = 400;
+/// Jeda minimum mengulang pemeriksaan piramida yang tidak menemukan apa-apa.
+pub const PYRAMID_RETRY_MS: u64 = 5000;
 
 /// Hasil job latar.
 pub enum JobOutput {
@@ -150,8 +152,8 @@ pub enum JobOutput {
     AttrComputed(AttrId),
     /// Berkas ekspor ditulis.
     Exported(Vec<PathBuf>),
-    /// Piramida bertile untuk gambar biasa selesai dibangun.
-    PyramidsPrepared,
+    /// Job piramida bertile selesai; irisan yang gagal beserta galatnya.
+    PyramidsPrepared(Vec<(SlideId, EngineError)>),
     /// Inti terdeteksi untuk kalibrasi ambang IHC.
     Nuclei(Box<segment::NucleiOverlay>),
 }
@@ -200,6 +202,9 @@ pub struct AppState {
     pub project_name: String,
     /// Job latar yang berjalan.
     pub job: Option<RunningJob>,
+    /// Waktu percobaan terakhir memulai job piramida yang tidak menemukan
+    /// irisan untuk dibangun (lihat [`Self::start_pending_pyramids`]).
+    pub pyramid_retry_at: Option<std::time::Instant>,
     /// Pemberitahuan.
     pub toasts: Toasts,
     /// Aliran tile viewer 2D.
@@ -274,6 +279,7 @@ impl AppState {
             session: None,
             project_name: String::new(),
             job: None,
+            pyramid_retry_at: None,
             toasts: Toasts::default(),
             thumbs: ThumbCache::default(),
             thumb_worker: crate::thumbs::ThumbWorker::new(),
@@ -587,17 +593,35 @@ impl AppState {
         if needing.is_empty() {
             return false;
         }
+        self.pyramid_retry_at = None;
         self.start_job(t!("job-pyramid"), move |s, p| {
-            let n = needing.len().max(1) as f32;
-            for (i, id) in needing.iter().enumerate() {
-                if p.is_cancelled() {
-                    return Err(EngineError::Cancelled);
-                }
-                let sub = h3d_core::SubProgress::new(p, i as f32 / n, (i + 1) as f32 / n);
-                s.prepare_pyramid(*id, &sub)?;
-            }
-            Ok(JobOutput::PyramidsPrepared)
+            s.prepare_pyramids(&needing, p)
+                .map(JobOutput::PyramidsPrepared)
         })
+    }
+
+    /// Thumbnail atau viewer menunggu piramida yang belum ada (mis. cache
+    /// format lama atau cache terhapus saat proyek terbuka): jalankan job
+    /// piramida bila tidak ada job lain. Bila tidak ada yang bisa dibangun,
+    /// pemeriksaan diulang paling cepat [`PYRAMID_RETRY_MS`] kemudian.
+    /// Mengembalikan `true` bila job dimulai.
+    pub fn start_pending_pyramids(&mut self) -> bool {
+        let wanted = self.thumb_worker.take_pyramid_wanted() | self.tiles.take_pyramid_wanted();
+        if !wanted || self.job.is_some() {
+            return false;
+        }
+        if self
+            .pyramid_retry_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(PYRAMID_RETRY_MS))
+        {
+            return false;
+        }
+        if self.start_prepare_pyramids() {
+            true
+        } else {
+            self.pyramid_retry_at = Some(std::time::Instant::now());
+            false
+        }
     }
 
     /// Turunan (mesh 3D, laporan) boleh dihitung ulang sekarang: tidak ada
@@ -727,7 +751,13 @@ impl AppState {
                 self.drawer = Some(Drawer::Detect);
             }
             JobOutput::AttrComputed(_) => self.toasts.info(t!("attr-done")),
-            JobOutput::PyramidsPrepared => {}
+            JobOutput::PyramidsPrepared(failed) => {
+                for (id, e) in failed {
+                    self.toasts.engine_error(&e);
+                    self.thumb_worker.block(id, e.to_string());
+                    self.tiles.mark_failed(id);
+                }
+            }
             JobOutput::Exported(paths) => {
                 let dir = paths
                     .first()

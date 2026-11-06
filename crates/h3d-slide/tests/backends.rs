@@ -710,3 +710,37 @@ fn tile_loader_retain_slides_drops_others_and_their_queue() {
     );
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 }
+
+#[test]
+fn old_version_1_cache_is_rejected_and_cleaned_on_rebuild() {
+    // Cache format lama: manifes versi 1 + `level_NN.png` utuh (ratusan MB
+    // di proyek nyata). Harus dianggap "belum ada" agar dibangun ulang oleh
+    // job latar, bukan saat pertama dibaca di thread UI.
+    let dir = tempfile::tempdir().unwrap();
+    let img = test_image(600, 500);
+    img.save(dir.path().join("level_00.png")).unwrap();
+    fs::write(
+        dir.path().join("pyramid.json"),
+        r#"{"version":1,"level_sizes":[[600,500],[300,250]],"tile_size":256}"#,
+    )
+    .unwrap();
+    assert!(!tiled_pyramid_exists(dir.path()));
+    assert!(TiledPyramid::open(dir.path()).is_err());
+
+    // Manifes versi benar tetapi berkas level hilang: juga belum ada.
+    let half = tempfile::tempdir().unwrap();
+    let mut rows = h3d_slide::tiled::ImageRows::new(img.clone());
+    build_tiled_pyramid(half.path(), &mut rows, |_, _| true).unwrap();
+    assert!(tiled_pyramid_exists(half.path()));
+    fs::remove_file(half.path().join("level_01.tiles")).unwrap();
+    assert!(!tiled_pyramid_exists(half.path()));
+
+    // Pembangunan ulang di folder lama membuang `level_00.png`.
+    let mut rows = h3d_slide::tiled::ImageRows::new(img.clone());
+    build_tiled_pyramid(dir.path(), &mut rows, |_, _| true).unwrap();
+    assert!(tiled_pyramid_exists(dir.path()));
+    assert!(!dir.path().join("level_00.png").exists());
+    let tiled = TiledPyramid::open(dir.path()).unwrap();
+    let whole = tiled.read_region(0, 0, 0, 600, 500).unwrap();
+    assert_same_pixels(&whole, &img);
+}

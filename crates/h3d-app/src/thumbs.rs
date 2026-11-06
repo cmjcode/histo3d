@@ -34,6 +34,11 @@ pub struct ThumbWorker {
     pending: HashSet<ThumbKey>,
     ready: HashMap<ThumbKey, Result<RgbaImage, EngineError>>,
     thread: Option<JoinHandle<()>>,
+    /// Ada permintaan yang menunggu piramida bertile dibangun (job).
+    pyramid_wanted: bool,
+    /// Irisan yang piramidanya gagal dibangun: permintaan langsung galat,
+    /// tidak menunggu job lagi.
+    blocked: HashMap<SlideId, String>,
 }
 
 impl Default for ThumbWorker {
@@ -63,6 +68,8 @@ impl ThumbWorker {
             pending: HashSet::new(),
             ready: HashMap::new(),
             thread,
+            pyramid_wanted: false,
+            blocked: HashMap::new(),
         }
     }
 
@@ -80,7 +87,17 @@ impl ThumbWorker {
         if self.pending.contains(&key) || self.ready.contains_key(&key) {
             return;
         }
+        if let Some(msg) = self.blocked.get(&key.slide) {
+            self.ready
+                .insert(key, Err(EngineError::invalid(msg.clone())));
+            return;
+        }
         match session.thumbnail_task(key.slide, key.side, key.tissue) {
+            // Piramida belum ada: jangan dibangun di thread UI. Tandai agar
+            // aplikasi menjalankan job, lalu permintaan diulang frame depan.
+            Err(EngineError::PyramidPending(_)) => {
+                self.pyramid_wanted = true;
+            }
             Ok(task) => {
                 let sent = self
                     .tx
@@ -118,19 +135,33 @@ impl ThumbWorker {
 
     /// Masih ada tugas yang belum selesai (perlu repaint).
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty() || !self.ready.is_empty()
+        !self.pending.is_empty() || !self.ready.is_empty() || self.pyramid_wanted
+    }
+
+    /// Ambil (dan reset) tanda bahwa ada permintaan yang menunggu piramida.
+    pub fn take_pyramid_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.pyramid_wanted)
+    }
+
+    /// Piramida irisan gagal dibangun: permintaan berikutnya langsung galat
+    /// `msg` alih-alih menunggu job lagi.
+    pub fn block(&mut self, slide: SlideId, msg: String) {
+        self.blocked.insert(slide, msg);
     }
 
     /// Lupakan semua hasil dan permintaan irisan (dihapus/berubah).
     pub fn forget(&mut self, slide: SlideId) {
         self.pending.retain(|k| k.slide != slide);
         self.ready.retain(|k, _| k.slide != slide);
+        self.blocked.remove(&slide);
     }
 
     /// Lupakan semua hasil siap (proyek ditutup/ganti).
     pub fn clear(&mut self) {
         self.pending.clear();
         self.ready.clear();
+        self.blocked.clear();
+        self.pyramid_wanted = false;
     }
 }
 

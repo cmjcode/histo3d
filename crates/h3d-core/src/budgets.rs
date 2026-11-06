@@ -23,6 +23,10 @@ pub struct Budgets {
     /// Jumlah pasangan registrasi per gelombang (membatasi berapa gambar
     /// registrasi berada di memori bersamaan). Minimal 1.
     pub register_batch: usize,
+    /// Jumlah piramida bertile yang dibangun bersamaan oleh job "Menyiapkan
+    /// piramida gambar" (tiap pembangunan memegang satu pendekode gambar
+    /// yang dialirkan per pita). Minimal 1.
+    pub pyramid_build_jobs: usize,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -37,6 +41,7 @@ impl Budgets {
         wsi_internal_cache_bytes: 16 * MIB,
         max_open_slides: 16,
         register_batch: 8,
+        pyramid_build_jobs: 2,
     };
 
     /// Anggaran iPad (9.2) **[TARGET]**; harus diukur ulang di perangkat.
@@ -49,6 +54,7 @@ impl Budgets {
         wsi_internal_cache_bytes: 16 * MIB,
         max_open_slides: 4,
         register_batch: 2,
+        pyramid_build_jobs: 1,
     };
 
     /// Anggaran bawaan menurut target kompilasi.
@@ -62,8 +68,8 @@ impl Budgets {
 
     /// Skala anggaran menurut memori fisik (byte); tidak pernah melebihi
     /// anggaran platform dan tidak kurang dari seperempatnya. Jumlah
-    /// (`decode_threads`, `max_open_slides`, `register_batch`) tidak
-    /// diskalakan.
+    /// (`decode_threads`, `max_open_slides`, `register_batch`,
+    /// `pyramid_build_jobs`) tidak diskalakan.
     pub fn scaled_to_physical_memory(self, physical_bytes: u64) -> Budgets {
         // Asumsi: aplikasi boleh memakai sekitar setengah memori fisik.
         let allowed = physical_bytes / 2;
@@ -82,6 +88,7 @@ impl Budgets {
             wsi_internal_cache_bytes: s(self.wsi_internal_cache_bytes),
             max_open_slides: self.max_open_slides,
             register_batch: self.register_batch,
+            pyramid_build_jobs: self.pyramid_build_jobs,
         }
     }
 }
@@ -101,6 +108,7 @@ mod tests {
         for base in [Budgets::MACOS, Budgets::IPAD] {
             assert!(base.max_open_slides >= 2);
             assert!(base.register_batch >= 1);
+            assert!(base.pyramid_build_jobs >= 1);
             assert!(base.wsi_internal_cache_bytes > 0);
             for gib in [1u64, 2, 4, 8, 64] {
                 let s = base.scaled_to_physical_memory(gib * 1024 * MIB);

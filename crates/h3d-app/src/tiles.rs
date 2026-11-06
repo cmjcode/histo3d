@@ -21,7 +21,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use h3d_core::{Affine2, Budgets, LabelDef, SlideId};
-use h3d_engine::{LabelStore, Session};
+use h3d_engine::{EngineError, LabelStore, Session};
 use h3d_render::{Camera2D, Palette256, TileDraw, TileKey as GpuKey};
 use h3d_slide::coords::tiles_in_rect;
 use h3d_slide::{level_for_scale, SlideInfo, TileCache, TileLoader, TileRequest, TileResult};
@@ -341,6 +341,8 @@ pub struct TileStreamer {
     label_floor: HashMap<SlideId, u32>,
     label_versions: HashMap<LabelTile, u32>,
     label_uploaded: HashMap<LabelTile, u32>,
+    /// Ada irisan yang menunggu piramida bertile dibangun (job).
+    pyramid_wanted: bool,
 }
 
 impl TileStreamer {
@@ -364,6 +366,7 @@ impl TileStreamer {
             label_floor: HashMap::new(),
             label_versions: HashMap::new(),
             label_uploaded: HashMap::new(),
+            pyramid_wanted: false,
         }
     }
 
@@ -392,7 +395,10 @@ impl TileStreamer {
 
     /// Masih ada tile yang ditunggu (aplikasi perlu meminta repaint).
     pub fn needs_repaint(&self) -> bool {
-        !self.pending.is_empty() || self.deferred || self.loader.pending() > 0
+        !self.pending.is_empty()
+            || self.deferred
+            || self.loader.pending() > 0
+            || self.pyramid_wanted
     }
 
     /// Generasi viewport saat ini.
@@ -415,7 +421,13 @@ impl TileStreamer {
                 return None;
             }
             let entry = session.slide(slide).ok()?;
-            match session.open_source(slide) {
+            // Piramida tidak pernah dibangun di thread UI: bila belum ada,
+            // tandai agar aplikasi menjalankan job dan coba lagi frame depan.
+            match session.try_open_source(slide) {
+                Err(EngineError::PyramidPending(_)) => {
+                    self.pyramid_wanted = true;
+                    return None;
+                }
                 Ok(src) => {
                     let meta = SlideMeta {
                         info: src.info().clone(),
@@ -437,6 +449,16 @@ impl TileStreamer {
             }
         }
         self.metas.get(&slide)
+    }
+
+    /// Ambil (dan reset) tanda bahwa ada irisan yang menunggu piramida.
+    pub fn take_pyramid_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.pyramid_wanted)
+    }
+
+    /// Piramida irisan gagal dibangun: jangan dicoba lagi tiap frame.
+    pub fn mark_failed(&mut self, slide: SlideId) {
+        self.failed.insert(slide);
     }
 
     /// Daftarkan metadata secara langsung (tes dan sumber buatan).
@@ -467,6 +489,7 @@ impl TileStreamer {
         }
         self.metas.clear();
         self.failed.clear();
+        self.pyramid_wanted = false;
         self.clear_cpu_cache();
         self.label_floor.clear();
         self.label_versions.clear();

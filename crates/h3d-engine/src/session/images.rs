@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, MutexGuard};
 
 use h3d_core::{Progress, SlideEntry, SlideId, SlideSourceRef};
@@ -36,6 +37,10 @@ impl SourceCache {
     pub(crate) fn set_max(&mut self, max: usize) {
         self.max = max.max(1);
         self.evict();
+    }
+
+    fn contains(&self, id: SlideId) -> bool {
+        self.map.contains_key(&id)
     }
 
     fn get(&mut self, id: SlideId) -> Option<Arc<dyn SlideSource>> {
@@ -483,6 +488,25 @@ fn needs_tiled_pyramid(src: &dyn SlideSource) -> bool {
         .is_some_and(|top| top.size[0].max(top.size[1]) > 2 * h3d_slide::tiled::MIN_TOP_SIDE)
 }
 
+/// Progres satu pembangunan piramida di dalam [`Session::prepare_pyramids`]:
+/// fraksinya disimpan di slot sendiri, lalu dijumlahkan dengan slot lain.
+struct PyramidProgress<'a> {
+    parent: &'a dyn Progress,
+    slot: &'a AtomicU32,
+    report: &'a (dyn Fn(&str) + Sync),
+}
+
+impl Progress for PyramidProgress<'_> {
+    fn set(&self, fraction: f32, stage: &str) {
+        self.slot
+            .store(fraction.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        (self.report)(stage);
+    }
+    fn is_cancelled(&self) -> bool {
+        self.parent.is_cancelled()
+    }
+}
+
 impl Session {
     /// Path absolut berkas slide.
     pub fn slide_path(&self, slide: SlideId) -> Result<std::path::PathBuf, EngineError> {
@@ -748,6 +772,96 @@ impl Session {
         Ok(src)
     }
 
+    /// Seperti [`Self::open_source`], tetapi **tidak pernah membangun
+    /// piramida bertile**: bila irisan memerlukan piramida yang belum ada
+    /// (gambar biasa, atau TIFF yang level teratasnya masih besar), hasilnya
+    /// [`EngineError::PyramidPending`]. Dipakai jalur thread UI (thumbnail,
+    /// viewer); GUI lalu menjalankan [`Self::prepare_pyramid`] sebagai job.
+    pub fn try_open_source(&self, slide: SlideId) -> Result<Arc<dyn SlideSource>, EngineError> {
+        let entry = self.slide(slide)?;
+        let (path, fp) = self.verified_source(entry)?;
+        if let Ok(mut c) = self.sources.lock() {
+            if let Some(src) = c.get(slide) {
+                return Ok(src);
+            }
+        }
+        let dir = self.pyramid_dir(slide, fp);
+        let src: Arc<dyn SlideSource> = if h3d_slide::tiled_pyramid_exists(&dir) {
+            Arc::new(TiledPyramid::open(&dir)?)
+        } else if has_flat_extension(&path) {
+            return Err(EngineError::PyramidPending(slide));
+        } else {
+            let src: Arc<dyn SlideSource> = Arc::from(h3d_slide::open_slide_with_cache_bytes(
+                &path,
+                self.budgets.wsi_internal_cache_bytes,
+            )?);
+            if needs_tiled_pyramid(src.as_ref()) {
+                return Err(EngineError::PyramidPending(slide));
+            }
+            src
+        };
+        if let Ok(mut c) = self.sources.lock() {
+            c.insert(slide, Arc::clone(&src));
+        }
+        Ok(src)
+    }
+
+    /// Bangun piramida irisan `ids` sekaligus, paling banyak
+    /// `Budgets::pyramid_build_jobs` bersamaan. Progres gabungan dilaporkan ke
+    /// `p`; pembatalan menghentikan semua. Irisan yang gagal tidak
+    /// menggagalkan yang lain: galatnya dikembalikan terurut menurut `ids`.
+    pub fn prepare_pyramids(
+        &self,
+        ids: &[SlideId],
+        p: &dyn Progress,
+    ) -> Result<Vec<(SlideId, EngineError)>, EngineError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let jobs = self.budgets.pyramid_build_jobs.clamp(1, ids.len());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build()
+            .map_err(|e| EngineError::invalid(format!("kolam thread piramida: {e}")))?;
+        let fractions: Vec<AtomicU32> = ids.iter().map(|_| AtomicU32::new(0)).collect();
+        let total = ids.len() as f32;
+        let report = |stage: &str| {
+            let sum: f32 = fractions
+                .iter()
+                .map(|f| f32::from_bits(f.load(Ordering::Relaxed)))
+                .sum();
+            p.set(sum / total, stage);
+        };
+        let results: Vec<Result<(), EngineError>> = pool.install(|| {
+            ids.par_iter()
+                .enumerate()
+                .map(|(i, &id)| {
+                    if p.is_cancelled() {
+                        return Err(EngineError::Cancelled);
+                    }
+                    let sub = PyramidProgress {
+                        parent: p,
+                        slot: &fractions[i],
+                        report: &report,
+                    };
+                    let r = self.prepare_pyramid(id, &sub);
+                    fractions[i].store(1.0f32.to_bits(), Ordering::Relaxed);
+                    report("membangun piramida");
+                    r
+                })
+                .collect()
+        });
+        let mut failed = Vec::new();
+        for (id, r) in ids.iter().zip(results) {
+            match r {
+                Ok(()) => {}
+                Err(EngineError::Cancelled) => return Err(EngineError::Cancelled),
+                Err(e) => failed.push((*id, e)),
+            }
+        }
+        Ok(failed)
+    }
+
     fn open_source_uncached(
         &self,
         slide: SlideId,
@@ -788,12 +902,38 @@ impl Session {
             .slides_ordered()
             .iter()
             .filter(|s| {
-                let path = self.bundle.resolve_slide_path(&s.source);
-                if !has_flat_extension(&path) || !path.is_file() {
+                if let Ok(c) = self.sources.lock() {
+                    if c.contains(s.id) {
+                        return false;
+                    }
+                }
+                let Ok((path, fp)) = self.verified_source(s) else {
+                    return false;
+                };
+                if h3d_slide::tiled_pyramid_exists(&self.pyramid_dir(s.id, fp)) {
                     return false;
                 }
-                match self.cached_fingerprint(s.id, &path) {
-                    Ok((_, fp)) => !h3d_slide::tiled_pyramid_exists(&self.pyramid_dir(s.id, fp)),
+                if has_flat_extension(&path) {
+                    return true;
+                }
+                // Slide berpiramida: hanya header yang dibaca. Sumber yang
+                // tidak perlu piramida langsung didaftarkan ke cache agar
+                // tidak dibuka dua kali.
+                match h3d_slide::open_slide_with_cache_bytes(
+                    &path,
+                    self.budgets.wsi_internal_cache_bytes,
+                ) {
+                    Ok(src) => {
+                        let src: Arc<dyn SlideSource> = Arc::from(src);
+                        if needs_tiled_pyramid(src.as_ref()) {
+                            true
+                        } else {
+                            if let Ok(mut c) = self.sources.lock() {
+                                c.insert(s.id, src);
+                            }
+                            false
+                        }
+                    }
                     Err(_) => false,
                 }
             })
@@ -816,7 +956,8 @@ impl Session {
     /// Thumbnail irisan dengan sisi terpanjang ≤ `max_side`, ber-cache di
     /// `cache/thumbs/`.
     pub fn thumbnail(&self, slide: SlideId, max_side: u32) -> Result<RgbaImage, EngineError> {
-        self.thumbnail_task(slide, max_side, false)?.run()
+        self.thumbnail_task_with(slide, max_side, false, true)?
+            .run()
     }
 
     /// Thumbnail irisan untuk tampilan 3D: seperti [`Session::thumbnail`],
@@ -830,7 +971,7 @@ impl Session {
         slide: SlideId,
         max_side: u32,
     ) -> Result<RgbaImage, EngineError> {
-        self.thumbnail_task(slide, max_side, true)?.run()
+        self.thumbnail_task_with(slide, max_side, true, true)?.run()
     }
 
     /// Thumbnail dari cache disk saja (tanpa membaca slide); `None` bila
@@ -861,11 +1002,28 @@ impl Session {
     /// Tugas pembuatan thumbnail yang **tidak memegang sesi**: semua yang
     /// dibutuhkan (sumber piksel bersama, path cache, mpp) disalin, sehingga
     /// GUI bisa menjalankannya di thread latar tanpa mengunci `Session`.
+    ///
+    /// Jalur thread UI: piramida bertile yang belum ada **tidak** dibangun di
+    /// sini; hasilnya [`EngineError::PyramidPending`] dan GUI menjalankan
+    /// [`Self::prepare_pyramid`] sebagai job (lihat [`Self::try_open_source`]).
     pub fn thumbnail_task(
         &self,
         slide: SlideId,
         max_side: u32,
         tissue: bool,
+    ) -> Result<ThumbTask, EngineError> {
+        self.thumbnail_task_with(slide, max_side, tissue, false)
+    }
+
+    /// [`Self::thumbnail_task`] dengan pilihan `build`: benar = piramida yang
+    /// belum ada dibangun di sini (jalur engine/CLI); salah = kembalikan
+    /// [`EngineError::PyramidPending`] (jalur thread UI).
+    fn thumbnail_task_with(
+        &self,
+        slide: SlideId,
+        max_side: u32,
+        tissue: bool,
+        build: bool,
     ) -> Result<ThumbTask, EngineError> {
         let entry = self.slide(slide)?;
         let tissue = tissue && entry.has_valid_mpp();
@@ -879,8 +1037,10 @@ impl Session {
         let final_path = tissue_path.as_ref().unwrap_or(&plain_path);
         let source = if final_path.is_file() {
             None
-        } else {
+        } else if build {
             Some(self.open_source(slide)?)
+        } else {
+            Some(self.try_open_source(slide)?)
         };
         Ok(ThumbTask {
             source,

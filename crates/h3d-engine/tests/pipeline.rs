@@ -1692,3 +1692,98 @@ fn embed_move_imports_without_second_copy_and_rollback_restores_sources() {
     // Sumber pindahan terbaca seperti biasa.
     assert!(s.open_source(ids[0]).is_ok());
 }
+
+#[test]
+fn ui_paths_never_build_pyramids_and_job_migrates_old_cache() {
+    let sh = shared();
+    let root = sh.root.path().join("piramida-lama");
+    let slides = root.join("slides");
+    std::fs::create_dir_all(&slides).unwrap();
+    let paths: Vec<PathBuf> = (10..13)
+        .map(|i| {
+            let name = format!("slice_{i:03}.png");
+            std::fs::copy(sh.slides_dir().join(&name), slides.join(&name)).unwrap();
+            slides.join(name)
+        })
+        .collect();
+    let dir = root.join("p.h3d");
+    let mut s = Session::create(&dir).unwrap();
+    let ids = s
+        .import_slides(&paths, Some([16.0, 16.0]), &NoProgress)
+        .unwrap();
+    drop(s);
+
+    // Impor sudah membangun piramida: tidak ada yang perlu disiapkan.
+    let s = Session::open(&dir).unwrap();
+    assert!(s.slides_needing_pyramid().is_empty());
+    assert!(s.try_open_source(ids[0]).is_ok());
+    drop(s);
+
+    // Simulasikan cache versi 1 (rilis lama): manifes versi 1 + level_00.png
+    // untuk irisan pertama; cache irisan kedua dihapus sama sekali.
+    let pyr = dir.join("cache").join("pyramid");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&pyr)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    dirs.sort();
+    assert_eq!(dirs.len(), 3);
+    for e in std::fs::read_dir(&dirs[0]).unwrap() {
+        std::fs::remove_file(e.unwrap().path()).unwrap();
+    }
+    write_other_png(&dirs[0].join("level_00.png"), 192);
+    std::fs::write(
+        dirs[0].join("pyramid.json"),
+        r#"{"version":1,"level_sizes":[[192,192]],"tile_size":256}"#,
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&dirs[1]).unwrap();
+
+    let s = Session::open(&dir).unwrap();
+    assert_eq!(s.slides_needing_pyramid(), vec![ids[0], ids[1]]);
+    // Jalur thread UI: tidak membangun, hanya memberi tahu.
+    assert!(matches!(
+        s.try_open_source(ids[0]),
+        Err(EngineError::PyramidPending(id)) if id == ids[0]
+    ));
+    assert!(matches!(
+        s.thumbnail_task(ids[1], 64, false),
+        Err(EngineError::PyramidPending(id)) if id == ids[1]
+    ));
+    assert!(s.try_open_source(ids[2]).is_ok());
+    assert!(!dirs[0].join("level_00.tiles").exists());
+
+    // Job paralel: keduanya dibangun, progres naik, cache lama dibuang.
+    let last = std::sync::Mutex::new(0.0f32);
+    struct Rec<'a>(&'a std::sync::Mutex<f32>);
+    impl Progress for Rec<'_> {
+        fn set(&self, f: f32, _: &str) {
+            let mut l = self.0.lock().unwrap();
+            assert!(f + 1e-6 >= *l, "progres mundur: {f} < {}", *l);
+            *l = f;
+        }
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let failed = s.prepare_pyramids(&[ids[0], ids[1]], &Rec(&last)).unwrap();
+    assert!(failed.is_empty());
+    assert!((*last.lock().unwrap() - 1.0).abs() < 1e-6);
+    assert!(s.slides_needing_pyramid().is_empty());
+    assert!(!dirs[0].join("level_00.png").exists());
+    assert!(dirs[0].join("level_00.tiles").exists());
+    assert!(s.try_open_source(ids[0]).is_ok());
+    assert!(s.thumbnail_task(ids[1], 64, false).is_ok());
+
+    // Irisan yang berkasnya hilang dilewati job tanpa menggagalkan yang lain.
+    std::fs::remove_dir_all(&dirs[2]).unwrap();
+    std::fs::remove_file(&paths[2]).unwrap();
+    let s = Session::open(&dir).unwrap();
+    assert!(
+        s.slides_needing_pyramid().is_empty(),
+        "berkas hilang bukan kandidat"
+    );
+    let failed = s.prepare_pyramids(&[ids[0], ids[2]], &NoProgress).unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0, ids[2]);
+}

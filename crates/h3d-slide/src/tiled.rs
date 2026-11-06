@@ -453,8 +453,11 @@ pub fn build_tiled_pyramid(
         return Err(SlideError::Decode("gambar berukuran nol".into()));
     }
     fs::create_dir_all(dir).map_err(|e| SlideError::io(dir, e))?;
-    // Manifes lama dibuang dulu: tanpa manifes = piramida tidak sah.
+    // Manifes lama dibuang dulu: tanpa manifes = piramida tidak sah. Berkas
+    // level lama (termasuk format versi 1 `level_NN.png` yang berukuran
+    // ratusan MB) ikut dihapus agar cache tidak membengkak.
     let _ = fs::remove_file(dir.join(MANIFEST_NAME));
+    remove_stale_level_files(dir);
     let sizes = level_sizes(size);
     let result = (|| {
         let mut writer = LevelWriter::create(dir, &sizes, 0, TILE_SIZE)?;
@@ -509,9 +512,34 @@ pub fn build_tiled_pyramid_from_source(
     build_tiled_pyramid(dir, &mut rows, progress)
 }
 
-/// Benar bila `dir` berisi piramida bertile yang lengkap.
+/// Hapus semua berkas `level_*` di `dir` (format lama, tile lama, sisa
+/// `.tmp`). Kegagalan diabaikan: pembangunan akan menimpa yang perlu.
+fn remove_stale_level_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        if name.to_string_lossy().starts_with("level_") {
+            let _ = fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Benar bila `dir` berisi piramida bertile yang lengkap **dan** bisa
+/// dibaca versi ini: manifes ada, versinya [`MANIFEST_VERSION`], dan setiap
+/// berkas level ada. Cache format lama (versi 1, `level_NN.png`) menghasilkan
+/// `false` sehingga dibangun ulang oleh job latar, bukan saat pertama dibaca.
 pub fn tiled_pyramid_exists(dir: &Path) -> bool {
-    dir.join(MANIFEST_NAME).is_file()
+    let Ok(json) = fs::read(dir.join(MANIFEST_NAME)) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<Manifest>(&json) else {
+        return false;
+    };
+    manifest.version == MANIFEST_VERSION
+        && !manifest.level_sizes.is_empty()
+        && (0..manifest.level_sizes.len()).all(|i| dir.join(level_file_name(i)).is_file())
 }
 
 struct TiledLevel {

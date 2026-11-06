@@ -48,7 +48,9 @@ impl AppState {
         if let Some(g) = gpu {
             g.with(|r, _, _| r.begin_frame());
         }
-        let job_running = self.poll_job();
+        // Permintaan thumbnail/viewer yang menunggu piramida memicu job di
+        // sini, bukan pembangunan di thread UI.
+        let job_running = self.poll_job() || self.start_pending_pyramids();
         if self.update.poll() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }

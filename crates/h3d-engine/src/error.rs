@@ -40,6 +40,13 @@ pub enum EngineError {
         /// Nama berkas.
         file: String,
     },
+    /// Piramida bertile irisan belum dibangun. Dikembalikan jalur GUI yang
+    /// tidak boleh membangun piramida di thread UI
+    /// ([`crate::Session::try_open_source`], [`crate::Session::thumbnail_task`]);
+    /// GUI menjalankan [`crate::Session::prepare_pyramid`] sebagai job lalu
+    /// meminta lagi.
+    #[error("piramida gambar irisan {0} belum disiapkan")]
+    PyramidPending(SlideId),
     /// Label tidak ada di tabel label.
     #[error("label \"{0}\" tidak ada di tabel label")]
     LabelNotFound(String),
