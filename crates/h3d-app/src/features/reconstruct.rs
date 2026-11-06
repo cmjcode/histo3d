@@ -392,6 +392,9 @@ pub struct ReconState {
     pub slices: Vec<SliceItem>,
     /// Irisan di bawah kursor.
     pub hovered_slice: Option<SlideId>,
+    /// Irisan yang terakhir diklik di kanvas 3D; hanya irisan ini yang diberi
+    /// garis tepi (klik ruang kosong/mesh melepasnya).
+    pub clicked_slice: Option<SlideId>,
     /// Faktor renggang Z (tampilan saja; 1 = skala sebenarnya).
     pub z_scale: f32,
     /// Renggang Z masih otomatis (belum disentuh pengguna).
@@ -476,6 +479,7 @@ impl Default for ReconState {
             uploaded_slices: BTreeSet::new(),
             slices: Vec::new(),
             hovered_slice: None,
+            clicked_slice: None,
             z_scale: 1.0,
             z_scale_auto: true,
             spacing_preview: None,
@@ -494,7 +498,7 @@ impl Default for ReconState {
             edit: StackEdit::default(),
             look: ViewLook::Technical,
             stain_colors: true,
-            glass: true,
+            glass: false,
             cell_bumps: false,
             cell_size_um: 60.0,
             cell_strength: 0.55,
@@ -512,7 +516,6 @@ impl ReconState {
         self.look = look;
         if look == ViewLook::Tissue {
             self.stain_colors = true;
-            self.glass = true;
         } else {
             self.cell_bumps = false;
         }
@@ -1515,8 +1518,10 @@ pub fn canvas(
                             nearest_slide: sess.and_then(|s| nearest_slide(s, point_um[2])),
                         });
                         select_object(st, Some(key));
+                        st.clicked_slice = None;
                     }
                     _ => {
+                        st.clicked_slice = st.hovered_slice;
                         if let Some(id) = st.hovered_slice.filter(|_| !previewing) {
                             event = CanvasEvent::Selected(id);
                         } else if st.tool == StackTool::Object {
@@ -1619,24 +1624,18 @@ pub fn canvas(
         crate::viewer::paint_background(ui, rect, false);
     }
 
-    // Hiasan: garis tepi irisan (terpilih, hover, ragu/gagal QC, pratinjau)
-    // dan nomor irisan terpilih.
+    // Hiasan: garis tepi hanya untuk irisan yang diklik di kanvas 3D (plus
+    // irisan yang sedang dikoreksi/dipratinjau), dan nomornya.
     let painter = ui.painter_at(rect);
-    let selected = app.current;
     for (it, m) in &visible {
-        let is_sel = selected == Some(it.id);
-        let is_hover = st.hovered_slice == Some(it.id);
+        let is_sel = st.clicked_slice == Some(it.id);
         let stroke = if is_sel {
             Some(egui::Stroke::new(2.0, h3d_ui::theme::ACCENT))
-        } else if is_hover {
-            Some(egui::Stroke::new(1.5, egui::Color32::WHITE))
         } else if edit_id.is_some() && st.edit.downstream.contains(&it.id) {
             Some(egui::Stroke::new(
                 1.0,
                 h3d_ui::theme::ACCENT_LIGHT.gamma_multiply(0.8),
             ))
-        } else if it.flagged {
-            Some(egui::Stroke::new(1.0, h3d_ui::theme::WARNING))
         } else if it.preview {
             Some(egui::Stroke::new(
                 1.0,
@@ -1655,7 +1654,7 @@ pub fn canvas(
             .collect();
         if let Some(pts) = pts {
             painter.add(egui::Shape::closed_line(pts.clone(), stroke));
-            if is_sel || is_hover {
+            if is_sel {
                 let label = format!("{}", it.number);
                 let at = pts[0] + egui::vec2(6.0, -6.0);
                 painter.text(
@@ -2579,7 +2578,7 @@ mod tests {
         let tech = mesh_material(&st, &m);
         assert_eq!(tech, h3d_render::MeshMaterial::default());
         st.set_look(ViewLook::Tissue);
-        assert!(st.stain_colors && st.glass);
+        assert!(st.stain_colors && !st.glass);
         // Tanpa warna di mesh: mode pulasan tidak dipakai (warna label).
         assert!(!mesh_material(&st, &m).stain_colors);
         m.colors = vec![[200, 100, 150]; 3];
