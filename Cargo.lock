@@ -2276,6 +2276,7 @@ dependencies = [
  "ndarray",
  "rayon",
  "rustfft",
+ "serde",
  "thiserror 2.0.21",
 ]
 

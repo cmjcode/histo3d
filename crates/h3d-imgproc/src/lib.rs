@@ -17,6 +17,7 @@
 
 pub mod color;
 pub mod components;
+pub mod count;
 pub mod edt;
 pub mod error;
 pub mod fft;
@@ -38,7 +39,11 @@ pub use color::{
 };
 pub use components::{
     component_areas, label_components, label_components_conn, largest_component,
-    remove_small_components, Connectivity,
+    merge_small_regions, remove_small_components, Connectivity,
+};
+pub use count::{
+    count_objects, count_objects_with_uncertainty, label_objects, BorderRule, CountEstimate,
+    CountParams, Object2D, ObjectCount, UNCERTAINTY_VARIANTS,
 };
 pub use edt::{
     edt3_anisotropic, edt3_anisotropic_with_progress, edt3_argmin, edt_2d_um, edt_squared_2d,

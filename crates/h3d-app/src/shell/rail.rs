@@ -1,13 +1,13 @@
 //! Rel alat kiri: isinya mengikuti tampilan.
 //!
 //! - Tumpukan 3D: Susun otomatis, Sejajarkan semua, Bangun 3D, Analisis
-//!   spasial | Pas ke layar, Irisan di 3D, Mesh di 3D, Bidang potong |
-//!   Putar, Geser, Fokus 2 irisan. (Dari mode Irisan, Registrasi, dan
-//!   Rekonstruksi.)
+//!   spasial | Pas ke layar, Irisan di 3D, Sembunyikan latar, Mesh di 3D,
+//!   Grid, Bidang potong | Putar, Geser, Pilih objek, Fokus 2 irisan.
+//!   (Dari mode Irisan, Registrasi, dan Rekonstruksi.)
 //! - Irisan 2D, Tandai: Geser, Kuas, Penghapus, Laso, Poligon | Isi lubang,
-//!   Salin ke irisan berikut, Tandai ditinjau. (Dari mode Segmentasi.)
+//!   Salin ke irisan berikut, Tandai ditinjau | Sembunyikan latar. (Dari mode Segmentasi.)
 //! - Irisan 2D, Sejajarkan: Geser, Landmark, Geser irisan, Putar irisan |
-//!   Tandai rusak. (Dari mode Registrasi.)
+//!   Tandai rusak | Sembunyikan latar. (Dari mode Registrasi.)
 //!
 //! Pemilih mode Tandai/Sejajarkan ada di paling atas rel saat 2D.
 
@@ -29,6 +29,7 @@ enum RailAction {
     Analyze,
     FitView,
     ToggleSlices,
+    ToggleHideBackground,
     ToggleMeshes,
     ToggleGrid,
     ToggleClip,
@@ -71,6 +72,10 @@ pub fn show(app: &mut AppState, sess: Option<&mut Session>, ui: &mut Ui, work: R
         RailAction::ToggleSlices => {
             app.recon.show_slices = !app.recon.show_slices;
             app.recon.fitted = false;
+        }
+        RailAction::ToggleHideBackground => {
+            app.recon.hide_background = !app.recon.hide_background;
+            app.recon.uploaded_slices.clear();
         }
         RailAction::ToggleMeshes => {
             app.recon.show_meshes = !app.recon.show_meshes;
@@ -192,6 +197,13 @@ fn stack_items(app: &AppState, busy: bool) -> Vec<RailItem<RailAction>> {
         )
         .selected(st.show_slices),
         RailItem::tool(
+            RailAction::ToggleHideBackground,
+            h3d_ui::icons::HIDE_BACKGROUND,
+            t!("recon-hide-background"),
+        )
+        .hint(t!("recon-hide-background-hint"))
+        .selected(st.hide_background),
+        RailItem::tool(
             RailAction::ToggleMeshes,
             h3d_ui::icons::LAYERS,
             t!("stack-mesh-visible"),
@@ -311,5 +323,15 @@ fn slice_items(app: &AppState) -> Vec<RailItem<RailAction>> {
             ));
         }
     }
+    items.push(RailItem::Separator);
+    items.push(
+        RailItem::tool(
+            RailAction::ToggleHideBackground,
+            h3d_ui::icons::HIDE_BACKGROUND,
+            t!("recon-hide-background"),
+        )
+        .hint(t!("recon-hide-background-hint"))
+        .selected(app.recon.hide_background),
+    );
     items
 }

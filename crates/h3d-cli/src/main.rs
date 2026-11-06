@@ -17,8 +17,9 @@ use h3d_core::{
 };
 use h3d_engine::phantom::{write_phantom, PhantomOptions, PhantomShapeKind};
 use h3d_engine::{
-    clock_from_env, to_stable_json_of, AttrParams, ClassicParams, ExportKind, ImportOptions,
-    PaintMode, RegMetric, RegModel, RegOptions, RegisterRun, Session, StainChannel,
+    clock_from_env, to_stable_json_of, AttrParams, BorderRule, ClassicParams, CountParams,
+    ExportKind, ImportOptions, PaintMode, RegMetric, RegModel, RegOptions, RegisterRun, Session,
+    StainChannel,
 };
 use serde_json::json;
 
@@ -172,6 +173,45 @@ enum Command {
         /// Isi lubang (lumen kelenjar ikut masuk).
         #[arg(long = "fill-holes")]
         fill_holes: bool,
+    },
+    /// Hitung objek 2D (kelenjar, pulau tumor, dst.) satu label per irisan;
+    /// tidak mengubah label. Jumlah dilaporkan dengan rentang ketidakpastian.
+    Count {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Nama label yang dihitung.
+        #[arg(long)]
+        label: String,
+        /// Id irisan dipisah koma (bawaan: semua irisan Ok).
+        #[arg(long, value_delimiter = ',')]
+        slides: Vec<u32>,
+        /// Jangan isi lubang (lumen) sebelum menghitung.
+        #[arg(long = "no-fill-holes")]
+        no_fill_holes: bool,
+        /// Jangan belah objek yang bersentuhan (watershed EDT).
+        #[arg(long = "no-split")]
+        no_split: bool,
+        /// Jarak minimum antar puncak EDT, µm.
+        #[arg(long = "min-seed-um", default_value_t = 40.0)]
+        min_seed_um: f64,
+        /// Kedalaman lembah minimum agar dua puncak = dua objek, µm.
+        #[arg(long = "h-um", default_value_t = 8.0)]
+        h_um: f64,
+        /// Wilayah hasil belah lebih kecil dari ini digabung ke tetangga, µm².
+        #[arg(long = "merge-um2", default_value_t = 200.0)]
+        merge_um2: f64,
+        /// Objek lebih kecil dari ini dibuang, µm².
+        #[arg(long = "min-area-um2", default_value_t = 500.0)]
+        min_area_um2: f64,
+        /// Radius pembukaan morfologi, µm (0 = lewati).
+        #[arg(long = "open-um", default_value_t = 0.0)]
+        open_um: f64,
+        /// Perlakuan objek yang menyentuh tepi.
+        #[arg(long, value_enum, default_value_t = BorderArg::Frame)]
+        border: BorderArg,
+        /// Keluaran JSON (semua irisan) ke stdout.
+        #[arg(long)]
+        json: bool,
     },
     /// Ubah status irisan (ok, excluded, damaged).
     Status {
@@ -607,6 +647,27 @@ fn parse_mpp(s: &str) -> std::result::Result<[f64; 2], String> {
 enum Outcome {
     Ok,
     QcFailed(usize),
+}
+
+/// Aturan tepi untuk `count`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BorderArg {
+    /// Semua objek dihitung.
+    Include,
+    /// Bingkai hitung tak bias: tepi kiri/bawah mengecualikan.
+    Frame,
+    /// Objek yang menyentuh tepi mana pun dikecualikan.
+    Exclude,
+}
+
+impl From<BorderArg> for BorderRule {
+    fn from(b: BorderArg) -> Self {
+        match b {
+            BorderArg::Include => BorderRule::Include,
+            BorderArg::Frame => BorderRule::CountingFrame,
+            BorderArg::Exclude => BorderRule::ExcludeAll,
+        }
+    }
 }
 
 fn open(project: &Path) -> Result<Session> {
@@ -1114,6 +1175,72 @@ fn run(cli: Cli) -> Result<Outcome> {
                 "Segmentasi klasik \"{label}\": {} irisan diproses, {n} diterima (hanya pada piksel kosong)",
                 ids.len()
             );
+        }
+        Command::Count {
+            project,
+            label,
+            slides,
+            no_fill_holes,
+            no_split,
+            min_seed_um,
+            h_um,
+            merge_um2,
+            min_area_um2,
+            open_um,
+            border,
+            json,
+        } => {
+            let mut s = open(&project)?;
+            let id = s.label_by_name(&label)?;
+            let ids: Vec<SlideId> = if slides.is_empty() {
+                s.project()
+                    .usable_slides_ordered()
+                    .iter()
+                    .map(|e| e.id)
+                    .collect()
+            } else {
+                slides.into_iter().map(SlideId).collect()
+            };
+            let params = CountParams {
+                fill_holes: !no_fill_holes,
+                open_radius_um: open_um,
+                split_enabled: !no_split,
+                min_seed_distance_um: min_seed_um,
+                h_um,
+                merge_min_area_um2: merge_um2,
+                min_area_um2,
+                border: border.into(),
+            };
+            let mut results = Vec::with_capacity(ids.len());
+            for &slide in &ids {
+                results.push(s.count_objects_2d(slide, id, None, &params)?);
+            }
+            if json {
+                println!("{}", to_stable_json_of(&results)?);
+            } else {
+                println!("{}", h3d_core::RESEARCH_ONLY_NOTICE);
+                println!(
+                    "Objek \"{label}\" per irisan (hash parameter {:016x}):",
+                    params.params_hash()
+                );
+                let mut total = 0usize;
+                for c in &results {
+                    total += c.n();
+                    let dens = c
+                        .density_per_mm2()
+                        .map_or(String::from("-"), |d| format!("{d:.1}/mm²"));
+                    println!(
+                        "  irisan {}: {} objek (rentang {}–{}, {} di tepi dikecualikan), median luas {:.0} µm², densitas {dens}",
+                        c.slide,
+                        c.n(),
+                        c.estimate.n_min,
+                        c.estimate.n_max,
+                        c.estimate.count.n_excluded,
+                        c.estimate.count.median_area_um2()
+                    );
+                }
+                println!("Total {total} objek pada {} irisan", results.len());
+            }
         }
         Command::Status {
             project,

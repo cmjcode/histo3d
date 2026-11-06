@@ -226,8 +226,12 @@ pub const OBJECT_LIFT: MaterialIcon = icons::ICON_MOVE_UP;
 pub const OBJECT_ISOLATE: MaterialIcon = icons::ICON_HIGHLIGHT_ALT;
 /// Daftar objek hasil penautan.
 pub const OBJECT_LIST: MaterialIcon = icons::ICON_BUBBLE_CHART;
+/// Penghitungan objek 2D per irisan.
+pub const COUNT: MaterialIcon = icons::ICON_NUMBERS;
+/// Sembunyikan latar kaca/putih (masker jaringan).
+pub const HIDE_BACKGROUND: MaterialIcon = icons::ICON_BACKGROUND_REPLACE;
 
-pub const ALL: [MaterialIcon; 102] = [
+pub const ALL: [MaterialIcon; 104] = [
     MENU,
     BACK,
     STACK_3D,
@@ -330,4 +334,6 @@ pub const ALL: [MaterialIcon; 102] = [
     OBJECT_LIFT,
     OBJECT_ISOLATE,
     OBJECT_LIST,
+    COUNT,
+    HIDE_BACKGROUND,
 ];

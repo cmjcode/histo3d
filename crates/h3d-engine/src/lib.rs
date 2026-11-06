@@ -29,14 +29,15 @@ pub use clock::{clock_from_env, Clock, FixedClock, SystemClock, FIXED_TIME_ENV};
 pub use error::EngineError;
 pub use job::{spawn_job, spawn_session_job, JobHandle, SharedSession};
 pub use session::{
-    kind_for_class, AttrParams, ExportKind, ImportOptions, MarginFigure, ModelEntry,
-    ModelLabelSetup, PendingProposal, QcRow, RegSummary, RegisterRun, Session, ThumbTask,
-    APP_VERSION, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE, MODEL_ONNX_FILE, MODEL_SPEC_FILE,
-    REG_IMAGE_MPP,
+    kind_for_class, AttrParams, CountSource, ExportKind, ImportOptions, MarginFigure, ModelEntry,
+    ModelLabelSetup, ObjectCount2D, PendingProposal, QcRow, RegSummary, RegisterRun, Session,
+    ThumbTask, APP_VERSION, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE, MODEL_ONNX_FILE,
+    MODEL_SPEC_FILE, REG_IMAGE_MPP,
 };
 
 // Tipe crate bawah yang muncul di API publik, agar pemakai (CLI/GUI) cukup
 // bergantung pada `h3d-engine`.
+pub use h3d_imgproc::{BorderRule, CountEstimate, CountParams, Object2D, ObjectCount};
 pub use h3d_io::report::fmt_uncertainty;
 pub use h3d_io::strings::{direction_text, warning_text};
 pub use h3d_io::{to_stable_json_of, ClinicalScope, EmbedMode, Report, ReportFigure};

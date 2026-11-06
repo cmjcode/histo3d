@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 
 use h3d_core::{LabelId, Progress, SlideId, SplitParams};
-use h3d_imgproc::{label_components, split_touching};
+use h3d_imgproc::{label_components, merge_small_regions, split_touching};
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
@@ -300,86 +300,6 @@ pub fn component_masks(
     progress: &dyn Progress,
 ) -> Result<Vec<Option<ComponentMask>>, VolError> {
     component_masks_split(plan, inputs, label, &SplitParams::default(), progress)
-}
-
-/// Gabungkan wilayah berluas `< min_area_px` ke wilayah tetangga (8) yang
-/// terluas (seri → nomor terkecil); wilayah kecil tanpa tetangga dibiarkan.
-/// Diproses dari yang terkecil; luas diperbarui setelah tiap penggabungan.
-/// Mengembalikan jumlah wilayah tersisa setelah penomoran ulang rapat.
-fn merge_small_regions(labels: &mut Array2<u32>, n: usize, min_area_px: usize) -> usize {
-    if n == 0 {
-        return 0;
-    }
-    let (h, w) = labels.dim();
-    let mut area = vec![0usize; n + 1];
-    for &l in labels.iter() {
-        area[l as usize] += 1;
-    }
-    // `alias[l]` = wilayah tujuan (dirantai) setelah penggabungan.
-    let mut alias: Vec<u32> = (0..=n as u32).collect();
-    let resolve = |alias: &[u32], mut l: u32| {
-        while alias[l as usize] != l {
-            l = alias[l as usize];
-        }
-        l
-    };
-    let mut order: Vec<usize> = (1..=n).collect();
-    order.sort_by_key(|&l| (area[l], l));
-    for l in order {
-        let l = l as u32;
-        if resolve(&alias, l) != l || area[l as usize] >= min_area_px {
-            continue;
-        }
-        // Tetangga wilayah lain di sekeliling wilayah `l`.
-        let mut neigh: BTreeMap<u32, usize> = BTreeMap::new();
-        for ((y, x), &v) in labels.indexed_iter() {
-            if resolve(&alias, v) != l {
-                continue;
-            }
-            for dy in -1i64..=1 {
-                for dx in -1i64..=1 {
-                    let (ny, nx) = (y as i64 + dy, x as i64 + dx);
-                    if ny < 0 || nx < 0 || ny >= h as i64 || nx >= w as i64 {
-                        continue;
-                    }
-                    let o = labels[[ny as usize, nx as usize]];
-                    if o == 0 {
-                        continue;
-                    }
-                    let o = resolve(&alias, o);
-                    if o != l {
-                        *neigh.entry(o).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-        let Some((&target, _)) = neigh.iter().max_by(|a, b| {
-            area[*a.0 as usize]
-                .cmp(&area[*b.0 as usize])
-                .then(b.0.cmp(a.0))
-        }) else {
-            continue;
-        };
-        alias[l as usize] = target;
-        area[target as usize] += area[l as usize];
-        area[l as usize] = 0;
-    }
-    // Penomoran ulang rapat menurut nomor asal.
-    let mut remap = vec![0u32; n + 1];
-    let mut m = 0u32;
-    for l in 1..=n as u32 {
-        let r = resolve(&alias, l);
-        if remap[r as usize] == 0 {
-            m += 1;
-            remap[r as usize] = m;
-        }
-    }
-    for v in labels.iter_mut() {
-        if *v != 0 {
-            *v = remap[resolve(&alias, *v) as usize];
-        }
-    }
-    m as usize
 }
 
 /// Seperti [`component_masks`], tetapi bila `split.enabled` tiap masker

@@ -17,7 +17,10 @@ use egui::Ui;
 use h3d_core::{
     AttrDef, AttrKind, LabelDef, LabelId, LabelKind, SlideId, SlideTransform, Stain, VesselKind,
 };
-use h3d_engine::{AttrParams, ClassicParams, EngineError, PaintMode, Proposal, Session};
+use h3d_engine::{
+    AttrParams, ClassicParams, CountParams, EngineError, ObjectCount2D, PaintMode, Proposal,
+    Session,
+};
 use h3d_i18n::t;
 use h3d_render::{Camera2D, H3dPaintCallback, LabelOverlayDraw, Scene, Scene2D};
 use h3d_segment::StainChannel;
@@ -136,6 +139,12 @@ pub struct SegmentState {
     pub classic_otsu: bool,
     /// Overlay inti untuk kalibrasi.
     pub nuclei: Option<NucleiOverlay>,
+    /// Hasil penghitungan objek 2D terakhir (overlay nomor di viewer).
+    pub count: Option<ObjectCount2D>,
+    /// Parameter penghitungan objek.
+    pub count_params: CountParams,
+    /// Batasi penghitungan ke wilayah yang tampil.
+    pub count_in_view: bool,
     /// Ambang OD kromogen `t_D`.
     pub t_d: f32,
     /// Cache tekstur usulan.
@@ -165,6 +174,9 @@ impl Default for SegmentState {
             classic_params: ClassicParams::default(),
             classic_otsu: true,
             nuclei: None,
+            count: None,
+            count_params: CountParams::default(),
+            count_in_view: false,
             t_d: h3d_imgproc::ihc::IhcThresholds::default().t_d,
             proposal_tex: None,
             new_label_name: String::new(),
@@ -395,6 +407,8 @@ pub fn labels_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
     label_panel(app, sess, ui);
     ui.separator();
     proposals_panel(app, sess, ui);
+    ui.separator();
+    count_panel(app, ui);
     ui.separator();
     calibration_panel(app, sess, ui);
 }
@@ -795,6 +809,131 @@ fn proposals_panel(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
     });
 }
 
+/// Panel "Hitung objek": jumlah objek tertutup label aktif pada irisan
+/// aktif (kelenjar, pulau tumor, dst.) dari label tersimpan atau dari usulan
+/// klasik yang belum diterima. Tidak mengubah label; hasil dilaporkan
+/// dengan rentang ketidakpastian (aturan keras 18).
+fn count_panel(app: &mut AppState, ui: &mut Ui) {
+    egui::CollapsingHeader::new(icon_label(h3d_ui::icons::COUNT, &t!("count-title")))
+        .default_open(false)
+        .show(ui, |ui| {
+            let Some(slide) = app.current else {
+                return;
+            };
+            let active = app.segment.active_label;
+            ui.small(t!("count-hint"));
+            {
+                let p = &mut app.segment.count_params;
+                ui.checkbox(&mut p.fill_holes, t!("count-fill-holes"));
+                ui.checkbox(&mut p.split_enabled, t!("count-split"));
+                if p.split_enabled {
+                    ui.add(
+                        egui::Slider::new(&mut p.min_seed_distance_um, 5.0..=500.0)
+                            .logarithmic(true)
+                            .suffix(format!(" {}", t!("unit-um")))
+                            .text(t!("count-min-seed")),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut p.h_um, 1.0..=100.0)
+                            .logarithmic(true)
+                            .suffix(format!(" {}", t!("unit-um")))
+                            .text(t!("count-h")),
+                    );
+                }
+                ui.add(
+                    egui::Slider::new(&mut p.min_area_um2, 10.0..=1.0e6)
+                        .logarithmic(true)
+                        .suffix(format!(" {}", t!("unit-um2")))
+                        .text(t!("count-min-area")),
+                );
+            }
+            ui.checkbox(&mut app.segment.count_in_view, t!("count-in-view"));
+            let params = app.segment.count_params.clone();
+            let roi = if app.segment.count_in_view {
+                app.segment.last_view_u
+            } else {
+                None
+            };
+            ui.horizontal(|ui| {
+                if icon_text_button_enabled(
+                    ui,
+                    active.is_some(),
+                    h3d_ui::icons::PLAY,
+                    &t!("count-run-labels"),
+                )
+                .clicked()
+                {
+                    if let Some(label) = active {
+                        let params = params.clone();
+                        app.start_job(t!("count-title"), move |s, _p| {
+                            s.count_objects_2d(slide, label, roi, &params)
+                                .map(|c| JobOutput::ObjectCount(Box::new(c)))
+                        });
+                    }
+                }
+                let proposal = app
+                    .segment
+                    .classic
+                    .as_ref()
+                    .filter(|(s, _)| *s == slide)
+                    .map(|(_, p)| p.clone());
+                if icon_text_button_enabled(
+                    ui,
+                    proposal.is_some(),
+                    h3d_ui::icons::CLASSIC,
+                    &t!("count-run-proposal"),
+                )
+                .clicked()
+                {
+                    if let Some(p) = proposal {
+                        app.start_job(t!("count-title"), move |s, _p| {
+                            s.count_proposal_objects(slide, &p, &params)
+                                .map(|c| JobOutput::ObjectCount(Box::new(c)))
+                        });
+                    }
+                }
+            });
+            if let Some(c) = app.segment.count.as_ref().filter(|c| c.slide == slide) {
+                ui.strong(t!(
+                    "count-result",
+                    n = c.n().to_string(),
+                    lo = c.estimate.n_min.to_string(),
+                    hi = c.estimate.n_max.to_string(),
+                    label = c.label_name.clone()
+                ));
+                if c.estimate.count.n_excluded > 0 {
+                    ui.weak(t!(
+                        "count-excluded",
+                        n = c.estimate.count.n_excluded.to_string()
+                    ));
+                }
+                if c.n() > 0 {
+                    ui.label(format!(
+                        "{}: {:.0} {}",
+                        t!("count-median-area"),
+                        c.estimate.count.median_area_um2(),
+                        t!("unit-um2")
+                    ));
+                }
+                if let Some(d) = c.density_per_mm2() {
+                    ui.label(format!(
+                        "{}: {d:.1} /{}",
+                        t!("count-density"),
+                        t!("unit-mm2")
+                    ));
+                }
+                ui.weak(format!(
+                    "{}: {:016x}",
+                    t!("count-params-hash"),
+                    c.estimate.count.params_hash
+                ));
+                if ui.button(t!("count-clear")).clicked() {
+                    app.segment.count = None;
+                }
+            }
+        });
+}
+
 fn calibration_panel(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
     egui::CollapsingHeader::new(icon_label(
         h3d_ui::icons::CALIBRATE,
@@ -875,6 +1014,8 @@ fn calibration_panel(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
 
 const POSITIVE_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 90, 60);
 const NEGATIVE_COLOR: egui::Color32 = egui::Color32::from_rgb(70, 150, 250);
+/// Warna penanda hasil hitung objek.
+const COUNT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 40);
 
 fn proposal_key(slide: SlideId, props: &[&Proposal]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1079,6 +1220,34 @@ pub fn viewer(app: &mut AppState, sess: &mut Session, ui: &mut Ui, gpu: Option<&
                     NEGATIVE_COLOR
                 };
                 painter.circle_stroke(p, 4.0, egui::Stroke::new(1.5, color));
+            }
+        }
+    }
+
+    // Overlay hasil hitung objek: lingkaran + nomor di sentroid; objek yang
+    // dikecualikan aturan tepi diredupkan.
+    if let Some(c) = app.segment.count.as_ref().filter(|c| c.slide == slide) {
+        let font = egui::FontId::proportional(11.0);
+        for o in c.estimate.count.objects.iter().take(20_000) {
+            let p = to_screen(c.centroid_u(o));
+            if !rect.contains(p) {
+                continue;
+            }
+            let color = if o.excluded {
+                egui::Color32::GRAY
+            } else {
+                COUNT_COLOR
+            };
+            let r = ((o.equiv_diameter_um / 2.0) / camera.um_per_px) as f32;
+            painter.circle_stroke(p, r.clamp(3.0, 400.0), egui::Stroke::new(1.5, color));
+            if !o.excluded {
+                painter.text(
+                    p,
+                    egui::Align2::CENTER_CENTER,
+                    o.id.to_string(),
+                    font.clone(),
+                    color,
+                );
             }
         }
     }

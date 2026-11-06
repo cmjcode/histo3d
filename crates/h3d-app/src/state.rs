@@ -156,6 +156,8 @@ pub enum JobOutput {
     PyramidsPrepared(Vec<(SlideId, EngineError)>),
     /// Inti terdeteksi untuk kalibrasi ambang IHC.
     Nuclei(Box<segment::NucleiOverlay>),
+    /// Penghitungan objek 2D satu label pada satu irisan.
+    ObjectCount(Box<h3d_engine::ObjectCount2D>),
 }
 
 /// Job yang sedang berjalan.
@@ -773,6 +775,15 @@ impl AppState {
                     .info(t!("export-done", n = paths.len().to_string(), dir = dir));
             }
             JobOutput::Nuclei(n) => self.segment.nuclei = Some(*n),
+            JobOutput::ObjectCount(c) => {
+                self.toasts.info(t!(
+                    "count-done",
+                    n = c.n().to_string(),
+                    lo = c.estimate.n_min.to_string(),
+                    hi = c.estimate.n_max.to_string()
+                ));
+                self.segment.count = Some(*c);
+            }
         }
     }
 

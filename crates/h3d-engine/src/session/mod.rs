@@ -18,6 +18,7 @@ use crate::clock::{Clock, SystemClock};
 use crate::error::EngineError;
 
 mod attrs;
+mod count;
 mod export;
 mod figures;
 mod history;
@@ -31,6 +32,7 @@ mod spatial;
 mod surface;
 
 pub use attrs::AttrParams;
+pub use count::{CountSource, ObjectCount2D};
 pub use export::ExportKind;
 pub use figures::{MarginFigure, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE};
 pub use images::{ThumbTask, REG_IMAGE_MPP};
