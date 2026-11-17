@@ -265,6 +265,185 @@ pub fn percentile_stretch(arr: &Array2<f32>, lo: f32, hi: f32) -> Array2<f32> {
     arr.mapv(|v| ((v - a) / range).clamp(0.0, 1.0))
 }
 
+/// Sudut minimum (derajat) antara vektor H dan E hasil Macenko agar estimasi
+/// dianggap sah; di bawah ini kedua pewarna tidak terpisah (jaringan satu
+/// warna) dan pemanggil memakai matriks Ruifrok tetap.
+pub const MACENKO_MIN_ANGLE_DEG: f64 = 10.0;
+/// Jumlah piksel berpewarna minimum untuk estimasi Macenko.
+pub const MACENKO_MIN_PIXELS: usize = 1000;
+
+/// Estimasi vektor pewarna H dan E per slide dengan metode Macenko dkk.
+/// (2009): OD piksel jaringan dengan `|OD| > beta` diproyeksikan ke bidang
+/// dua vektor eigen kovarians terbesar; arah pada persentil sudut `alpha`
+/// dan `1 − alpha` menjadi vektor ekstrem. Vektor yang lebih searah dengan
+/// hematoksilin Ruifrok menjadi baris H, lainnya E, baris ketiga = silang
+/// keduanya. `tissue` (bentuk `(h, w)`) membatasi piksel yang dipakai.
+///
+/// Mengembalikan `Ok(None)` bila piksel berpewarna `< MACENKO_MIN_PIXELS`
+/// atau sudut H–E `< MACENKO_MIN_ANGLE_DEG` (mis. irisan hampir kosong atau
+/// satu warna); pemanggil lalu memakai [`StainMatrix::he`]. Deterministik:
+/// piksel diambil dengan langkah tetap (maks. ~200 000 sampel), eigen dengan
+/// rotasi Jacobi berurutan tetap.
+pub fn estimate_stains_macenko(
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    tissue: Option<&Array2<u8>>,
+    beta: f32,
+    alpha: f32,
+) -> Result<Option<StainMatrix>, ImgError> {
+    check_rgba(rgba, w, h)?;
+    if let Some(t) = tissue {
+        if t.dim() != (h, w) {
+            return Err(ImgError::shape(&[h, w], &[t.dim().0, t.dim().1]));
+        }
+    }
+    if !(beta.is_finite() && beta >= 0.0 && alpha.is_finite() && (0.0..0.5).contains(&alpha)) {
+        return Err(ImgError::InvalidParameter(
+            "beta harus ≥ 0 dan alpha di [0, 0,5)".to_string(),
+        ));
+    }
+    let n = w * h;
+    let stride = n.div_ceil(200_000).max(1);
+    let mut od: Vec<[f64; 3]> = Vec::with_capacity(n / stride + 1);
+    let b2 = (beta as f64) * (beta as f64);
+    for i in (0..n).step_by(stride) {
+        if let Some(t) = tissue {
+            if t[[i / w, i % w]] == 0 {
+                continue;
+            }
+        }
+        let v = rgb_to_od(&rgba[i * 4..i * 4 + 3]);
+        let v = [v[0] as f64, v[1] as f64, v[2] as f64];
+        if v[0] * v[0] + v[1] * v[1] + v[2] * v[2] > b2 {
+            od.push(v);
+        }
+    }
+    if od.len() < MACENKO_MIN_PIXELS {
+        return Ok(None);
+    }
+    // Kovarians (tanpa pemusatan: Macenko memakai momen kedua OD mentah).
+    let mut cov = [[0.0f64; 3]; 3];
+    for v in &od {
+        for (i, row) in cov.iter_mut().enumerate() {
+            for (j, c) in row.iter_mut().enumerate() {
+                *c += v[i] * v[j];
+            }
+        }
+    }
+    let inv_n = 1.0 / od.len() as f64;
+    for row in cov.iter_mut() {
+        for c in row.iter_mut() {
+            *c *= inv_n;
+        }
+    }
+    let (vals, vecs) = jacobi_eigen_3x3(cov);
+    // Dua vektor eigen terbesar.
+    let mut idx = [0usize, 1, 2];
+    idx.sort_by(|&a, &b| vals[b].total_cmp(&vals[a]));
+    let v1 = vecs[idx[0]];
+    let v2 = vecs[idx[1]];
+    let mut phis: Vec<f64> = od
+        .iter()
+        .map(|v| {
+            let a = v[0] * v1[0] + v[1] * v1[1] + v[2] * v1[2];
+            let b = v[0] * v2[0] + v[1] * v2[1] + v[2] * v2[2];
+            b.atan2(a)
+        })
+        .collect();
+    phis.sort_by(f64::total_cmp);
+    let pick = |p: f64| -> f64 {
+        let k = ((phis.len() - 1) as f64 * p).round() as usize;
+        phis[k.min(phis.len() - 1)]
+    };
+    let (p_lo, p_hi) = (pick(alpha as f64), pick(1.0 - alpha as f64));
+    let dir = |phi: f64| -> [f64; 3] {
+        let (s, c) = phi.sin_cos();
+        let mut v = [
+            c * v1[0] + s * v2[0],
+            c * v1[1] + s * v2[1],
+            c * v1[2] + s * v2[2],
+        ];
+        // OD pewarna tidak negatif: balik tanda bila arah menunjuk ke bawah.
+        if v[0] + v[1] + v[2] < 0.0 {
+            v = [-v[0], -v[1], -v[2]];
+        }
+        v
+    };
+    let (a, b) = (dir(p_lo), dir(p_hi));
+    let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    let norm = |x: [f64; 3]| dot(x, x).sqrt();
+    let cos_ab = dot(a, b) / (norm(a) * norm(b)).max(1e-12);
+    if !cos_ab.is_finite() || cos_ab.clamp(-1.0, 1.0).acos().to_degrees() < MACENKO_MIN_ANGLE_DEG {
+        return Ok(None);
+    }
+    let href = [
+        HEMATOXYLIN[0] as f64,
+        HEMATOXYLIN[1] as f64,
+        HEMATOXYLIN[2] as f64,
+    ];
+    let (hv, ev) = if dot(a, href) / norm(a) >= dot(b, href) / norm(b) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let to32 = |x: [f64; 3]| [x[0] as f32, x[1] as f32, x[2] as f32];
+    let (hv, ev) = (to32(hv), to32(ev));
+    let third = cross(hv, ev);
+    match StainMatrix::new([hv, ev, third]) {
+        Ok(m) => Ok(Some(m)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Nilai dan vektor eigen matriks simetris 3×3 dengan rotasi Jacobi siklik
+/// (urutan pasangan tetap, maks. 50 sapuan). Vektor eigen dikembalikan
+/// sebagai baris, dinormalkan, searah nilai eigen ke-`i`.
+fn jacobi_eigen_3x3(mut a: [[f64; 3]; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
+    let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for _ in 0..50 {
+        let off = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
+        if off < 1e-22 {
+            break;
+        }
+        for (p, q) in [(0usize, 1usize), (0, 2), (1, 2)] {
+            if a[p][q].abs() < 1e-300 {
+                continue;
+            }
+            let theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+            let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+            let t = if theta == 0.0 { 1.0 } else { t };
+            let c = 1.0 / (t * t + 1.0).sqrt();
+            let s = t * c;
+            for row in a.iter_mut() {
+                let akp = row[p];
+                let akq = row[q];
+                row[p] = c * akp - s * akq;
+                row[q] = s * akp + c * akq;
+            }
+            let (rp, rq) = (a[p], a[q]);
+            for k in 0..3 {
+                a[p][k] = c * rp[k] - s * rq[k];
+                a[q][k] = s * rp[k] + c * rq[k];
+            }
+            for row in v.iter_mut() {
+                let vp = row[p];
+                let vq = row[q];
+                row[p] = c * vp - s * vq;
+                row[q] = s * vp + c * vq;
+            }
+        }
+    }
+    let vals = [a[0][0], a[1][1], a[2][2]];
+    // Kolom `v` = vektor eigen; kembalikan sebagai baris.
+    let vecs = [
+        [v[0][0], v[1][0], v[2][0]],
+        [v[0][1], v[1][1], v[2][1]],
+        [v[0][2], v[1][2], v[2][2]],
+    ];
+    (vals, vecs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +500,57 @@ mod tests {
         assert_eq!(percentile(&v, 0.0), Some(1.0));
         assert_eq!(percentile(&v, 1.0), Some(5.0));
         assert_eq!(percentile(&v, 0.5), Some(3.0));
+    }
+
+    #[test]
+    fn jacobi_recovers_diagonal_and_symmetric_eigenpairs() {
+        let (vals, vecs) = jacobi_eigen_3x3([[2.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 1.0]]);
+        let mut sorted = vals;
+        sorted.sort_by(f64::total_cmp);
+        assert!((sorted[0] - 1.0).abs() < 1e-9 && (sorted[2] - 5.0).abs() < 1e-9);
+        let m = [[4.0, 1.0, 0.5], [1.0, 3.0, 0.2], [0.5, 0.2, 2.0]];
+        let (vals, vecs2) = jacobi_eigen_3x3(m);
+        for (i, v) in vecs2.iter().enumerate() {
+            // M·v = λ·v
+            for r in 0..3 {
+                let mv = m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2];
+                assert!((mv - vals[i] * v[r]).abs() < 1e-6, "baris {r} vektor {i}");
+            }
+        }
+        let _ = vecs;
+    }
+
+    #[test]
+    fn macenko_recovers_ruifrok_vectors_from_synthetic_he() {
+        let mpp = 1.0;
+        let (w, h) = (256usize, 256usize);
+        let truth = crate::phantom::ellipsoid_mask([w, h], [128.0, 128.0], [110.0, 100.0]);
+        let rgba = crate::phantom::render_histology(&truth, 11, mpp);
+        let m = estimate_stains_macenko(&rgba, w, h, Some(&truth), 0.15, 0.01)
+            .unwrap()
+            .expect("jaringan cukup untuk estimasi");
+        let ang = |a: [f32; 3], b: [f32; 3]| {
+            let d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) as f64;
+            d.clamp(-1.0, 1.0).acos().to_degrees()
+        };
+        let href = StainMatrix::he().stains[0];
+        let eref = StainMatrix::he().stains[1];
+        assert!(
+            ang(m.stains[0], href) < 15.0,
+            "H {:?} vs {:?}",
+            m.stains[0],
+            href
+        );
+        assert!(
+            ang(m.stains[1], eref) < 15.0,
+            "E {:?} vs {:?}",
+            m.stains[1],
+            eref
+        );
+        // Terlalu sedikit piksel → None, bukan galat; parameter buruk → galat.
+        let few = estimate_stains_macenko(&rgba[..16 * 4], 4, 4, None, 0.15, 0.01).unwrap();
+        assert!(few.is_none());
+        assert!(estimate_stains_macenko(&rgba, w, h, None, -1.0, 0.01).is_err());
+        assert!(estimate_stains_macenko(&rgba, w, h, None, 0.15, 0.7).is_err());
     }
 }

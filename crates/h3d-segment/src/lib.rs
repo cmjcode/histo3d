@@ -17,24 +17,33 @@
 
 pub mod ai;
 pub mod attr_store;
+pub mod cells;
 pub mod classic;
 pub mod commands;
 pub mod error;
 pub mod geojson;
+pub mod glands;
 pub mod interpolate;
 pub mod label_store;
 pub mod lbl_format;
 pub mod proposal;
 pub mod raster_import;
+pub mod regions;
 
 pub use ai::{infer_slide, AiResult, ClassSpec, ModelSpec, Segmenter, TractSegmenter};
 pub use attr_store::{decode_atr, encode_atr, AttrStore, NODATA};
+pub use cells::{
+    detect_cells, CellDetection, ClassicNucleiDetector, DetectedNucleus, NucleiDetector,
+    NucleiHead, StarDistDetector, TensorLayout, WatershedNucleiDetector,
+};
 pub use classic::{segment_classic, ClassicParams, StainChannel};
 pub use commands::{LabelEditCommand, TileSnapshot};
 pub use error::SegError;
 pub use geojson::{export_geojson, import_geojson, ImportSummary};
+pub use glands::{gland_proposal, separator_gap_px};
 pub use interpolate::{interpolate_between, interpolate_label};
 pub use label_store::{LabelStore, PaintMode, TileKey};
 pub use lbl_format::{decode_lbl, encode_lbl};
 pub use proposal::{accept_proposal, Proposal};
 pub use raster_import::{dice_against_mask, import_mask, load_mask_png, RasterImportSummary};
+pub use regions::{detect_regions, WholeRegionDetector, REGIONS_METHOD, REGION_BYTES_PER_PX};

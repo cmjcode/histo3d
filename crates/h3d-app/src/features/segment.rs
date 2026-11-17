@@ -18,8 +18,9 @@ use h3d_core::{
     AttrDef, AttrKind, LabelDef, LabelId, LabelKind, SlideId, SlideTransform, Stain, VesselKind,
 };
 use h3d_engine::{
-    AttrParams, ClassicParams, CountParams, EngineError, ObjectCount2D, PaintMode, Proposal,
-    Session,
+    AttrParams, CellCount2D, CellMethod, ClassicNucleiDetector, ClassicParams, ColorPreset,
+    CountParams, EngineError, EpitheliumSource, GlandParams, GlandSummary, ObjectCount2D,
+    PaintMode, Palette, Proposal, Session, WatershedNucleiDetector, WholeRegionDetector,
 };
 use h3d_i18n::t;
 use h3d_render::{Camera2D, H3dPaintCallback, LabelOverlayDraw, Scene, Scene2D};
@@ -137,6 +138,22 @@ pub struct SegmentState {
     pub classic_params: ClassicParams,
     /// Ambang klasik otomatis (Otsu).
     pub classic_otsu: bool,
+    /// Parameter segmentasi objek 2D kelenjar (ADR 0004; bagian "Lanjutan").
+    pub gland_params: GlandParams,
+    /// Mode warna (palet + toleransi) aktif; selain itu ambang hematoksilin.
+    pub gland_color_mode: bool,
+    /// Palet warna irisan aktif (diambil lewat job).
+    pub palette: Option<(SlideId, Palette)>,
+    /// Indeks warna palet yang dipilih.
+    pub palette_picks: Vec<usize>,
+    /// Toleransi warna ΔE.
+    pub palette_tolerance: f32,
+    /// Preset warna.
+    pub gland_preset: ColorPreset,
+    /// Ukuran objek: 0 kecil, 1 sedang, 2 besar.
+    pub gland_size: usize,
+    /// Ringkasan usulan kelenjar terakhir (usulannya ada di `classic`).
+    pub glands: Option<GlandSummary>,
     /// Overlay inti untuk kalibrasi.
     pub nuclei: Option<NucleiOverlay>,
     /// Hasil penghitungan objek 2D terakhir (overlay nomor di viewer).
@@ -145,6 +162,24 @@ pub struct SegmentState {
     pub count_params: CountParams,
     /// Batasi penghitungan ke wilayah yang tampil.
     pub count_in_view: bool,
+    /// Hasil penghitungan sel otomatis terakhir (overlay poligon inti).
+    pub cells: Option<CellCount2D>,
+    /// Metode sel: 0 = watershed klasik, 1 = LoG, 2 = objek utuh,
+    /// `i + 3` = model inti ke-`i`.
+    pub cell_method: usize,
+    /// Ambang OD hematoksilin pendeteksi klasik.
+    pub cell_h_threshold: f32,
+    /// Soliditas penyatuan keping cembung watershed (0 = mati).
+    pub cell_merge_solidity: f64,
+    /// Objek utuh: radius penutupan celah, µm.
+    pub cell_close_um: f64,
+    /// Objek utuh: luas objek minimum, µm².
+    pub cell_min_area_um2: f64,
+    /// Batasi deteksi sel ke wilayah yang tampil (bawaan benar: seluruh
+    /// slide bisa memuat ratusan ribu inti).
+    pub cells_in_view: bool,
+    /// Isi kontur inti dengan warna transparan pada overlay sel.
+    pub cells_fill: bool,
     /// Ambang OD kromogen `t_D`.
     pub t_d: f32,
     /// Cache tekstur usulan.
@@ -173,10 +208,26 @@ impl Default for SegmentState {
             classic: None,
             classic_params: ClassicParams::default(),
             classic_otsu: true,
+            gland_params: GlandParams::default(),
+            gland_color_mode: true,
+            palette: None,
+            palette_picks: Vec::new(),
+            palette_tolerance: 12.0,
+            gland_preset: ColorPreset::Gland,
+            gland_size: 1,
+            glands: None,
             nuclei: None,
             count: None,
             count_params: CountParams::default(),
             count_in_view: false,
+            cells: None,
+            cell_method: 0,
+            cell_h_threshold: 0.15,
+            cell_merge_solidity: 0.93,
+            cell_close_um: WholeRegionDetector::default().close_radius_um,
+            cell_min_area_um2: WholeRegionDetector::default().min_area_um2,
+            cells_in_view: true,
+            cells_fill: false,
             t_d: h3d_imgproc::ihc::IhcThresholds::default().t_d,
             proposal_tex: None,
             new_label_name: String::new(),
@@ -192,6 +243,50 @@ impl SegmentState {
     pub fn set_classic(&mut self, slide: SlideId, proposal: Proposal) {
         self.classic = Some((slide, proposal));
         self.proposal_tex = None;
+        self.glands = None;
+    }
+
+    /// Simpan palet irisan dan terapkan preset (pilihan warna + toleransi).
+    pub fn set_palette(&mut self, slide: SlideId, palette: Palette) {
+        self.palette_picks = palette.preset_indices(self.gland_preset);
+        self.palette_tolerance = palette.default_tolerance(&self.palette_picks);
+        self.palette = Some((slide, palette));
+    }
+
+    /// Parameter kelenjar efektif dari pilihan sederhana (mode, preset,
+    /// ukuran) di atas `gland_params`; `None` bila mode warna belum punya
+    /// warna terpilih.
+    pub fn effective_gland_params(&self, slide: SlideId) -> Option<GlandParams> {
+        let (min_area, min_lumen) = match self.gland_size {
+            0 => (150.0, 30.0),
+            1 => (300.0, 50.0),
+            _ => (1000.0, 100.0),
+        };
+        let mut p = GlandParams {
+            min_area_um2: min_area,
+            min_lumen_area_um2: min_lumen,
+            ..self.gland_params.clone()
+        };
+        if !self.gland_color_mode {
+            p.epithelium = EpitheliumSource::Hematoxylin;
+            return Some(p);
+        }
+        let (s, pal) = self.palette.as_ref()?;
+        if *s != slide {
+            return None;
+        }
+        let picks = pal.picks(&self.palette_picks);
+        if picks.is_empty() {
+            return None;
+        }
+        p.epithelium = EpitheliumSource::Color {
+            picks,
+            tolerance: self.palette_tolerance,
+        };
+        if self.gland_preset == ColorPreset::SolidNest {
+            p.solid_seed_distance_um = p.solid_seed_distance_um.min(25.0);
+        }
+        Some(p)
     }
 
     /// Buang goresan/poligon yang sedang berjalan.
@@ -409,6 +504,8 @@ pub fn labels_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
     proposals_panel(app, sess, ui);
     ui.separator();
     count_panel(app, ui);
+    ui.separator();
+    cells_panel(app, sess, ui);
     ui.separator();
     calibration_panel(app, sess, ui);
 }
@@ -778,6 +875,196 @@ fn proposals_panel(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
         }
     });
 
+    // --- Objek 2D kelenjar (ADR 0004): mode warna sederhana + Lanjutan ---
+    egui::CollapsingHeader::new(icon_label(h3d_ui::icons::GLANDS, &t!("glands-title")))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.small(t!("glands-hint"));
+            // Preset.
+            {
+                let st = &mut app.segment;
+                let before = st.gland_preset;
+                ui.horizontal(|ui| {
+                    ui.label(t!("glands-preset"));
+                    combo(
+                        ui,
+                        "glands-preset",
+                        &mut st.gland_preset,
+                        &[
+                            (ColorPreset::Gland, t!("glands-preset-gland")),
+                            (ColorPreset::SolidNest, t!("glands-preset-solid")),
+                            (ColorPreset::Vessel, t!("glands-preset-vessel")),
+                        ],
+                    );
+                });
+                if st.gland_preset != before {
+                    if let Some((s, pal)) = st.palette.clone() {
+                        if s == slide {
+                            st.set_palette(s, pal);
+                        }
+                    }
+                }
+            }
+            // Palet warna irisan aktif.
+            let has_palette = app
+                .segment
+                .palette
+                .as_ref()
+                .is_some_and(|(s, _)| *s == slide);
+            if !has_palette {
+                ui.small(t!("glands-palette-hint"));
+                let mpp = app.segment.gland_params.mpp_um;
+                if icon_text_button(ui, h3d_ui::icons::PALETTE, &t!("glands-palette-get")).clicked()
+                {
+                    app.start_job(t!("glands-palette-get"), move |s, p| {
+                        s.slide_palette(slide, mpp, h3d_engine::PALETTE_K, p)
+                            .map(|pal| JobOutput::Palette(slide, Box::new(pal)))
+                    });
+                }
+            } else {
+                let st = &mut app.segment;
+                ui.label(t!("glands-pick-hint"));
+                let colors: Vec<(usize, [u8; 3], f64, bool)> = st
+                    .palette
+                    .as_ref()
+                    .map(|(_, pal)| {
+                        pal.colors
+                            .iter()
+                            .enumerate()
+                            .map(|(i, c)| (i, c.rgb, c.fraction, c.is_white()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                ui.horizontal_wrapped(|ui| {
+                    for (i, rgb, frac, white) in colors {
+                        let picked = st.palette_picks.contains(&i);
+                        let fill = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+                        let stroke = if picked {
+                            egui::Stroke::new(3.0, ui.visuals().selection.stroke.color)
+                        } else {
+                            egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color)
+                        };
+                        let btn = egui::Button::new("")
+                            .fill(fill)
+                            .stroke(stroke)
+                            .min_size(egui::vec2(30.0, 30.0));
+                        let resp = ui.add(btn).on_hover_text(format!(
+                            "{}: {:.0} %{}",
+                            t!("glands-color-share"),
+                            frac * 100.0,
+                            if white {
+                                format!(" ({})", t!("glands-color-white"))
+                            } else {
+                                String::new()
+                            }
+                        ));
+                        if resp.clicked() {
+                            if picked {
+                                st.palette_picks.retain(|&p| p != i);
+                            } else {
+                                st.palette_picks.push(i);
+                                st.palette_picks.sort_unstable();
+                            }
+                            if let Some((_, pal)) = st.palette.as_ref() {
+                                st.palette_tolerance = pal.default_tolerance(&st.palette_picks);
+                            }
+                        }
+                    }
+                });
+                ui.add(
+                    egui::Slider::new(&mut st.palette_tolerance, 3.0..=40.0)
+                        .step_by(1.0)
+                        .text(t!("glands-tolerance")),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(t!("glands-size"));
+                    combo(
+                        ui,
+                        "glands-size",
+                        &mut st.gland_size,
+                        &[
+                            (0usize, t!("glands-size-small")),
+                            (1usize, t!("glands-size-medium")),
+                            (2usize, t!("glands-size-large")),
+                        ],
+                    );
+                });
+                if ui.small_button(t!("glands-palette-refresh")).clicked() {
+                    st.palette = None;
+                }
+            }
+            // Lanjutan: mode hematoksilin dan parameter mentah.
+            egui::CollapsingHeader::new(t!("glands-advanced"))
+                .default_open(false)
+                .show(ui, |ui| {
+                    let gp = &mut app.segment.gland_params;
+                    ui.checkbox(&mut app.segment.gland_color_mode, t!("glands-mode-color"));
+                    ui.add(
+                        egui::Slider::new(&mut gp.mpp_um, 1.0..=4.0)
+                            .step_by(0.5)
+                            .text(t!("glands-mpp")),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut gp.epithelium_sigma_um, 1.0..=10.0)
+                            .step_by(0.5)
+                            .text(t!("glands-sigma")),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut gp.min_ring_fraction, 0.0..=1.0)
+                            .step_by(0.05)
+                            .text(t!("glands-min-ring")),
+                    );
+                    ui.checkbox(&mut gp.star_hull, t!("glands-star-hull"));
+                    if gp.star_hull {
+                        ui.add(
+                            egui::Slider::new(&mut gp.smooth_sigma_deg, 0.0..=20.0)
+                                .step_by(1.0)
+                                .text(t!("glands-smooth")),
+                        );
+                    }
+                });
+            let params = app.segment.effective_gland_params(slide);
+            let can_run = active.is_some() && params.is_some();
+            if icon_text_button_enabled(ui, can_run, h3d_ui::icons::PLAY, &t!("action-run"))
+                .clicked()
+            {
+                if let (Some(label), Some(params)) = (active, params) {
+                    app.start_job(t!("glands-title"), move |s, p| {
+                        s.segment_glands(slide, label, &params, p)
+                            .map(|g| JobOutput::GlandProposal(slide, Box::new(g)))
+                    });
+                }
+            }
+            if let Some(g) = app.segment.glands.as_ref().filter(|g| g.slide == slide) {
+                ui.strong(t!(
+                    "glands-result",
+                    n = g.n.to_string(),
+                    lo = g.n_min.to_string(),
+                    hi = g.n_max.to_string(),
+                    label = g.label_name.clone()
+                ));
+                ui.label(format!(
+                    "{}: {} · {}: {:.0} {}",
+                    t!("glands-with-lumen"),
+                    g.n_with_lumen,
+                    t!("count-median-area"),
+                    g.median_area_um2,
+                    t!("unit-um2")
+                ));
+                ui.weak(format!(
+                    "{}: {} · {}: {:016x}",
+                    t!("glands-stain"),
+                    if g.stain_estimated {
+                        t!("glands-stain-macenko")
+                    } else {
+                        t!("glands-stain-ruifrok")
+                    },
+                    t!("count-params-hash"),
+                    g.params_hash
+                ));
+            }
+        });
+
     // --- AI: alur lengkap ada di laci Deteksi AI ---
     egui::CollapsingHeader::new(icon_label(h3d_ui::icons::AI, &t!("segment-proposal-ai")))
         .default_open(false)
@@ -934,6 +1221,157 @@ fn count_panel(app: &mut AppState, ui: &mut Ui) {
         });
 }
 
+/// Panel "Hitung sel": deteksi inti otomatis langsung dari citra (StarDist
+/// ONNX bila ada model bertugas `nuclei`, atau LoG klasik), tanpa label.
+/// Hasil: jumlah dengan rentang, densitas/mm², dan overlay poligon inti.
+fn cells_panel(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
+    egui::CollapsingHeader::new(icon_label(h3d_ui::icons::CELLS, &t!("cells-title")))
+        .default_open(false)
+        .show(ui, |ui| {
+            let Some(slide) = app.current else {
+                return;
+            };
+            app.detect.ensure_scanned(sess);
+            ui.small(t!("cells-hint"));
+            let names: Vec<String> = [
+                t!("cells-method-watershed"),
+                t!("cells-method-classic"),
+                t!("cells-method-whole"),
+            ]
+            .into_iter()
+            .chain(app.detect.nuclei_models.iter().map(|m| m.display_name()))
+            .collect();
+            let st = &mut app.segment;
+            st.cell_method = st.cell_method.min(names.len() - 1);
+            egui::ComboBox::from_id_salt("cells-method")
+                .width(ui.available_width() - 8.0)
+                .selected_text(names[st.cell_method].clone())
+                .show_ui(ui, |ui| {
+                    for (i, n) in names.iter().enumerate() {
+                        ui.selectable_value(&mut st.cell_method, i, n);
+                    }
+                });
+            if app.detect.nuclei_models.is_empty() {
+                ui.small(t!("cells-no-model"));
+            }
+            if app.segment.cell_method < 3 {
+                ui.add(
+                    egui::Slider::new(&mut app.segment.cell_h_threshold, 0.05..=0.5)
+                        .text(t!("cells-h-threshold")),
+                );
+            }
+            if app.segment.cell_method == 2 {
+                ui.small(t!("cells-whole-hint"));
+                ui.add(
+                    egui::Slider::new(&mut app.segment.cell_close_um, 0.0..=5.0)
+                        .text(t!("cells-close-gap")),
+                );
+                ui.add(
+                    egui::Slider::new(&mut app.segment.cell_min_area_um2, 1.0..=2000.0)
+                        .logarithmic(true)
+                        .text(t!("cells-min-area")),
+                );
+            }
+            if app.segment.cell_method == 0 {
+                ui.add(
+                    egui::Slider::new(&mut app.segment.cell_merge_solidity, 0.0..=1.0)
+                        .text(t!("cells-merge-solidity")),
+                );
+            }
+            ui.checkbox(&mut app.segment.cells_in_view, t!("cells-in-view"));
+            ui.checkbox(&mut app.segment.cells_fill, t!("cells-fill"));
+            let h_threshold = app.segment.cell_h_threshold;
+            let method = match app.segment.cell_method {
+                0 => CellMethod::Watershed(WatershedNucleiDetector {
+                    h_threshold,
+                    merge_solidity: app.segment.cell_merge_solidity,
+                    ..WatershedNucleiDetector::default()
+                }),
+                1 => CellMethod::Classic(ClassicNucleiDetector {
+                    min_h_od: h_threshold,
+                    ..ClassicNucleiDetector::default()
+                }),
+                2 => CellMethod::WholeRegions(WholeRegionDetector {
+                    h_threshold,
+                    close_radius_um: app.segment.cell_close_um,
+                    min_area_um2: app.segment.cell_min_area_um2,
+                    ..WholeRegionDetector::default()
+                }),
+                i => CellMethod::StarDist(app.detect.nuclei_models[i - 3].dir.clone()),
+            };
+            let roi = if app.segment.cells_in_view {
+                app.segment.last_view_u
+            } else {
+                None
+            };
+            let keep_polygons = app.segment.cells_in_view;
+            if icon_text_button_enabled(
+                ui,
+                !app.segment.cells_in_view || roi.is_some(),
+                h3d_ui::icons::PLAY,
+                &t!("cells-run"),
+            )
+            .clicked()
+            {
+                app.start_job(t!("cells-title"), move |s, p| {
+                    s.count_cells(slide, roi, &method, keep_polygons, p)
+                        .map(|c| JobOutput::CellCount(Box::new(c)))
+                });
+            }
+            if let Some(c) = app.segment.cells.as_ref().filter(|c| c.slide == slide) {
+                let whole = c.is_whole_regions();
+                ui.strong(t!(
+                    if whole {
+                        "cells-result-objects"
+                    } else {
+                        "cells-result"
+                    },
+                    n = c.n().to_string(),
+                    lo = c.detection.n_min.to_string(),
+                    hi = c.detection.n_max.to_string()
+                ));
+                if let Some(d) = c.density_per_mm2() {
+                    ui.label(format!(
+                        "{}: {d:.0} /{}",
+                        t!(if whole {
+                            "cells-density-objects"
+                        } else {
+                            "cells-density"
+                        }),
+                        t!("unit-mm2")
+                    ));
+                }
+                if c.n() > 0 {
+                    ui.label(format!(
+                        "{}: {:.1} {}",
+                        t!(if whole {
+                            "cells-median-area-objects"
+                        } else {
+                            "cells-median-area"
+                        }),
+                        c.median_area_um2(),
+                        t!("unit-um2")
+                    ));
+                }
+                if whole && c.detection.mpp > WholeRegionDetector::default().mpp {
+                    ui.weak(t!(
+                        "cells-whole-coarse",
+                        mpp = format!("{:.2}", c.detection.mpp)
+                    ));
+                }
+                ui.weak(format!(
+                    "{} ({}: {:016x})",
+                    c.detection.method,
+                    t!("count-params-hash"),
+                    c.detection.params_hash
+                ));
+                if ui.button(t!("count-clear")).clicked() {
+                    app.segment.cells = None;
+                }
+            }
+        });
+}
+
 fn calibration_panel(app: &mut AppState, sess: &mut Session, ui: &mut Ui) {
     egui::CollapsingHeader::new(icon_label(
         h3d_ui::icons::CALIBRATE,
@@ -1016,6 +1454,61 @@ const POSITIVE_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 90, 60);
 const NEGATIVE_COLOR: egui::Color32 = egui::Color32::from_rgb(70, 150, 250);
 /// Warna penanda hasil hitung objek.
 const COUNT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 40);
+/// Warna poligon inti hasil deteksi sel.
+/// Isi poligon berlubang dengan aturan genap-ganjil sebagai pita
+/// horizontal setinggi `step` px layar, hanya di dalam `clip`. Benar untuk
+/// kontur cekung dan lubang (lumen) yang tidak bisa diisi kipas atau
+/// `convex_polygon`. `rings` = kontur luar lalu lubang, koordinat layar.
+fn fill_even_odd(
+    rings: &[&[egui::Pos2]],
+    color: egui::Color32,
+    clip: egui::Rect,
+    step: f32,
+) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    let step = step.max(0.5);
+    let (mut y0, mut y1) = (f32::INFINITY, f32::NEG_INFINITY);
+    for r in rings {
+        for q in *r {
+            y0 = y0.min(q.y);
+            y1 = y1.max(q.y);
+        }
+    }
+    y0 = y0.max(clip.top());
+    y1 = y1.min(clip.bottom());
+    // Juga menangkap NaN (kontur kosong → batas tak hingga).
+    if y0.partial_cmp(&y1) != Some(std::cmp::Ordering::Less) {
+        return mesh;
+    }
+    let mut xs: Vec<f32> = Vec::new();
+    let mut y = y0;
+    while y < y1 {
+        let yc = y + 0.5 * step;
+        xs.clear();
+        for r in rings {
+            let k = r.len();
+            for j in 0..k {
+                let (a, b) = (r[j], r[(j + 1) % k]);
+                if (a.y <= yc) != (b.y <= yc) {
+                    xs.push(a.x + (yc - a.y) / (b.y - a.y) * (b.x - a.x));
+                }
+            }
+        }
+        xs.sort_by(f32::total_cmp);
+        for pair in xs.chunks_exact(2) {
+            let (xa, xb) = (pair[0].max(clip.left()), pair[1].min(clip.right()));
+            if xa < xb {
+                let rr =
+                    egui::Rect::from_min_max(egui::pos2(xa, y), egui::pos2(xb, (y + step).min(y1)));
+                mesh.add_colored_rect(rr, color);
+            }
+        }
+        y += step;
+    }
+    mesh
+}
+
+const CELL_COLOR: egui::Color32 = egui::Color32::from_rgb(60, 220, 90);
 
 fn proposal_key(slide: SlideId, props: &[&Proposal]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1250,6 +1743,115 @@ pub fn viewer(app: &mut AppState, sess: &mut Session, ui: &mut Ui, gpu: Option<&
                 );
             }
         }
+    }
+
+    // Overlay deteksi sel: kontur/lingkaran hijau per inti + jumlah di
+    // sudut kanvas, seperti tampilan metode deteksi sel.
+    //
+    // Anggaran vertex: egui menumpuk semua bentuk satu frame ke satu buffer
+    // GPU (batas Metal 256 MB; puluhan ribu kontur × ~100 titik pernah
+    // melewatinya dan membuat aplikasi panik). Karena itu titik kontur
+    // ditipiskan menurut zoom (jarak layar < 1 px dilewati), inti yang di
+    // layar lebih kecil dari beberapa piksel digambar sebagai lingkaran
+    // kecil, dan total titik per frame dibatasi; sisanya tidak digambar
+    // tetapi jumlahnya tetap tampil di teks.
+    if let Some(c) = app.segment.cells.as_ref().filter(|c| c.slide == slide) {
+        const POINT_BUDGET: usize = 200_000;
+        const MIN_SCREEN_RADIUS_PX: f64 = 3.0;
+        let stroke = egui::Stroke::new(1.6, CELL_COLOR);
+        let fill = app
+            .segment
+            .cells_fill
+            .then(|| egui::Color32::from_rgba_unmultiplied(60, 220, 90, 60));
+        let mut points_used = 0usize;
+        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(128);
+        let mut hole_pts: Vec<Vec<egui::Pos2>> = Vec::new();
+        // Kontur ke layar dengan penipisan (titik < 1 px dari titik
+        // terakhir dilewati).
+        let project = |center: [f64; 2], poly: &[[f32; 2]], out: &mut Vec<egui::Pos2>| {
+            out.clear();
+            for v in poly {
+                let q = to_screen([center[0] + f64::from(v[0]), center[1] + f64::from(v[1])]);
+                if out.last().is_none_or(|l| l.distance_sq(q) >= 1.0) {
+                    out.push(q);
+                }
+            }
+        };
+        for n in &c.detection.nuclei {
+            let p = to_screen(n.center_um);
+            // Objek besar (cincin epitel) bisa tampil walau pusatnya di luar
+            // layar: uji terhadap jangkauan konturnya.
+            let reach_um = n
+                .polygon_um
+                .iter()
+                .map(|v| f64::from(v[0].hypot(v[1])))
+                .fold(n.radius_um(), f64::max);
+            let reach_px = (reach_um / camera.um_per_px) as f32;
+            if !rect.expand(reach_px).contains(p) {
+                continue;
+            }
+            if points_used >= POINT_BUDGET {
+                break;
+            }
+            let r_px = n.radius_um() / camera.um_per_px;
+            if n.polygon_um.len() >= 3 && r_px >= MIN_SCREEN_RADIUS_PX {
+                project(n.center_um, &n.polygon_um, &mut pts);
+                hole_pts.resize_with(n.holes_um.len(), Vec::new);
+                for (h, out) in n.holes_um.iter().zip(hole_pts.iter_mut()) {
+                    project(n.center_um, h, out);
+                }
+                hole_pts.retain(|h| h.len() >= 3);
+                if pts.len() >= 3 {
+                    points_used += pts.len() + hole_pts.iter().map(Vec::len).sum::<usize>();
+                    if let Some(fill) = fill {
+                        if hole_pts.is_empty() && !c.is_whole_regions() {
+                            // Kipas dari sentroid: tepat untuk kontur
+                            // star-convex terhadap sentroid (hampir semua
+                            // inti), murah untuk ribuan inti;
+                            // `convex_polygon` salah pada kontur cekung.
+                            let mut mesh = egui::Mesh::default();
+                            mesh.colored_vertex(p, fill);
+                            for q in &pts {
+                                mesh.colored_vertex(*q, fill);
+                            }
+                            let k = pts.len() as u32;
+                            for j in 0..k {
+                                mesh.add_triangle(0, 1 + j, 1 + (j + 1) % k);
+                            }
+                            painter.add(egui::Shape::mesh(mesh));
+                        } else {
+                            // Objek utuh bisa cekung dan berlubang (lumen):
+                            // isi genap-ganjil per pita pindai.
+                            let mut rings: Vec<&[egui::Pos2]> = vec![&pts];
+                            rings.extend(hole_pts.iter().map(Vec::as_slice));
+                            let mesh = fill_even_odd(&rings, fill, rect, 1.0);
+                            points_used += mesh.vertices.len() / 4;
+                            painter.add(egui::Shape::mesh(mesh));
+                        }
+                    }
+                    painter.add(egui::Shape::closed_line(pts.clone(), stroke));
+                    for h in &hole_pts {
+                        painter.add(egui::Shape::closed_line(h.clone(), stroke));
+                    }
+                    continue;
+                }
+            }
+            // Inti kecil di layar atau tanpa kontur: lingkaran kecil.
+            points_used += 8;
+            painter.circle_stroke(p, (r_px as f32).clamp(1.5, 200.0), stroke);
+        }
+        let text = t!(
+            "cells-overlay-count",
+            n = c.n().to_string(),
+            lo = c.detection.n_min.to_string(),
+            hi = c.detection.n_max.to_string()
+        );
+        let font = egui::FontId::proportional(14.0);
+        let galley = painter.layout_no_wrap(text, font, egui::Color32::WHITE);
+        let pos = rect.left_bottom() + egui::vec2(8.0, -8.0 - galley.size().y);
+        let bg = egui::Rect::from_min_size(pos, galley.size()).expand(4.0);
+        painter.rect_filled(bg, 4.0, egui::Color32::from_black_alpha(160));
+        painter.galley(pos, galley, egui::Color32::WHITE);
     }
 
     // Pratinjau goresan/poligon berjalan.

@@ -29,21 +29,28 @@ pub use clock::{clock_from_env, Clock, FixedClock, SystemClock, FIXED_TIME_ENV};
 pub use error::EngineError;
 pub use job::{spawn_job, spawn_session_job, JobHandle, SharedSession};
 pub use session::{
-    kind_for_class, AttrParams, CountSource, ExportKind, ImportOptions, MarginFigure, ModelEntry,
-    ModelLabelSetup, ObjectCount2D, PendingProposal, QcRow, RegSummary, RegisterRun, Session,
-    ThumbTask, APP_VERSION, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE, MODEL_ONNX_FILE,
-    MODEL_SPEC_FILE, REG_IMAGE_MPP,
+    kind_for_class, AttrParams, CellCount2D, CellMethod, CountSource, ExportKind, GlandProposal,
+    GlandSummary, ImportOptions, MarginFigure, ModelEntry, ModelLabelSetup, ObjectCount2D,
+    PendingProposal, QcRow, RegSummary, RegisterRun, Session, ThumbTask, APP_VERSION,
+    FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE, MODEL_ONNX_FILE, MODEL_SPEC_FILE, REG_IMAGE_MPP,
 };
 
 // Tipe crate bawah yang muncul di API publik, agar pemakai (CLI/GUI) cukup
 // bergantung pada `h3d-engine`.
-pub use h3d_imgproc::{BorderRule, CountEstimate, CountParams, Object2D, ObjectCount};
+pub use h3d_imgproc::{
+    BorderRule, ColorPreset, CountEstimate, CountParams, EpitheliumSource, Gland, GlandParams,
+    Object2D, ObjectCount, Palette, PaletteColor, StainEstimate, DEFAULT_K as PALETTE_K,
+};
 pub use h3d_io::report::fmt_uncertainty;
 pub use h3d_io::strings::{direction_text, warning_text};
 pub use h3d_io::{to_stable_json_of, ClinicalScope, EmbedMode, Report, ReportFigure};
 pub use h3d_io::{ObjectReport, TracksFile};
 pub use h3d_register::{
     OrderSuggestion, QcThresholds, QcViolations, RegMetric, RegModel, RegOptions,
+};
+pub use h3d_segment::{
+    CellDetection, ClassicNucleiDetector, DetectedNucleus, NucleiHead, StarDistDetector,
+    WatershedNucleiDetector, WholeRegionDetector,
 };
 pub use h3d_segment::{
     ClassicParams, ImportSummary, LabelStore, ModelSpec, PaintMode, Proposal, RasterImportSummary,

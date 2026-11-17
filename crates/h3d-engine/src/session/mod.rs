@@ -18,9 +18,11 @@ use crate::clock::{Clock, SystemClock};
 use crate::error::EngineError;
 
 mod attrs;
+mod cells;
 mod count;
 mod export;
 mod figures;
+mod glands;
 mod history;
 mod images;
 mod import;
@@ -32,9 +34,11 @@ mod spatial;
 mod surface;
 
 pub use attrs::AttrParams;
+pub use cells::{CellCount2D, CellMethod};
 pub use count::{CountSource, ObjectCount2D};
 pub use export::ExportKind;
 pub use figures::{MarginFigure, FIGURE_MARKER_RADIUS, FIGURE_MAX_SIDE};
+pub use glands::{GlandProposal, GlandSummary};
 pub use images::{ThumbTask, REG_IMAGE_MPP};
 pub use import::ImportOptions;
 pub use labels::PendingProposal;
@@ -126,6 +130,8 @@ pub struct Session {
     /// Model segmentasi AI terakhir yang dimuat (folder → model), agar
     /// klik "Segmentasi" berikutnya tidak memuat ulang dan mengoptimasi ONNX.
     pub(crate) segmenter: Mutex<Option<(PathBuf, Arc<h3d_segment::TractSegmenter>)>>,
+    /// Pendeteksi StarDist yang sedang dimuat (folder model → pendeteksi).
+    pub(crate) stardist: Mutex<Option<(PathBuf, Arc<h3d_segment::StarDistDetector>)>>,
 }
 
 // Jaminan waktu-kompilasi bahwa sesi boleh dipindah ke thread job dan
@@ -157,6 +163,7 @@ impl Session {
             label_hashes: Mutex::new(HashMap::new()),
             present_cache: Mutex::new(HashMap::new()),
             segmenter: Mutex::new(None),
+            stardist: Mutex::new(None),
         }
     }
 

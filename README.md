@@ -256,6 +256,9 @@ Build the CLI executable:
 | `qc` | Output registration quality metrics and flags (JSON or terminal table). |
 | `labels` | Label store operations, including importing QuPath GeoJSON annotations. |
 | `segment` | Run local AI segmentation using an ONNX model bundle (`model.onnx` + `model.json`). |
+| `count` | Count closed objects (glands, tumor islands) of a label per slice with uncertainty range. |
+| `glands` | Lumen-guided 2D gland/structure objects per slice (one object per gland incl. lumen, smooth star-convex shape, separators between neighbours) as a proposal; `--accept` writes them to the label (ADR 0004). |
+| `cells` | Detect and count nuclei directly from the image (StarDist ONNX or classic LoG). |
 | `interpolate` | Compute morphometric shape interpolation across unannotated slice gaps. |
 | `reconstruct` | Extract 3D meshes from voxel SDFs with smoothing and decimation. |
 | `measure` | Output Cavalieri volume, mesh volume, surface area, and bounding dimensions. |
@@ -317,6 +320,31 @@ h3d phantom ./phantom_run.h3d --shape ellipsoid --slices 20 --seed 5 --size 128 
 The CLI test suite continuously checks output consistency against seeded golden files stored in `testdata/golden/`.
 
 ---
+
+### 2D Gland Objects for 3D Reconstruction (ADR 0004)
+
+The unit of reconstruction is the **gland** (epithelial ring plus its
+lumen), solid nest or vessel, not the nucleus. `h3d glands` builds one 2D
+object per gland from the image at 1–2 µm/px (per-slide Macenko stain
+vectors, epithelium map, lumens from closed-ring holes and bright pixels
+passing a ring test, marker watershed on distance-to-lumen, smoothed
+star-convex shape), then `reconstruct --per-object` extrudes and links them
+across slices. Separators between neighbouring objects survive acceptance
+into the label store, so tracking follows each gland.
+
+```bash
+h3d glands PROJECT.h3d --overlay-dir out/glands          # count only + overlay PNGs
+h3d glands PROJECT.h3d --accept --replace                # write proposals into "Kelenjar"
+h3d track PROJECT.h3d --label Kelenjar --json
+h3d reconstruct PROJECT.h3d --sxy 4 --per-object
+```
+
+On the Tampere mouse prostate stack (PTENX036-011, 0.46 µm/px, 28 usable
+slices, 60 µm spacing) this yields 190–480 objects per slice (≈ 4.7 s per
+slice at 2 µm/px) and, on a 4 µm grid, 6 480 tracks of which 737 span three
+or more slices. The 16 µm default grid is too coarse for glands (objects
+merge); registration residuals after affine ECC (tissue Dice 0.90–0.96) are
+the main limit on slice-to-slice continuation (27 %), not the IoU threshold.
 
 ## Spatial Analysis & Quantitative Pathology
 

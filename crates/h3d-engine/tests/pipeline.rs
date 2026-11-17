@@ -1322,6 +1322,7 @@ fn ai_segmentation_only_fills_pending_proposals_until_accepted() {
                 },
             ],
             task: "segmentation".into(),
+            nuclei: None,
         },
     };
     s.segment_with(&seg, &[slide], &NoProgress).unwrap();

@@ -338,6 +338,7 @@ pub fn model_spec(meta: &TrainMeta, name: &str, version: &str, input_size: usize
             })
             .collect(),
         task: "segmentation".to_string(),
+        nuclei: None,
     }
 }
 

@@ -59,9 +59,13 @@ pub struct ModelSpec {
     pub std: [f32; 3],
     /// Kelas keluaran.
     pub classes: Vec<ClassSpec>,
-    /// Jenis tugas; bawaan `"segmentation"`.
+    /// Jenis tugas: `"segmentation"` (bawaan) atau `"nuclei"` (StarDist,
+    /// lihat `cells`).
     #[serde(default = "default_task")]
     pub task: String,
+    /// Head inti StarDist; wajib bila `task = "nuclei"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nuclei: Option<crate::cells::NucleiHead>,
 }
 
 impl ModelSpec {
@@ -92,20 +96,31 @@ impl ModelSpec {
         {
             return Err(SegError::Model("mean/std tidak sah".to_string()));
         }
-        if self.classes.is_empty() {
-            return Err(SegError::Model("daftar kelas kosong".to_string()));
-        }
         let mut idx: Vec<usize> = self.classes.iter().map(|c| c.index).collect();
         idx.sort_unstable();
         idx.dedup();
         if idx.len() != self.classes.len() {
             return Err(SegError::Model("indeks kelas ganda".to_string()));
         }
-        if self.task != "segmentation" {
-            return Err(SegError::Model(format!(
-                "tugas '{}' tidak didukung (hanya segmentation)",
-                self.task
-            )));
+        match self.task.as_str() {
+            "segmentation" => {
+                if self.classes.is_empty() {
+                    return Err(SegError::Model("daftar kelas kosong".to_string()));
+                }
+            }
+            "nuclei" => match &self.nuclei {
+                Some(head) => head.validate(self.input_size)?,
+                None => {
+                    return Err(SegError::Model(
+                        "tugas nuclei membutuhkan bagian \"nuclei\" di model.json".to_string(),
+                    ))
+                }
+            },
+            other => {
+                return Err(SegError::Model(format!(
+                    "tugas '{other}' tidak didukung (segmentation atau nuclei)"
+                )))
+            }
         }
         Ok(())
     }
@@ -175,6 +190,12 @@ impl TractSegmenter {
     /// Bangun dari spesifikasi dan byte ONNX.
     pub fn from_bytes(spec: ModelSpec, onnx: &[u8]) -> Result<Self, SegError> {
         spec.validate()?;
+        if spec.task != "segmentation" {
+            return Err(SegError::Model(format!(
+                "tugas '{}' bukan segmentation; model inti dipakai lewat StarDistDetector",
+                spec.task
+            )));
+        }
         let s = spec.input_size;
         let mut reader = std::io::Cursor::new(onnx);
         let model = tract_onnx::onnx()
@@ -774,6 +795,7 @@ mod tests {
                 },
             ],
             task: "segmentation".to_string(),
+            nuclei: None,
         }
     }
 

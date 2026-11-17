@@ -1,5 +1,5 @@
 //! Pemisah objek yang bersentuhan: watershed berpenanda di atas medan jarak
-//! (EDT) sebuah masker biner. Dipakai `h3d-volume::track` agar kelenjar/sel
+//! (EDT) sebuah masker biner, atau di atas medan lain ([`split_on_field`]). Dipakai `h3d-volume::track` agar kelenjar/sel
 //! yang menempel pada satu irisan tidak menjadi satu komponen.
 //!
 //! # Cara kerja
@@ -62,9 +62,33 @@ pub fn split_touching(
     min_seed_distance_um: f64,
     h_um: f64,
 ) -> (Array2<u32>, usize) {
+    let s = if s_xy_um.is_finite() && s_xy_um > 0.0 {
+        s_xy_um
+    } else {
+        1.0
+    };
+    // EDT ke latar: EDT masker terbalik.
+    let inv = mask.mapv(|v| u8::from(v == 0));
+    let edt = edt_2d_um(&inv, s);
+    split_on_field(mask, &edt, s, min_seed_distance_um, h_um as f32)
+}
+
+/// Seperti [`split_touching`], tetapi medan ketinggiannya diberikan:
+/// `field` (bentuk sama dengan `mask`; puncak = pusat objek, lembah = batas),
+/// mis. kanal hematoksilin yang dihaluskan untuk memisahkan inti yang
+/// berdempetan tanpa lembah EDT. `h_min` dalam satuan `field`;
+/// `min_seed_distance_um` dalam µm dengan ukuran piksel `s_xy_um`. Bentuk
+/// `field` yang tidak cocok → tidak ada objek.
+pub fn split_on_field(
+    mask: &Array2<u8>,
+    field: &Array2<f32>,
+    s_xy_um: f64,
+    min_seed_distance_um: f64,
+    h_min: f32,
+) -> (Array2<u32>, usize) {
     let (h, w) = mask.dim();
     let mut labels = Array2::<u32>::zeros((h, w));
-    if h == 0 || w == 0 {
+    if h == 0 || w == 0 || field.dim() != (h, w) {
         return (labels, 0);
     }
     let s = if s_xy_um.is_finite() && s_xy_um > 0.0 {
@@ -72,8 +96,8 @@ pub fn split_touching(
     } else {
         1.0
     };
-    let h_min = if h_um.is_finite() && h_um > 0.0 {
-        h_um as f32
+    let h_min = if h_min.is_finite() && h_min > 0.0 {
+        h_min
     } else {
         0.0
     };
@@ -82,10 +106,10 @@ pub fn split_touching(
     } else {
         0.0
     };
-    // EDT ke latar: EDT masker terbalik.
-    let inv = mask.mapv(|v| u8::from(v == 0));
-    let edt = edt_2d_um(&inv, s);
-    let edt: Vec<f32> = edt.iter().copied().collect();
+    let edt: Vec<f32> = field
+        .iter()
+        .map(|v| if v.is_finite() { *v } else { 0.0 })
+        .collect();
     let inside: Vec<bool> = mask.iter().map(|&v| v != 0).collect();
 
     let mut order: Vec<usize> = (0..h * w).filter(|&i| inside[i]).collect();

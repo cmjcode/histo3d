@@ -63,6 +63,40 @@ pub fn fill_holes(mask: &Array2<u8>) -> Array2<u8> {
     out
 }
 
+/// Isi hanya lubang kecil: komponen latar (konektivitas 4) yang tidak
+/// menyentuh tepi citra dan luasnya `≤ max_area_px` menjadi 1. Lubang
+/// lebih besar (mis. lumen kelenjar di dalam cincin epitel) tetap latar.
+/// `max_area_px = 0` → masker dikembalikan apa adanya (dinormalkan 0/1).
+pub fn fill_small_holes(mask: &Array2<u8>, max_area_px: usize) -> Array2<u8> {
+    let (h, w) = mask.dim();
+    let mut out = mask.mapv(|m| u8::from(m != 0));
+    if h == 0 || w == 0 || max_area_px == 0 {
+        return out;
+    }
+    let bg = mask.mapv(|m| u8::from(m == 0));
+    let (labels, n) = label_components_conn(&bg, Connectivity::Four);
+    let mut touches = vec![false; n + 1];
+    for x in 0..w {
+        touches[labels[[0, x]] as usize] = true;
+        touches[labels[[h - 1, x]] as usize] = true;
+    }
+    for y in 0..h {
+        touches[labels[[y, 0]] as usize] = true;
+        touches[labels[[y, w - 1]] as usize] = true;
+    }
+    let mut area = vec![0usize; n + 1];
+    for &l in &labels {
+        area[l as usize] += 1;
+    }
+    for (o, &l) in out.iter_mut().zip(labels.iter()) {
+        let i = l as usize;
+        if l != 0 && !touches[i] && area[i] <= max_area_px {
+            *o = 1;
+        }
+    }
+    out
+}
+
 /// Isi lubang bermulut sempit: latar dianggap "luar" hanya bila terjangkau
 /// dari tepi citra oleh cakram radius `mouth_radius_px` yang seluruhnya
 /// berada di latar (pembukaan latar yang tersambung ke tepi). Rongga yang
@@ -169,6 +203,28 @@ mod tests {
         assert_eq!(f[[3, 3]], 1);
         assert_eq!(f[[0, 0]], 0);
         assert_eq!(area(&f), 25.0);
+    }
+
+    #[test]
+    fn fill_small_holes_keeps_lumen() {
+        // Cincin 40×40 tebal 6 dengan lumen besar + lubang kecil 2×2 di
+        // dinding: hanya lubang kecil yang terisi.
+        let mut m = Array2::<u8>::zeros((50, 50));
+        for y in 5..45 {
+            for x in 5..45 {
+                let wall = !(11..39).contains(&x) || !(11..39).contains(&y);
+                m[[y, x]] = u8::from(wall);
+            }
+        }
+        m[[7, 20]] = 0;
+        m[[7, 21]] = 0;
+        m[[8, 20]] = 0;
+        m[[8, 21]] = 0;
+        let f = fill_small_holes(&m, 10);
+        assert_eq!(f[[7, 20]], 1);
+        assert_eq!(f[[25, 25]], 0, "lumen tidak boleh terisi");
+        assert_eq!(fill_small_holes(&m, 0), m);
+        assert_eq!(fill_small_holes(&m, 10_000)[[25, 25]], 1);
     }
 
     #[test]

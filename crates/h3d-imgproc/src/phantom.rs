@@ -457,6 +457,156 @@ pub fn match_points(
     (tp, detected.len() - tp, truth.len() - tp)
 }
 
+/// Kebenaran dasar fantom kelenjar ([`render_glands`]).
+#[derive(Debug, Clone)]
+pub struct GlandPhantomTruth {
+    /// Label instance kelenjar `1..=n` (0 = stroma/lemak/lumen terbuka).
+    pub labels: Array2<u32>,
+    /// Jumlah kelenjar.
+    pub n: usize,
+    /// Masker vakuola lemak (bukan kelenjar; tidak boleh terdeteksi).
+    pub fat: Array2<u8>,
+    /// Indeks kelenjar (1-based) pasangan yang bersentuhan `[a, b]`.
+    pub touching: [u32; 2],
+    /// Indeks kelenjar berbentuk U (lumen terbuka ke stroma).
+    pub u_shaped: u32,
+    /// Indeks sarang padat tanpa lumen.
+    pub solid: u32,
+}
+
+/// Fantom H&E kelenjar untuk menguji segmentasi berpandu lumen
+/// (`glands.rs`): seluruh citra adalah stroma pucat bertabur inti jarang;
+/// di dalamnya lima kelenjar (cincin epitel padat-H dengan lumen putih):
+/// satu bulat, sepasang bersentuhan, satu berbentuk U yang lumennya terbuka
+/// ke stroma, dan satu sarang padat tanpa lumen; serta gugus vakuola lemak
+/// (lubang putih bersekat tipis tanpa epitel) yang **bukan** kelenjar.
+/// Ukuran dalam µm diskalakan ke `size` (bawaan rancangan 800 × 600 µm).
+/// Deterministik per `seed`.
+pub fn render_glands(size: [usize; 2], mpp: f64, seed: u64) -> (Vec<u8>, GlandPhantomTruth) {
+    let [w, h] = size;
+    let mut rng = Rng::new(seed);
+    let m = StainMatrix::he();
+    let sx = (w as f64 * mpp) / 800.0;
+    let sy = (h as f64 * mpp) / 600.0;
+    let sc = sx.min(sy);
+    let stroma = [0.06f32, 0.25, 0.0];
+    let epi = [0.75f32, 0.35, 0.0];
+    let lumen = [0.0f32, 0.0, 0.0];
+    let membrane = [0.05f32, 0.32, 0.0];
+    let mut conc = vec![stroma; w * h];
+    let mut labels = Array2::<u32>::zeros((h, w));
+    let mut fat = Array2::<u8>::zeros((h, w));
+    let to_px = |u: f64| u / mpp;
+    // (cx, cy, R luar, r lumen) dalam µm rancangan.
+    let glands: [(f64, f64, f64, f64); 5] = [
+        (120.0, 120.0, 60.0, 30.0),
+        (330.0, 130.0, 55.0, 25.0),
+        (438.0, 130.0, 55.0, 25.0),
+        (180.0, 420.0, 70.0, 35.0),
+        (620.0, 430.0, 45.0, 0.0),
+    ];
+    let u_idx = 4u32;
+    for (i, &(cx, cy, r_out, r_in)) in glands.iter().enumerate() {
+        let id = i as u32 + 1;
+        let (cxp, cyp) = (to_px(cx * sx), to_px(cy * sy));
+        let (ro, ri) = (to_px(r_out * sc), to_px(r_in * sc));
+        let x0 = ((cxp - ro).floor().max(0.0)) as usize;
+        let y0 = ((cyp - ro).floor().max(0.0)) as usize;
+        let x1 = ((cxp + ro).ceil().max(0.0) as usize).min(w);
+        let y1 = ((cyp + ro).ceil().max(0.0) as usize).min(h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let dx = x as f64 + 0.5 - cxp;
+                let dy = y as f64 + 0.5 - cyp;
+                let d2 = dx * dx + dy * dy;
+                if d2 > ro * ro {
+                    continue;
+                }
+                if id == u_idx {
+                    // Bukaan U: irisan sudut ±50° di sekitar arah +Y (bawah).
+                    let ang = dy.atan2(dx).to_degrees();
+                    if (ang - 90.0).abs() <= 50.0 {
+                        continue;
+                    }
+                }
+                conc[y * w + x] = if d2 <= ri * ri { lumen } else { epi };
+                labels[[y, x]] = id;
+            }
+        }
+    }
+    // Inti epitel rapat di cincin (sedikit lebih gelap) agar tekstur nyata.
+    let epi_mask = labels.mapv(|l| u8::from(l != 0));
+    let n_epi = (epi_mask.iter().filter(|v| **v != 0).count() as f64 * mpp * mpp / 60.0) as usize;
+    for (ux, uy) in scatter_points(&epi_mask, &mut rng, mpp, 5.0, n_epi) {
+        let (px, py) = (ux / mpp, uy / mpp);
+        let (ix, iy) = (px as usize, py as usize);
+        if ix < w && iy < h && conc[iy * w + ix] == epi {
+            paint_disc(&mut conc, w, h, px, py, 2.5 / mpp, [1.0, 0.15, 0.0]);
+        }
+    }
+    // Vakuola lemak: lubang putih r 24 µm, sekat 2 µm.
+    let fats: [(f64, f64); 7] = [
+        (600.0, 120.0),
+        (650.0, 120.0),
+        (700.0, 120.0),
+        (625.0, 163.0),
+        (675.0, 163.0),
+        (600.0, 206.0),
+        (650.0, 206.0),
+    ];
+    for &(cx, cy) in &fats {
+        let (cxp, cyp) = (to_px(cx * sx), to_px(cy * sy));
+        paint_disc(&mut conc, w, h, cxp, cyp, to_px(25.0 * sc), membrane);
+    }
+    for &(cx, cy) in &fats {
+        let (cxp, cyp) = (to_px(cx * sx), to_px(cy * sy));
+        let r = to_px(24.0 * sc);
+        paint_disc(&mut conc, w, h, cxp, cyp, r, lumen);
+        let x0 = ((cxp - r).floor().max(0.0)) as usize;
+        let y0 = ((cyp - r).floor().max(0.0)) as usize;
+        let x1 = ((cxp + r).ceil().max(0.0) as usize).min(w);
+        let y1 = ((cyp + r).ceil().max(0.0) as usize).min(h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let dx = x as f64 + 0.5 - cxp;
+                let dy = y as f64 + 0.5 - cyp;
+                if dx * dx + dy * dy <= r * r {
+                    fat[[y, x]] = 1;
+                }
+            }
+        }
+    }
+    // Inti stroma jarang (1 per 600 µm²) di luar kelenjar dan lemak.
+    let stroma_mask = Array2::from_shape_fn((h, w), |(y, x)| {
+        u8::from(labels[[y, x]] == 0 && fat[[y, x]] == 0)
+    });
+    let n_str =
+        (stroma_mask.iter().filter(|v| **v != 0).count() as f64 * mpp * mpp / 600.0) as usize;
+    for (ux, uy) in scatter_points(&stroma_mask, &mut rng, mpp, 12.0, n_str) {
+        paint_disc(
+            &mut conc,
+            w,
+            h,
+            ux / mpp,
+            uy / mpp,
+            2.5 / mpp,
+            [0.85, 0.1, 0.0],
+        );
+    }
+    let rgba = conc_to_rgba(&conc, &m, &mut rng, 2);
+    (
+        rgba,
+        GlandPhantomTruth {
+            labels,
+            n: 5,
+            fat,
+            touching: [2, 3],
+            u_shaped: u_idx,
+            solid: 5,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -793,3 +793,64 @@ count-density = Densitas per jaringan
 count-params-hash = Hash parameter
 count-clear = Hapus penanda
 count-done = { $n } objek (rentang { $lo } sampai { $hi })
+
+
+# --- Objek 2D kelenjar (laci Label dan usulan, ADR 0004) ---
+glands-title = Objek 2D kelenjar
+glands-hint = Satu objek per kelenjar (cincin epitel beserta lumen) atau sarang padat, dari citra pada skala 1–4 µm/px; bentuk star-convex halus dengan pemisah antar objek agar rekonstruksi 3D mengikuti tiap kelenjar. Hasil berupa usulan
+glands-mpp = Skala kerja (µm/px)
+glands-sigma = Halus peta epitel (µm)
+glands-min-ring = Bagian cincin epitel minimum
+glands-min-area = Luas objek minimum (µm²)
+glands-star-hull = Bentuk star-convex (isi cekungan)
+glands-smooth = Penghalusan tepi (derajat)
+glands-result = { $n } objek "{ $label }" (rentang { $lo } sampai { $hi })
+glands-with-lumen = Berlumen
+glands-stain = Pewarna
+glands-stain-macenko = estimasi Macenko
+glands-stain-ruifrok = Ruifrok tetap
+glands-done = { $n } objek kelenjar diusulkan (rentang { $lo } sampai { $hi })
+glands-preset = Preset
+glands-preset-gland = Kelenjar (epitel + lumen)
+glands-preset-solid = Sarang tumor padat
+glands-preset-vessel = Pembuluh / darah
+glands-palette-hint = Ambil palet warna irisan ini dulu; lalu pilih warna jaringan yang ingin dijadikan objek
+glands-palette-get = Ambil palet warna
+glands-palette-refresh = Ambil ulang palet
+glands-palette-done = Palet warna siap; warna preset sudah dipilih
+glands-pick-hint = Klik kotak warna untuk memilih atau melepas (urut gelap ke terang)
+glands-color-share = Bagian jaringan
+glands-color-white = putih: kaca, lumen, lemak
+glands-tolerance = Toleransi warna
+glands-size = Ukuran objek
+glands-size-small = Kecil
+glands-size-medium = Sedang
+glands-size-large = Besar
+glands-advanced = Lanjutan
+glands-mode-color = Pakai warna palet (nonaktif: ambang hematoksilin)
+
+# --- Hitung sel otomatis (laci Label dan usulan) ---
+cells-title = Hitung sel
+cells-hint = Mendeteksi inti langsung dari citra dan menggambar konturnya (StarDist bila model terpasang, selain itu watershed klasik); tanpa label, proyek tidak berubah
+cells-method-watershed = Watershed klasik (ambang H + EDT, ala QuPath)
+cells-method-classic = LoG klasik (hanya pusat inti, lingkaran)
+cells-h-threshold = Ambang OD hematoksilin
+cells-no-model = Belum ada model inti; ekspor StarDist dengan script/export_stardist_onnx.py lalu impor di laci Deteksi AI
+cells-in-view = Hanya wilayah yang tampil (dengan kontur inti)
+cells-fill = Isi kontur inti
+cells-merge-solidity = Satukan keping sel (soliditas)
+cells-run = Deteksi dan hitung sel
+cells-result = { $n } inti (rentang { $lo } sampai { $hi })
+cells-density = Densitas inti per jaringan
+cells-median-area = Median luas inti
+cells-overlay-count = Jumlah: { $n } ({ $lo }-{ $hi })
+cells-done = { $n } inti terdeteksi (rentang { $lo } sampai { $hi })
+cells-method-whole = Objek utuh (tanpa pemisahan; tiap wilayah tersambung = 1 objek)
+cells-whole-hint = Pita atau cincin epitel dihitung sebagai satu objek; lumen tetap lubang. Angkanya jumlah objek, bukan jumlah sel.
+cells-close-gap = Tutup celah (µm)
+cells-min-area = Luas objek minimum (µm²)
+cells-result-objects = { $n } objek (rentang { $lo } sampai { $hi })
+cells-done-objects = { $n } objek terdeteksi (rentang { $lo } sampai { $hi })
+cells-density-objects = Densitas objek per jaringan
+cells-median-area-objects = Median luas objek
+cells-whole-coarse = Wilayah besar: dihitung pada { $mpp } µm/px agar muat memori

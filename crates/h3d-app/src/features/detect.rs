@@ -55,12 +55,33 @@ pub struct DetectState {
     pub scope: DetectScope,
     /// Deteksi terakhir yang selesai (untuk ringkasan).
     pub last: Option<DetectSummary>,
+    /// Model bertugas `nuclei` (StarDist) untuk panel Hitung sel.
+    pub nuclei_models: Vec<ModelEntry>,
 }
 
 impl DetectState {
     /// Paksa pindai ulang daftar model pada frame berikutnya.
     pub fn invalidate(&mut self) {
         self.scanned = false;
+    }
+
+    /// Isi daftar model dari hasil pindai bundel: model inti dipisah agar
+    /// combo segmentasi hanya berisi model segmentasi.
+    pub fn set_models(&mut self, all: Vec<ModelEntry>) {
+        let (nuclei, seg): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|m| m.spec.as_ref().is_ok_and(|s| s.task == "nuclei"));
+        self.models = seg;
+        self.nuclei_models = nuclei;
+        self.scanned = true;
+        self.model_index = self.model_index.min(self.models.len().saturating_sub(1));
+    }
+
+    /// Pindai bundel bila belum.
+    pub fn ensure_scanned(&mut self, sess: &Session) {
+        if !self.scanned {
+            self.set_models(sess.list_models());
+        }
     }
 
     fn selected(&self) -> Option<&ModelEntry> {
@@ -71,14 +92,7 @@ impl DetectState {
 /// Isi laci. Mengembalikan irisan yang diminta dibuka di 2D ("Tinjau").
 pub fn detect_drawer(app: &mut AppState, sess: &mut Session, ui: &mut Ui) -> Option<SlideId> {
     app.fix_current(sess);
-    if !app.detect.scanned {
-        app.detect.models = sess.list_models();
-        app.detect.scanned = true;
-        app.detect.model_index = app
-            .detect
-            .model_index
-            .min(app.detect.models.len().saturating_sub(1));
-    }
+    app.detect.ensure_scanned(sess);
     let busy = app.job.is_some();
 
     ui.label(t!("detect-intro"));
@@ -185,8 +199,7 @@ fn model_section(app: &mut AppState, sess: &mut Session, ui: &mut Ui, busy: bool
 fn install_model(app: &mut AppState, sess: &mut Session, dir: PathBuf) {
     match sess.install_model(&dir) {
         Ok(dest) => {
-            app.detect.models = sess.list_models();
-            app.detect.scanned = true;
+            app.detect.set_models(sess.list_models());
             if let Some(i) = app.detect.models.iter().position(|m| m.dir == dest) {
                 app.detect.model_index = i;
             }

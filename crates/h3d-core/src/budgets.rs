@@ -27,6 +27,10 @@ pub struct Budgets {
     /// piramida gambar" (tiap pembangunan memegang satu pendekode gambar
     /// yang dialirkan per pita). Minimal 1.
     pub pyramid_build_jobs: usize,
+    /// Set kerja penghitungan "objek utuh" (masker satu wilayah penuh:
+    /// kanal H, selisih H−E, masker, label) dalam byte. Bila wilayah pada
+    /// resolusi kerja melebihinya, resolusi kerja diturunkan.
+    pub cell_region_bytes: u64,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -42,6 +46,7 @@ impl Budgets {
         max_open_slides: 16,
         register_batch: 8,
         pyramid_build_jobs: 2,
+        cell_region_bytes: 768 * MIB,
     };
 
     /// Anggaran iPad (9.2) **[TARGET]**; harus diukur ulang di perangkat.
@@ -55,6 +60,7 @@ impl Budgets {
         max_open_slides: 4,
         register_batch: 2,
         pyramid_build_jobs: 1,
+        cell_region_bytes: 192 * MIB,
     };
 
     /// Anggaran bawaan menurut target kompilasi.
@@ -89,6 +95,7 @@ impl Budgets {
             max_open_slides: self.max_open_slides,
             register_batch: self.register_batch,
             pyramid_build_jobs: self.pyramid_build_jobs,
+            cell_region_bytes: s(self.cell_region_bytes),
         }
     }
 }

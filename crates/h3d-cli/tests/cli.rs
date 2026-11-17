@@ -459,6 +459,111 @@ fn write_disc_mask_png(path: &Path, size: u32, center: (f64, f64), radius: f64) 
     img.save(path).unwrap();
 }
 
+/// PNG `size×size` H&E tiruan: latar stroma merah muda pucat, dua kelenjar
+/// (cincin ungu gelap tebal `ring` dengan lumen putih) berpusat `centers`.
+fn write_glands_png(path: &Path, size: u32, centers: &[(f64, f64)], r_out: f64, r_in: f64) {
+    let mut img = image::RgbaImage::from_pixel(size, size, image::Rgba([235, 200, 215, 255]));
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        for &(cx, cy) in centers {
+            let dx = f64::from(x) + 0.5 - cx;
+            let dy = f64::from(y) + 0.5 - cy;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= r_in * r_in {
+                *p = image::Rgba([250, 250, 250, 255]);
+            } else if d2 <= r_out * r_out {
+                let k = ((x / 3 + y / 3) % 2) as u8 * 20;
+                *p = image::Rgba([90 + k, 40 + k, 120, 255]);
+            }
+        }
+    }
+    img.save(path).unwrap();
+}
+
+#[test]
+fn glands_counts_two_rings_json_and_accepts_into_label() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let png = root.join("rings.png");
+    // 2 µm/px: kelenjar Ø 120 µm dengan lumen Ø 60 µm.
+    write_glands_png(&png, 200, &[(60.0, 100.0), (140.0, 100.0)], 30.0, 15.0);
+    ok(root, &["new", "p.h3d"]);
+    ok(root, &["import", "p.h3d", "rings.png", "--mpp", "2"]);
+    // Tanpa --accept: hanya menghitung, label tidak berubah.
+    let out = ok(root, &["glands", "p.h3d", "--json"]);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let first = &v.as_array().unwrap()[0];
+    assert_eq!(first["n"], 2, "{out}");
+    assert_eq!(first["n_with_lumen"], 2);
+    assert!(first["n_min"].as_u64().unwrap() <= 2 && first["n_max"].as_u64().unwrap() >= 2);
+    assert_eq!(first["glands"].as_array().unwrap().len(), 2);
+    let before = ok(root, &["count", "p.h3d", "--label", "Kelenjar", "--json"]);
+    let before: Value = serde_json::from_str(&before).unwrap();
+    assert!(before
+        .as_array()
+        .is_none_or(|a| a.iter().all(|x| x["estimate"]["count"]["n"] == 0)));
+    // --replace tanpa --accept ditolak dengan satu baris galat.
+    fails(root, &["glands", "p.h3d", "--replace"], 2);
+    // --accept: usulan masuk label, dua objek terpisah saat dihitung ulang.
+    let out = ok(root, &["glands", "p.h3d", "--accept", "--replace"]);
+    assert!(out.contains("Usulan diterima pada 1 irisan"), "{out}");
+    let counted = ok(root, &["count", "p.h3d", "--label", "Kelenjar", "--json"]);
+    let c: Value = serde_json::from_str(&counted).unwrap();
+    assert_eq!(
+        c.as_array().unwrap()[0]["estimate"]["count"]["n"],
+        2,
+        "{counted}"
+    );
+}
+
+#[test]
+fn cells_whole_counts_each_ring_once_with_its_lumen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // Dua cincin epitel bertekstur (pola kotak-kotak memberi watershed
+    // banyak benih) di atas stroma; objek utuh harus memberi tepat dua
+    // objek besar, masing-masing dengan satu lubang (lumen).
+    write_glands_png(
+        &root.join("rings.png"),
+        200,
+        &[(60.0, 100.0), (140.0, 100.0)],
+        30.0,
+        15.0,
+    );
+    ok(root, &["new", "p.h3d"]);
+    ok(root, &["import", "p.h3d", "rings.png", "--mpp", "2"]);
+    let args = [
+        "cells",
+        "p.h3d",
+        "--method",
+        "whole",
+        "--mpp-work",
+        "2",
+        "--polygons",
+        "--json",
+    ];
+    let out = ok(root, &args);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let d = &v.as_array().unwrap()[0]["detection"];
+    assert_eq!(d["method"], "regions-classic-v1", "{out}");
+    let objs = d["nuclei"].as_array().unwrap();
+    let rings: Vec<&Value> = objs
+        .iter()
+        .filter(|o| o["area_um2"].as_f64().unwrap() > 1000.0)
+        .collect();
+    assert_eq!(rings.len(), 2, "{out}");
+    for r in rings {
+        assert_eq!(r["holes_um"].as_array().map_or(0, Vec::len), 1, "{out}");
+    }
+    // Deterministik.
+    assert_eq!(ok(root, &args), out);
+    // Teks ringkas menyebut objek, bukan inti.
+    let text = ok(
+        root,
+        &["cells", "p.h3d", "--method", "whole", "--mpp-work", "2"],
+    );
+    assert!(text.contains(" objek"), "{text}");
+}
+
 #[test]
 fn labels_import_mask_then_diff_reports_dice_one() {
     let tmp = tempfile::tempdir().unwrap();

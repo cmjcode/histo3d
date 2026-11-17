@@ -144,6 +144,11 @@ pub enum JobOutput {
     Analyzed,
     /// Usulan segmentasi klasik untuk satu irisan (belum diterima).
     ClassicProposal(SlideId, Box<Proposal>),
+    /// Usulan objek 2D kelenjar untuk satu irisan (belum diterima) beserta
+    /// ringkasannya.
+    GlandProposal(SlideId, Box<h3d_engine::GlandProposal>),
+    /// Palet warna irisan untuk mode warna objek 2D kelenjar.
+    Palette(SlideId, Box<h3d_engine::Palette>),
     /// Usulan tertunda (AI/interpolasi) sudah masuk antrean sesi.
     PendingProposals,
     /// Deteksi AI dari laci Deteksi selesai; usulan masuk antrean sesi.
@@ -158,6 +163,8 @@ pub enum JobOutput {
     Nuclei(Box<segment::NucleiOverlay>),
     /// Penghitungan objek 2D satu label pada satu irisan.
     ObjectCount(Box<h3d_engine::ObjectCount2D>),
+    /// Penghitungan sel otomatis pada satu irisan.
+    CellCount(Box<h3d_engine::CellCount2D>),
 }
 
 /// Job yang sedang berjalan.
@@ -749,6 +756,21 @@ impl AppState {
             JobOutput::ClassicProposal(slide, proposal) => {
                 self.segment.set_classic(slide, *proposal);
             }
+            JobOutput::GlandProposal(slide, gp) => {
+                let gp = *gp;
+                self.toasts.info(t!(
+                    "glands-done",
+                    n = gp.summary.n.to_string(),
+                    lo = gp.summary.n_min.to_string(),
+                    hi = gp.summary.n_max.to_string()
+                ));
+                self.segment.set_classic(slide, gp.proposal);
+                self.segment.glands = Some(gp.summary);
+            }
+            JobOutput::Palette(slide, pal) => {
+                self.segment.set_palette(slide, *pal);
+                self.toasts.info(t!("glands-palette-done"));
+            }
             JobOutput::PendingProposals => self.toasts.info(t!("segment-proposals-ready")),
             JobOutput::Detected(summary) => {
                 self.toasts
@@ -783,6 +805,20 @@ impl AppState {
                     hi = c.estimate.n_max.to_string()
                 ));
                 self.segment.count = Some(*c);
+            }
+            JobOutput::CellCount(c) => {
+                let key = if c.is_whole_regions() {
+                    "cells-done-objects"
+                } else {
+                    "cells-done"
+                };
+                self.toasts.info(t!(
+                    key,
+                    n = c.n().to_string(),
+                    lo = c.detection.n_min.to_string(),
+                    hi = c.detection.n_max.to_string()
+                ));
+                self.segment.cells = Some(*c);
             }
         }
     }

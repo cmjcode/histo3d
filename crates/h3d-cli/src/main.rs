@@ -17,9 +17,10 @@ use h3d_core::{
 };
 use h3d_engine::phantom::{write_phantom, PhantomOptions, PhantomShapeKind};
 use h3d_engine::{
-    clock_from_env, to_stable_json_of, AttrParams, BorderRule, ClassicParams, CountParams,
-    ExportKind, ImportOptions, PaintMode, RegMetric, RegModel, RegOptions, RegisterRun, Session,
-    StainChannel,
+    clock_from_env, to_stable_json_of, AttrParams, BorderRule, CellMethod, ClassicNucleiDetector,
+    ClassicParams, ColorPreset, CountParams, EpitheliumSource, ExportKind, GlandParams,
+    ImportOptions, PaintMode, RegMetric, RegModel, RegOptions, RegisterRun, Session, StainChannel,
+    StainEstimate, WatershedNucleiDetector, WholeRegionDetector,
 };
 use serde_json::json;
 
@@ -210,6 +211,161 @@ enum Command {
         #[arg(long, value_enum, default_value_t = BorderArg::Frame)]
         border: BorderArg,
         /// Keluaran JSON (semua irisan) ke stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hitung sel/inti otomatis dari citra (StarDist ONNX atau LoG klasik);
+    /// tanpa label, tidak mengubah proyek.
+    Cells {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Id irisan dipisah koma (bawaan: semua irisan Ok).
+        #[arg(long, value_delimiter = ',')]
+        slides: Vec<u32>,
+        /// Folder model StarDist (`model.json` task nuclei + `model.onnx`);
+        /// tanpa ini dipakai pendeteksi klasik (`--method`).
+        #[arg(long)]
+        model: Option<PathBuf>,
+        /// Pendeteksi klasik: watershed (segmentasi ala QuPath), log
+        /// (puncak LoG), atau whole (objek utuh: tiap wilayah tersambung =
+        /// satu objek, tanpa pemisahan).
+        #[arg(long, value_enum, default_value_t = CellMethodArg::Watershed)]
+        method: CellMethodArg,
+        /// Ambang OD hematoksilin pendeteksi klasik.
+        #[arg(long = "h-threshold", default_value_t = 0.15)]
+        h_threshold: f32,
+        /// Resolusi kerja pendeteksi klasik, µm/px.
+        #[arg(long = "mpp-work", default_value_t = 0.5)]
+        mpp_work: f64,
+        /// Watershed: soliditas minimum untuk menyatukan keping cembung satu
+        /// sel (0 = mati).
+        #[arg(long = "merge-solidity", default_value_t = 0.93)]
+        merge_solidity: f64,
+        /// Watershed: luas objek maksimum, µm² (bawaan 300; naikkan untuk
+        /// sel utuh atau gumpalan besar).
+        #[arg(long = "max-area", default_value_t = 300.0)]
+        max_area: f64,
+        /// Objek utuh: radius penutupan celah, µm.
+        #[arg(long = "close-um", default_value_t = 1.5)]
+        close_um: f64,
+        /// Objek utuh: luas objek minimum, µm².
+        #[arg(long = "min-area", default_value_t = 8.0)]
+        min_area: f64,
+        /// Wilayah `x0,y0,x1,y1` (µm, ruang slide); bawaan seluruh slide.
+        #[arg(long, value_delimiter = ',', num_args = 4)]
+        roi: Vec<f64>,
+        /// Sertakan poligon tiap inti di JSON.
+        #[arg(long)]
+        polygons: bool,
+        /// Tulis PNG wilayah (butuh --roi dan satu irisan) dengan kontur
+        /// hijau tiap inti (lingkaran untuk LoG), untuk memeriksa hasil.
+        #[arg(long)]
+        overlay: Option<PathBuf>,
+        /// Keluaran JSON (semua irisan) ke stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Objek 2D kelenjar/struktur per irisan (ADR 0004): segmentasi berpandu
+    /// lumen pada skala 1–2 µm/px → satu objek per kelenjar (cincin + lumen)
+    /// atau sarang padat, bentuk star-convex halus, dengan pemisah antar
+    /// objek agar penautan 3D mengikuti tiap kelenjar. Tanpa `--accept` hanya
+    /// menghitung; dengan `--accept` usulan masuk label (menjalankan perintah
+    /// ini adalah persetujuan eksplisit), hanya pada piksel kosong.
+    Glands {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Nama label tujuan (dibuat bila belum ada).
+        #[arg(long, default_value = "Kelenjar")]
+        label: String,
+        /// Id irisan dipisah koma (bawaan: semua irisan Ok).
+        #[arg(long, value_delimiter = ',')]
+        slides: Vec<u32>,
+        /// Skala kerja, µm/px.
+        #[arg(long = "mpp-um", default_value_t = 2.0)]
+        mpp_um: f64,
+        /// Sumber peta epitel: `color` (palet warna per irisan + toleransi,
+        /// bawaan) atau `hematoxylin` (ambang kanal H, lanjutan).
+        #[arg(long, value_enum, default_value_t = EpiModeArg::Color)]
+        mode: EpiModeArg,
+        /// Preset pemilihan warna palet (mode warna).
+        #[arg(long, value_enum, default_value_t = PresetArg::Gland)]
+        preset: PresetArg,
+        /// Indeks warna palet yang dipilih (0 = tergelap), dipisah koma;
+        /// menggantikan preset.
+        #[arg(long, value_delimiter = ',')]
+        colors: Vec<usize>,
+        /// Toleransi warna ΔE (bawaan: dari sebaran warna terpilih).
+        #[arg(long)]
+        tolerance: Option<f32>,
+        /// Jumlah warna palet (2..=8).
+        #[arg(long = "k", default_value_t = 5)]
+        k: usize,
+        /// Sigma Gauss peta epitel, µm.
+        #[arg(long = "sigma-um", default_value_t = 4.0)]
+        sigma_um: f64,
+        /// Ambang peta epitel 0..1 (tanpa nilai = Otsu di dalam jaringan).
+        #[arg(long = "epithelium-threshold")]
+        epithelium_threshold: Option<f32>,
+        /// OD total maksimum piksel lumen.
+        #[arg(long = "lumen-od-max", default_value_t = 0.15)]
+        lumen_od_max: f64,
+        /// Luas lumen minimum, µm².
+        #[arg(long = "min-lumen-um2", default_value_t = 50.0)]
+        min_lumen_um2: f64,
+        /// Lebar cincin uji epitel di sekeliling lumen, µm.
+        #[arg(long = "ring-um", default_value_t = 10.0)]
+        ring_um: f64,
+        /// Bagian minimum cincin yang berupa epitel (0..1).
+        #[arg(long = "min-ring", default_value_t = 0.5)]
+        min_ring: f64,
+        /// Luas objek minimum, µm².
+        #[arg(long = "min-area-um2", default_value_t = 300.0)]
+        min_area_um2: f64,
+        /// Kedalaman lembah minimum antara dua lumen, µm.
+        #[arg(long = "lumen-valley-um", default_value_t = 4.0)]
+        lumen_valley_um: f64,
+        /// Sarang padat: jarak minimum antar pusat, µm.
+        #[arg(long = "solid-seed-um", default_value_t = 40.0)]
+        solid_seed_um: f64,
+        /// Jangan ganti bentuk dengan star hull (pakai bentuk mentah).
+        #[arg(long = "no-star-hull")]
+        no_star_hull: bool,
+        /// Sigma penghalusan star hull, derajat (0 = tanpa penghalusan).
+        #[arg(long = "smooth-deg", default_value_t = 6.0)]
+        smooth_deg: f64,
+        /// Pakai vektor pewarna Ruifrok tetap, bukan estimasi Macenko.
+        #[arg(long)]
+        ruifrok: bool,
+        /// Terima usulan ke label (hanya piksel kosong).
+        #[arg(long)]
+        accept: bool,
+        /// Kosongkan label itu pada irisan yang diproses sebelum menerima
+        /// (butuh --accept).
+        #[arg(long)]
+        replace: bool,
+        /// Tulis PNG `glands_NNNN.png` per irisan ke folder ini: citra pada
+        /// skala kerja dengan garis tepi objek hijau, untuk memeriksa hasil.
+        #[arg(long = "overlay-dir")]
+        overlay_dir: Option<PathBuf>,
+        /// Keluaran JSON (ringkasan + daftar objek semua irisan) ke stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Palet warna jaringan per irisan (k-means CIELAB deterministik,
+    /// terurut gelap → terang): dasar mode warna `h3d glands`.
+    Palette {
+        /// Folder proyek.
+        project: PathBuf,
+        /// Id irisan dipisah koma (bawaan: semua irisan Ok).
+        #[arg(long, value_delimiter = ',')]
+        slides: Vec<u32>,
+        /// Skala kerja, µm/px.
+        #[arg(long = "mpp-um", default_value_t = 2.0)]
+        mpp_um: f64,
+        /// Jumlah warna (2..=8).
+        #[arg(long = "k", default_value_t = 5)]
+        k: usize,
+        /// Keluaran JSON.
         #[arg(long)]
         json: bool,
     },
@@ -649,6 +805,47 @@ enum Outcome {
     QcFailed(usize),
 }
 
+/// Sumber peta epitel untuk `glands`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum EpiModeArg {
+    /// Palet warna per irisan + toleransi.
+    Color,
+    /// Ambang kanal hematoksilin (lanjutan).
+    Hematoxylin,
+}
+
+/// Preset warna untuk `glands --mode color`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum PresetArg {
+    /// Kelenjar: pita warna tergelap.
+    Gland,
+    /// Sarang tumor padat.
+    Solid,
+    /// Pembuluh/darah: warna paling merah.
+    Vessel,
+}
+
+impl From<PresetArg> for ColorPreset {
+    fn from(p: PresetArg) -> Self {
+        match p {
+            PresetArg::Gland => ColorPreset::Gland,
+            PresetArg::Solid => ColorPreset::SolidNest,
+            PresetArg::Vessel => ColorPreset::Vessel,
+        }
+    }
+}
+
+/// Pendeteksi klasik untuk `cells`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CellMethodArg {
+    /// Segmentasi ambang H + watershed EDT (ala QuPath).
+    Watershed,
+    /// Puncak LoG multiskala.
+    Log,
+    /// Objek utuh: ambang H satu wilayah + komponen tersambung.
+    Whole,
+}
+
 /// Aturan tepi untuk `count`.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum BorderArg {
@@ -668,6 +865,97 @@ impl From<BorderArg> for BorderRule {
             BorderArg::Exclude => BorderRule::ExcludeAll,
         }
     }
+}
+
+/// Tulis PNG wilayah `[lo, hi]` irisan dengan lingkaran hijau di tiap inti
+/// hasil `c` (jari-jari dari luas), untuk memeriksa deteksi secara visual.
+fn write_cells_overlay(
+    s: &Session,
+    c: &h3d_engine::CellCount2D,
+    lo: [f64; 2],
+    hi: [f64; 2],
+    path: &Path,
+) -> Result<()> {
+    let mpp = c.detection.mpp;
+    let w = (((hi[0] - lo[0]) / mpp).ceil() as usize).clamp(1, 8192);
+    let h = (((hi[1] - lo[1]) / mpp).ceil() as usize).clamp(1, 8192);
+    let mut rgba = s.read_region_rgba(c.slide, lo[0], lo[1], w, h, mpp)?;
+    let green = [40u8, 230, 80, 255];
+    let mut plot = |x: f64, y: f64| {
+        let (x, y) = (x.floor(), y.floor());
+        if x >= 0.0 && y >= 0.0 && (x as usize) < w && (y as usize) < h {
+            let i = (y as usize * w + x as usize) * 4;
+            rgba[i..i + 4].copy_from_slice(&green);
+        }
+    };
+    for n in &c.detection.nuclei {
+        let cx = (n.center_um[0] - lo[0]) / mpp;
+        let cy = (n.center_um[1] - lo[1]) / mpp;
+        if n.polygon_um.len() >= 3 {
+            // Kontur luar dan lubang (lumen objek utuh): tiap ruas disampel
+            // rapat (<= 0,5 px).
+            let px = |v: [f32; 2]| (cx + f64::from(v[0]) / mpp, cy + f64::from(v[1]) / mpp);
+            for poly in std::iter::once(&n.polygon_um).chain(n.holes_um.iter()) {
+                let k = poly.len();
+                for j in 0..k {
+                    let (ax, ay) = px(poly[j]);
+                    let (bx, by) = px(poly[(j + 1) % k]);
+                    let steps =
+                        ((bx - ax).abs().max((by - ay).abs()) * 2.0).ceil().max(1.0) as usize;
+                    for t in 0..=steps {
+                        let u = t as f64 / steps as f64;
+                        plot(ax + u * (bx - ax), ay + u * (by - ay));
+                    }
+                }
+            }
+            continue;
+        }
+        let r = (n.radius_um() / mpp).max(1.5);
+        let steps = ((r * 8.0) as usize).max(12);
+        for k in 0..steps {
+            let a = k as f64 / steps as f64 * std::f64::consts::TAU;
+            plot(cx + r * a.cos(), cy + r * a.sin());
+        }
+    }
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+        .ok_or_else(|| anyhow!("ukuran gambar overlay tidak cocok"))?;
+    img.save(path)
+        .with_context(|| format!("tidak bisa menulis {}", path.display()))?;
+    Ok(())
+}
+
+/// Tulis PNG irisan pada skala kerja usulan kelenjar dengan garis tepi hijau
+/// tiap objek (tepi masker usulan, termasuk pemisah antar objek), untuk
+/// memeriksa segmentasi secara visual.
+fn write_glands_overlay(s: &Session, gp: &h3d_engine::GlandProposal, path: &Path) -> Result<()> {
+    let p = &gp.proposal;
+    let (h, w) = p.mask.dim();
+    let mut rgba = s.read_region_rgba(gp.summary.slide, 0.0, 0.0, w, h, p.mpp)?;
+    let green = [40u8, 230, 80, 255];
+    for y in 0..h {
+        for x in 0..w {
+            if p.mask[[y, x]] == 0 {
+                continue;
+            }
+            let edge = y == 0
+                || x == 0
+                || y + 1 == h
+                || x + 1 == w
+                || p.mask[[y - 1, x]] == 0
+                || p.mask[[y + 1, x]] == 0
+                || p.mask[[y, x - 1]] == 0
+                || p.mask[[y, x + 1]] == 0;
+            if edge {
+                let i = (y * w + x) * 4;
+                rgba[i..i + 4].copy_from_slice(&green);
+            }
+        }
+    }
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+        .ok_or_else(|| anyhow!("ukuran gambar overlay tidak cocok"))?;
+    img.save(path)
+        .with_context(|| format!("tidak bisa menulis {}", path.display()))?;
+    Ok(())
 }
 
 fn open(project: &Path) -> Result<Session> {
@@ -1240,6 +1528,343 @@ fn run(cli: Cli) -> Result<Outcome> {
                     );
                 }
                 println!("Total {total} objek pada {} irisan", results.len());
+            }
+        }
+        Command::Cells {
+            project,
+            slides,
+            model,
+            method,
+            h_threshold,
+            mpp_work,
+            merge_solidity,
+            max_area,
+            close_um,
+            min_area,
+            roi,
+            polygons,
+            overlay,
+            json,
+        } => {
+            let s = open(&project)?;
+            let ids: Vec<SlideId> = if slides.is_empty() {
+                s.project()
+                    .usable_slides_ordered()
+                    .iter()
+                    .map(|e| e.id)
+                    .collect()
+            } else {
+                slides.into_iter().map(SlideId).collect()
+            };
+            let method = match (model, method) {
+                (Some(dir), _) => CellMethod::StarDist(dir),
+                (None, CellMethodArg::Watershed) => {
+                    CellMethod::Watershed(WatershedNucleiDetector {
+                        mpp: mpp_work,
+                        h_threshold,
+                        merge_solidity,
+                        max_area_um2: max_area,
+                        ..WatershedNucleiDetector::default()
+                    })
+                }
+                (None, CellMethodArg::Log) => CellMethod::Classic(ClassicNucleiDetector {
+                    mpp: mpp_work,
+                    min_h_od: h_threshold,
+                    ..ClassicNucleiDetector::default()
+                }),
+                (None, CellMethodArg::Whole) => CellMethod::WholeRegions(WholeRegionDetector {
+                    mpp: mpp_work,
+                    h_threshold,
+                    close_radius_um: close_um,
+                    min_area_um2: min_area,
+                    ..WholeRegionDetector::default()
+                }),
+            };
+            let roi_um = match roi.as_slice() {
+                [] => None,
+                [x0, y0, x1, y1] => Some(([*x0, *y0], [*x1, *y1])),
+                _ => bail!("--roi butuh 4 angka: x0,y0,x1,y1"),
+            };
+            let mut results = Vec::with_capacity(ids.len());
+            for &slide in &ids {
+                eprintln!("  irisan {slide}: deteksi sel...");
+                // Overlay menggambar kontur, jadi poligon ikut dihitung.
+                let keep = polygons || overlay.is_some();
+                results.push(s.count_cells(slide, roi_um, &method, keep, &NoProgress)?);
+            }
+            if let Some(path) = overlay {
+                let (Some(c), Some((lo, hi))) = (results.first(), roi_um) else {
+                    bail!("--overlay butuh --roi dan tepat satu irisan");
+                };
+                write_cells_overlay(&s, c, lo, hi, &path)?;
+                eprintln!("overlay ditulis: {}", path.display());
+            }
+            if json {
+                println!("{}", to_stable_json_of(&results)?);
+            } else {
+                println!("{}", h3d_core::RESEARCH_ONLY_NOTICE);
+                let method_name = results
+                    .first()
+                    .map(|c| c.detection.method.clone())
+                    .unwrap_or_default();
+                let hash = results.first().map_or(0, |c| c.detection.params_hash);
+                println!("Sel per irisan (metode {method_name}, hash parameter {hash:016x}):");
+                let unit = if results.first().is_some_and(|c| c.is_whole_regions()) {
+                    "objek"
+                } else {
+                    "inti"
+                };
+                let mut total = 0usize;
+                for c in &results {
+                    total += c.n();
+                    let dens = c
+                        .density_per_mm2()
+                        .map_or(String::from("-"), |d| format!("{d:.0}/mm²"));
+                    println!(
+                        "  irisan {}: {} {unit} (rentang {}–{}), median luas {:.1} µm², densitas {dens}, {} tile, {} µm/px",
+                        c.slide,
+                        c.n(),
+                        c.detection.n_min,
+                        c.detection.n_max,
+                        c.median_area_um2(),
+                        c.detection.tiles_run,
+                        c.detection.mpp
+                    );
+                }
+                println!("Total {total} {unit} pada {} irisan", results.len());
+            }
+        }
+        Command::Glands {
+            project,
+            label,
+            slides,
+            mpp_um,
+            mode,
+            preset,
+            colors,
+            tolerance,
+            k,
+            sigma_um,
+            epithelium_threshold,
+            lumen_od_max,
+            min_lumen_um2,
+            ring_um,
+            min_ring,
+            min_area_um2,
+            lumen_valley_um,
+            solid_seed_um,
+            no_star_hull,
+            smooth_deg,
+            ruifrok,
+            accept,
+            replace,
+            overlay_dir,
+            json,
+        } => {
+            if replace && !accept {
+                bail!("--replace hanya berarti bersama --accept");
+            }
+            let mut s = open(&project)?;
+            let (id, created) = match s.label_by_name(&label) {
+                Ok(id) => (id, false),
+                Err(_) => (
+                    s.add_label(&label, [40, 180, 200, 255], LabelKind::Other)?,
+                    true,
+                ),
+            };
+            let ids: Vec<SlideId> = if slides.is_empty() {
+                s.project()
+                    .usable_slides_ordered()
+                    .iter()
+                    .map(|e| e.id)
+                    .collect()
+            } else {
+                slides.into_iter().map(SlideId).collect()
+            };
+            let base = GlandParams {
+                mpp_um,
+                stain: if ruifrok {
+                    StainEstimate::Ruifrok
+                } else {
+                    StainEstimate::Macenko
+                },
+                epithelium_sigma_um: sigma_um,
+                epithelium_threshold,
+                lumen_od_max,
+                min_lumen_area_um2: min_lumen_um2,
+                ring_width_um: ring_um,
+                min_ring_fraction: min_ring,
+                min_area_um2,
+                lumen_valley_um,
+                solid_seed_distance_um: solid_seed_um,
+                star_hull: !no_star_hull,
+                smooth_sigma_deg: smooth_deg,
+                ..GlandParams::default()
+            };
+            if let Some(dir) = &overlay_dir {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("tidak bisa membuat {}", dir.display()))?;
+            }
+            let mut summaries = Vec::with_capacity(ids.len());
+            let mut accepted = 0usize;
+            for &slide in &ids {
+                eprintln!("  irisan {slide}: segmentasi kelenjar...");
+                let params = match mode {
+                    EpiModeArg::Hematoxylin => base.clone(),
+                    EpiModeArg::Color => {
+                        let pal = s.slide_palette(slide, mpp_um, k, &NoProgress)?;
+                        let idx: Vec<usize> = if colors.is_empty() {
+                            pal.preset_indices(preset.into())
+                        } else {
+                            colors.clone()
+                        };
+                        let picks = pal.picks(&idx);
+                        if picks.is_empty() {
+                            bail!(
+                                "irisan {slide}: tidak ada warna palet yang cocok (palet {} warna); pilih --colors",
+                                pal.colors.len()
+                            );
+                        }
+                        GlandParams {
+                            epithelium: EpitheliumSource::Color {
+                                picks,
+                                tolerance: tolerance.unwrap_or_else(|| pal.default_tolerance(&idx)),
+                            },
+                            solid_seed_distance_um: if preset == PresetArg::Solid {
+                                solid_seed_um.min(25.0)
+                            } else {
+                                solid_seed_um
+                            },
+                            ..base.clone()
+                        }
+                    }
+                };
+                let gp = s.segment_glands(slide, id, &params, &NoProgress)?;
+                if let Some(dir) = &overlay_dir {
+                    let path = dir.join(format!("glands_{:04}.png", slide.0));
+                    write_glands_overlay(&s, &gp, &path)?;
+                }
+                if accept {
+                    if replace {
+                        let size = s.slide(slide)?.size_um();
+                        let rect = [
+                            [0.0, 0.0],
+                            [size[0], 0.0],
+                            [size[0], size[1]],
+                            [0.0, size[1]],
+                        ];
+                        s.fill_polygon(slide, id, &rect, PaintMode::Erase)?;
+                    }
+                    if s.accept_proposal(slide, &gp.proposal, PaintMode::OnlyBackground)? {
+                        accepted += 1;
+                    }
+                }
+                summaries.push(gp.summary);
+            }
+            // Definisi label baru ikut tersimpan walau usulan tidak diterima.
+            if accept || created {
+                s.save()?;
+            }
+            if json {
+                println!("{}", to_stable_json_of(&summaries)?);
+            } else {
+                println!("{}", h3d_core::RESEARCH_ONLY_NOTICE);
+                let hash = summaries.first().map_or(0, |g| g.params_hash);
+                let mode_name = summaries
+                    .first()
+                    .map(|g| g.epithelium_mode.clone())
+                    .unwrap_or_default();
+                println!(
+                    "Objek 2D \"{label}\" per irisan (mode {mode_name}, skala {mpp_um} µm/px, hash parameter irisan pertama {hash:016x}):"
+                );
+                let mut total = 0usize;
+                for g in &summaries {
+                    total += g.n;
+                    let tol = g.color_tolerance.map_or(String::new(), |t| {
+                        format!(", {} warna, toleransi {t:.0}", g.color_picks.len())
+                    });
+                    println!(
+                        "  irisan {}: {} objek (rentang {}–{}), {} berlumen, median luas {:.0} µm², pewarna {}{tol}",
+                        g.slide,
+                        g.n,
+                        g.n_min,
+                        g.n_max,
+                        g.n_with_lumen,
+                        g.median_area_um2,
+                        if g.stain_estimated { "Macenko" } else { "Ruifrok" }
+                    );
+                }
+                println!("Total {total} objek pada {} irisan", summaries.len());
+                if accept {
+                    println!(
+                        "Usulan diterima pada {accepted} irisan{}",
+                        if replace {
+                            " (label dikosongkan dulu)"
+                        } else {
+                            " (hanya pada piksel kosong)"
+                        }
+                    );
+                } else {
+                    println!("Label tidak diubah; tambahkan --accept untuk menerima usulan");
+                }
+            }
+        }
+        Command::Palette {
+            project,
+            slides,
+            mpp_um,
+            k,
+            json,
+        } => {
+            let s = open(&project)?;
+            let ids: Vec<SlideId> = if slides.is_empty() {
+                s.project()
+                    .usable_slides_ordered()
+                    .iter()
+                    .map(|e| e.id)
+                    .collect()
+            } else {
+                slides.into_iter().map(SlideId).collect()
+            };
+            let mut all = Vec::with_capacity(ids.len());
+            for &slide in &ids {
+                let pal = s.slide_palette(slide, mpp_um, k, &NoProgress)?;
+                all.push((slide, pal));
+            }
+            if json {
+                let rows: Vec<serde_json::Value> = all
+                    .iter()
+                    .map(|(slide, pal)| json!({ "slide": slide, "palette": pal }))
+                    .collect();
+                println!("{}", to_stable_json_of(&rows)?);
+            } else {
+                for (slide, pal) in &all {
+                    println!("irisan {slide} ({} sampel):", pal.n_samples);
+                    let gland = pal.preset_indices(ColorPreset::Gland);
+                    let vessel = pal.preset_indices(ColorPreset::Vessel);
+                    for (i, c) in pal.colors.iter().enumerate() {
+                        let tag = if gland.contains(&i) {
+                            " [kelenjar]"
+                        } else if vessel.contains(&i) {
+                            " [pembuluh]"
+                        } else if c.is_white() {
+                            " [putih]"
+                        } else {
+                            ""
+                        };
+                        println!(
+                            "  {i}: #{:02x}{:02x}{:02x}  L*{:5.1} a*{:6.1} b*{:6.1}  {:5.1} %  sebaran {:.1}{tag}",
+                            c.rgb[0],
+                            c.rgb[1],
+                            c.rgb[2],
+                            c.lab[0],
+                            c.lab[1],
+                            c.lab[2],
+                            c.fraction * 100.0,
+                            c.spread
+                        );
+                    }
+                }
             }
         }
         Command::Status {

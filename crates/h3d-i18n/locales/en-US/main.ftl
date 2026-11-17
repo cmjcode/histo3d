@@ -793,3 +793,64 @@ count-density = Density per tissue
 count-params-hash = Parameter hash
 count-clear = Clear markers
 count-done = { $n } objects (range { $lo } to { $hi })
+
+
+# --- 2D gland objects (Labels and proposals drawer, ADR 0004) ---
+glands-title = 2D gland objects
+glands-hint = One object per gland (epithelial ring with its lumen) or solid nest, from the image at 1–4 µm/px; smooth star-convex shapes with separators between objects so the 3D reconstruction follows each gland. The result is a proposal
+glands-mpp = Working scale (µm/px)
+glands-sigma = Epithelium map smoothing (µm)
+glands-min-ring = Minimum epithelial ring fraction
+glands-min-area = Minimum object area (µm²)
+glands-star-hull = Star-convex shape (fill concavities)
+glands-smooth = Edge smoothing (degrees)
+glands-result = { $n } "{ $label }" objects (range { $lo } to { $hi })
+glands-with-lumen = With lumen
+glands-stain = Stain
+glands-stain-macenko = Macenko estimate
+glands-stain-ruifrok = fixed Ruifrok
+glands-done = { $n } gland objects proposed (range { $lo } to { $hi })
+glands-preset = Preset
+glands-preset-gland = Glands (epithelium + lumen)
+glands-preset-solid = Solid tumour nests
+glands-preset-vessel = Vessels / blood
+glands-palette-hint = Extract this slice's colour palette first, then pick the tissue colours to turn into objects
+glands-palette-get = Extract colour palette
+glands-palette-refresh = Re-extract palette
+glands-palette-done = Colour palette ready; preset colours selected
+glands-pick-hint = Click a swatch to select or deselect (dark to light)
+glands-color-share = Tissue share
+glands-color-white = white: glass, lumen, fat
+glands-tolerance = Colour tolerance
+glands-size = Object size
+glands-size-small = Small
+glands-size-medium = Medium
+glands-size-large = Large
+glands-advanced = Advanced
+glands-mode-color = Use palette colours (off: haematoxylin threshold)
+
+# --- Automatic cell count (Labels and proposals drawer) ---
+cells-title = Count cells
+cells-hint = Detects nuclei directly from the image and draws their contours (StarDist when a model is installed, otherwise classic watershed); no labels, project unchanged
+cells-method-watershed = Classic watershed (H threshold + EDT, QuPath-style)
+cells-method-classic = Classic LoG (nucleus centres only, circles)
+cells-h-threshold = Hematoxylin OD threshold
+cells-no-model = No nuclei model yet; export StarDist with script/export_stardist_onnx.py and import it in the AI detection drawer
+cells-in-view = Visible region only (with nucleus contours)
+cells-fill = Fill nucleus contours
+cells-merge-solidity = Merge cell fragments (solidity)
+cells-run = Detect and count cells
+cells-result = { $n } nuclei (range { $lo } to { $hi })
+cells-density = Nuclei density per tissue
+cells-median-area = Median nucleus area
+cells-overlay-count = Count: { $n } ({ $lo }-{ $hi })
+cells-done = { $n } nuclei detected (range { $lo } to { $hi })
+cells-method-whole = Whole objects (no splitting; each connected region = 1 object)
+cells-whole-hint = An epithelial band or ring is counted as one object; the lumen stays a hole. The number is an object count, not a cell count.
+cells-close-gap = Close gaps (µm)
+cells-min-area = Minimum object area (µm²)
+cells-result-objects = { $n } objects (range { $lo } to { $hi })
+cells-done-objects = { $n } objects detected (range { $lo } to { $hi })
+cells-density-objects = Object density per tissue
+cells-median-area-objects = Median object area
+cells-whole-coarse = Large region: computed at { $mpp } µm/px to fit in memory

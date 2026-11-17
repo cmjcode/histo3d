@@ -17,15 +17,19 @@
 
 pub mod color;
 pub mod components;
+pub mod contour;
+pub mod convex_merge;
 pub mod count;
 pub mod edt;
 pub mod error;
 pub mod fft;
 pub mod filters;
+pub mod glands;
 pub mod ihc;
 pub mod metrics;
 pub mod morphology;
 pub mod nuclei;
+pub mod palette;
 pub mod phantom;
 pub mod pyramid;
 pub mod threshold;
@@ -34,13 +38,17 @@ pub mod warp;
 pub mod watershed;
 
 pub use color::{
-    deconvolve, hematoxylin_channel, od_of, od_total, percentile, percentile_stretch, rgb_to_od,
-    StainMatrix, DAB, EOSIN, HEMATOXYLIN,
+    deconvolve, estimate_stains_macenko, hematoxylin_channel, od_of, od_total, percentile,
+    percentile_stretch, rgb_to_od, StainMatrix, DAB, EOSIN, HEMATOXYLIN,
 };
 pub use components::{
     component_areas, label_components, label_components_conn, largest_component,
     merge_small_regions, remove_small_components, Connectivity,
 };
+pub use contour::{
+    chaikin_closed, label_contours, label_hole_contours, signed_area, simplify_closed, trace_outer,
+};
+pub use convex_merge::merge_convex_regions;
 pub use count::{
     count_objects, count_objects_with_uncertainty, label_objects, BorderRule, CountEstimate,
     CountParams, Object2D, ObjectCount, UNCERTAINTY_VARIANTS,
@@ -52,14 +60,24 @@ pub use edt::{
 pub use error::ImgError;
 pub use fft::{fft2_real, ifft2, phase_correlation};
 pub use filters::{box_sum, gaussian_blur_f32, hann_window_2d, local_minima, log_filter};
+pub use glands::{
+    instances_to_mask, segment_glands, EpitheliumSource, Gland, GlandParams, GlandSegmentation,
+    StainEstimate,
+};
 pub use ihc::{
     allred_proportion_score, score_area_based, score_nuclear, tps_cps, AreaScore, IhcThresholds,
     NuclearScore,
 };
 pub use metrics::{dice, moments, mutual_information, ncc_masked, Moments};
-pub use morphology::{close, dilate_disc, erode_disc, fill_holes, fill_narrow_mouthed_holes, open};
+pub use morphology::{
+    close, dilate_disc, erode_disc, fill_holes, fill_narrow_mouthed_holes, fill_small_holes, open,
+};
 pub use nuclei::{
     detect_nuclei, disc_mean, measure_chromogen, nuclei_density_per_mm2, NucleiParams, Nucleus,
+};
+pub use palette::{
+    color_distance, color_mask, delta_e, extract_palette, lab_to_rgb, rgb_to_lab, ColorPreset,
+    Palette, PaletteColor, DEFAULT_K,
 };
 pub use pyramid::{
     downsample2_attr_weighted, downsample2_f32, downsample2_label_mode, downsample2_rgba, half_size,
@@ -67,4 +85,4 @@ pub use pyramid::{
 pub use threshold::{otsu, otsu_masked};
 pub use tissue::{apply_tissue_alpha, mask_to_alpha, tissue_alpha, tissue_mask, FEATHER_PX};
 pub use warp::{resize_f32, warp_affine_f32, warp_affine_rgba, warp_affine_u8, Interp};
-pub use watershed::split_touching;
+pub use watershed::{split_on_field, split_touching};

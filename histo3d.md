@@ -872,6 +872,33 @@ pembukaan/penutupan morfologi dan buang komponen kecil. Hasilnya **usulan**:
 ditampilkan sebagai lapisan sementara, baru masuk `LabelStore` setelah
 pengguna menekan "Terima".
 
+**Objek 2D kelenjar (ADR 0004, `h3d_imgproc::glands`).** Satuan objek
+untuk rekonstruksi 3D adalah kelenjar (cincin epitel beserta lumen), sarang
+padat, atau pembuluh, bukan inti sel. Pada skala 1–2 µm/px: vektor pewarna
+per slide (Macenko, cadangan Ruifrok) → peta epitel (kanal H Gauss σ 4 µm,
+Otsu di dalam jaringan) → lumen dari lubang cincin epitel tertutup dan dari
+piksel terang yang lolos uji rasio cincin → watershed berpenanda di atas
+`−jarak ke lumen` (sarang padat: watershed EDT) → bentuk *star-convex*
+halus (star hull dari piksel EDT maksimum, Gauss melingkar 6°; convex hull
+murni ditolak karena menelan stroma dan menyatukan tetangga). Usulan biner
+diberi **pemisah** `ceil(mpp_label/mpp) + 1` piksel antar objek sehingga
+setelah Terima tiap kelenjar tetap komponen tersendiri bagi penautan 8.6.
+Jumlah dilaporkan dengan rentang tanpa jalan ulang (saringan luas × 1,25,
+rasio cincin ± 0,15). Semua parameter berhash `h3d-glands-v1`.
+
+**Hitung sel mode "objek utuh" (ADR 0003 adendum, `h3d_segment::regions`).**
+Bila yang dihitung adalah struktur (pita/cincin epitel, gumpalan), bukan
+sel satu per satu: kanal H Gauss → **satu** ambang `maks(lantai, Otsu)`
+untuk seluruh wilayah (raster selebar wilayah dirakit dari tile
+bertumpang tindih, sehingga objek yang lebih besar dari tile tidak
+terpotong) → buka 0,5 µm → tutup 1,5 µm → isi hanya lubang ≤ 50 µm²
+(lumen tetap lubang) → **komponen tersambung = objek**, tanpa watershed.
+Kontur luar + kontur lubang; resolusi kerja diturunkan bila raster
+melebihi `Budgets::cell_region_bytes`. Metode `regions-classic-v1`, hash
+`h3d-cells-regions-v1`; `n_min` = objek dengan skor ≥ 1,2 × ambang. Di app:
+pilihan "Objek utuh" di panel Hitung sel; di CLI: `h3d cells --method whole
+[--close-um] [--min-area]`. Angkanya jumlah objek, bukan jumlah sel.
+
 #### 8.5.4 Segmentasi AI
 
 ```rust
@@ -911,6 +938,14 @@ Alur inferensi:
 
 Backend: `TractSegmenter` (bawaan, Rust murni, CPU) dan `OrtSegmenter` (fitur
 `ort-coreml`). Inferensi diproses tile demi tile agar memori tetap.
+
+**Head inti (`"task": "nuclei"`, StarDist).** `model.json` yang sama dengan
+`classes: []` dan bagian `nuclei` (`n_rays`, `grid`, `prob_threshold`,
+`nms_threshold`, `layout` nchw/nhwc, `percentile_norm`, `threshold_delta`,
+`margin_px`); model mengeluarkan peta probabilitas (1 kanal) dan jarak radial
+(`n_rays` kanal) pada `S/grid`. Dipakai `h3d_segment::cells` untuk deteksi dan
+penghitungan sel per tile (ADR 0003); tidak pernah menjadi usulan label.
+Ekspor dari StarDist Keras: `script/export_stardist_onnx.py`.
 
 #### 8.5.5 Interpolasi bentuk antar irisan
 
@@ -1209,6 +1244,7 @@ h3d register PROYEK.h3d [--model affine] [--metric ncc] [--reference N] [--stric
 h3d qc PROYEK.h3d                       # tabel NCC/Dice/rasio luas per irisan
 h3d labels import PROYEK.h3d --slide N --geojson ANOT.geojson
 h3d segment PROYEK.h3d --model DIR [--slides 1,5,9]
+h3d glands PROYEK.h3d [--label Kelenjar] [--mpp-um 2] [--accept [--replace]] [--overlay-dir DIR] [--json]   # objek 2D kelenjar (ADR 0004)
 h3d interpolate PROYEK.h3d --label Tumor
 h3d reconstruct PROYEK.h3d [--sxy 16] [--smooth 10] [--decimate 0.5]   # + out/mesh/mesh.glb, out/volume/labels.nii.gz
 h3d measure PROYEK.h3d [--json]
@@ -1781,6 +1817,7 @@ didokumentasikan pasti; angka ini titik awal yang harus diukur di H0.
 | Cache tile CPU | 2 GB | 384 MB |
 | Cache tile GPU | 1 GB | 256 MB |
 | Set kerja rekonstruksi | 4 GB | 1 GB |
+| Raster hitung "objek utuh" (`cell_region_bytes`) | 768 MB | 192 MB |
 | Thread dekode | 4 | 2 |
 
 Anggaran berada di satu struct `Budgets` yang dipilih saat mulai menurut
@@ -2228,6 +2265,8 @@ Salin ke `CLAUDE.md` repo baru.
 - Taubin (1995) — penghalusan mesh tanpa penyusutan.
 - Estimator Cavalieri — stereologi klasik untuk volume dari penampang.
 - Al-Kofahi dkk. (2010) — deteksi inti LoG multiskala.
+- Macenko dkk. (2009) — estimasi vektor pewarna per slide.
+- Naik dkk. (2008); Nguyen dkk. (2012) — segmentasi kelenjar prostat berpandu lumen.
 - McCarty dkk. (1985) — H-score; Allred dkk. (1998) — skor Allred ER/PR.
 - Salgado dkk. (2015) — rekomendasi International TIL Working Group.
 - Lugli dkk. (2017) — konsensus ITBCC untuk tumor budding.

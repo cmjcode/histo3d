@@ -228,10 +228,14 @@ pub const OBJECT_ISOLATE: MaterialIcon = icons::ICON_HIGHLIGHT_ALT;
 pub const OBJECT_LIST: MaterialIcon = icons::ICON_BUBBLE_CHART;
 /// Penghitungan objek 2D per irisan.
 pub const COUNT: MaterialIcon = icons::ICON_NUMBERS;
+/// Deteksi dan penghitungan sel otomatis.
+pub const CELLS: MaterialIcon = icons::ICON_SCATTER_PLOT;
 /// Sembunyikan latar kaca/putih (masker jaringan).
 pub const HIDE_BACKGROUND: MaterialIcon = icons::ICON_BACKGROUND_REPLACE;
+/// Objek 2D kelenjar/struktur (segmentasi berpandu lumen).
+pub const GLANDS: MaterialIcon = icons::ICON_BUBBLE_CHART;
 
-pub const ALL: [MaterialIcon; 104] = [
+pub const ALL: [MaterialIcon; 105] = [
     MENU,
     BACK,
     STACK_3D,
@@ -336,4 +340,5 @@ pub const ALL: [MaterialIcon; 104] = [
     OBJECT_LIST,
     COUNT,
     HIDE_BACKGROUND,
+    GLANDS,
 ];
